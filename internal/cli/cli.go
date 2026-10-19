@@ -60,6 +60,10 @@ var commands = []command{
 	{"jobs", false, false, cmdJobs},
 	// DJA-283: A2A agent and client (serve and reply gate NOWRITE themselves)
 	{"a2a", false, true, cmdA2A},
+	// DJA-430: the forced command of the dispatch ssh key
+	// (no config dir needed: the gate refuses without one, and an accepted
+	// job or outbox applies its own requirement)
+	{"gate", false, false, cmdGate},
 }
 
 // Run executes args[0] as a command and returns its exit code. An unknown

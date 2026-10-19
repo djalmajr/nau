@@ -16,6 +16,10 @@ commands:
   job <sub> [args]                  forward a dispatcher-facing job subcommand to soho
                                     (start, status, wait, events, collect, amend, send, ack,
                                     cancel, close, list)
+  gate                              forced command of the dispatch ssh key: run the text of
+                                    SSH_ORIGINAL_COMMAND only when it is "nau job <sub> ..."
+                                    (the public subcommands) or "nau outbox ...", else refuse
+                                    with exit 2 (takes no arguments; see docs/gate.md)
   route [--machine <label>]         choose the machine for a new job (dispatcher side, read-only)
   serve [--listen <host:port>] [--db <path>] [--machines <label,...>]
                         [--poll-interval <seconds>] [--max-jobs <n>]

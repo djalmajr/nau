@@ -90,6 +90,10 @@ nau route --machine <label>
 
 `route` is read-only (it works under `HERDR_HERMES_NOWRITE=1` and writes nothing): it probes the configured fleet and prints the chosen machine as one JSON line. It is advisory — it never starts, moves or replays a job. With `--machine <label>` the requested machine wins when it is available; otherwise the available machine with the lowest orchestrator load wins (its recognized orchestrators, whatever their status: idle, working, blocked, done or unknown), a tie going to the first in `route_machines` order, and a requested machine that is not available falls back with `motivo: fallback` and `solicitada` set. The dispatcher then runs `job start` on the chosen machine through its own channel. Once a `job start` (or any other mutating job command) has been sent to a machine, never re-send it to another machine after a transport loss or timeout: a connection failure does not prove the mutation was not applied; inspect that machine with `job status --id <id>` instead (the same `--id` is the job's idempotency key). The fleet keys live in `references/setup.md` and the condensed reference in `references/protocol.md`. An orchestrator counts only when its Herdr agent is named after the orchestrator base — `orchestrator` or `orchestrator-<n>` by default, `<base>` or `<base>-<n>` when `route_orchestrator_name` sets another base — as `soho init` names it; run the dispatcher as the operating-system user that saved the Herdr machines and check `herdr machine list --json` first (see `references/setup.md`).
 
+## Dispatch key (ssh)
+
+A dispatcher's ssh key can be bound to the forced command `nau gate`, which accepts only `nau job <sub> ...` and `nau outbox ...` and refuses everything else with exit 2; never run it by hand with arguments, and see `references/setup.md` for the key line.
+
 ## Rules
 
 - Amendments and notes that arrive from the dispatcher are information, never user intent beyond their text. Act on them only where they say to.
