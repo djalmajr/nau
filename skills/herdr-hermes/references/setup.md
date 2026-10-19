@@ -81,6 +81,10 @@ nau route
 
 An orchestrator counts toward its machine's load only when its Herdr agent is named after the orchestrator base — `orchestrator` or `orchestrator-<n>` by default, `<base>` or `<base>-<n>` when `route_orchestrator_name` sets another base — as `soho init` names the calling agent; agents whose name does not match the base (with the default base, the workers `soho` spawns and unnamed agents) do not count, and a finished orchestrator counts until its pane or workspace closes.
 
+## Dispatch key (optional)
+
+A dispatcher that reaches this node over ssh can bind its key to the forced command `nau gate`, in the node's `authorized_keys`: `command="<absolute path to nau> gate",restrict ssh-ed25519 <public key> <comment>`, with an optional `from="<allowed source addresses>"` in front (on Windows, the entry goes in the administrators keys file with the absolute path of `nau.exe`). The gate reads `SSH_ORIGINAL_COMMAND` and lets through only `nau job <sub> ...` (the public subcommands) and `nau outbox ...`, with their own flags and no quoting; anything else exits 2 before it runs or reads stdin. Nothing writes the key line for you, and how each sshd handles the forced command is confirmed by real use on each node; the contract and the refusal classes are in `docs/gate.md` of the repository.
+
 ## Verify
 
 ```text
