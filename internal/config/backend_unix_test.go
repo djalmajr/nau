@@ -20,7 +20,7 @@ func backendFixture(t *testing.T) string {
 }
 
 func TestConditionalBackendSafety(t *testing.T) {
-	for _, kind := range []string{"safe", "spaces", "relative", "LF", "CR", "NUL", "missing", "directory", "not executable", "writable file", "writable parent", "writable ancestor", "sticky trusted", "symlink safe", "symlink writable target", "symlink writable parent", "symlink intermediate writable"} {
+	for _, kind := range []string{"safe", "spaces", "relative", "LF", "CR", "NUL", "trailing space", "missing", "directory", "not executable", "writable file", "writable parent", "writable ancestor", "sticky trusted", "symlink safe", "symlink writable target", "symlink writable parent", "symlink intermediate writable"} {
 		t.Run(kind, func(t *testing.T) {
 			path := backendFixture(t)
 			candidate := path
@@ -39,6 +39,13 @@ func TestConditionalBackendSafety(t *testing.T) {
 				candidate += "\rmachine_label=injected"
 			case "NUL":
 				candidate += "\x00"
+			case "trailing space":
+				// The file with the space exists and is safe, but Load would
+				// trim the stored value and select another path.
+				candidate = path + " "
+				if err := os.Rename(path, candidate); err != nil {
+					t.Fatal(err)
+				}
 			case "missing":
 				candidate += "-missing"
 			case "directory":

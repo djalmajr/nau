@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -53,9 +54,13 @@ func TestSetPreservesText(t *testing.T) {
 			if err != nil || string(got) != tc.want {
 				t.Fatalf("got %q, want %q; err=%v", got, tc.want, err)
 			}
-			info, err := os.Stat(path)
-			if err != nil || info.Mode().Perm() != 0600 {
-				t.Fatalf("mode: %v %v", info, err)
+			// Windows has no POSIX mode bits; the file there is protected
+			// by its ACL.
+			if runtime.GOOS != "windows" {
+				info, err := os.Stat(path)
+				if err != nil || info.Mode().Perm() != 0600 {
+					t.Fatalf("mode: %v %v", info, err)
+				}
 			}
 		})
 	}

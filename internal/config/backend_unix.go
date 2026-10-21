@@ -15,7 +15,9 @@ func backendExecutable(path string, info os.FileInfo) bool {
 	return info.Mode().Perm()&0111 != 0 && unix.Access(path, unix.X_OK) == nil
 }
 
-func trustedBackendChain(path string) error {
+// trustedBackendChain ignores near on POSIX: write access to any ancestor
+// already lets its entries be renamed, so every level gets the same check.
+func trustedBackendChain(path string, _ int) error {
 	for {
 		info, err := os.Lstat(path)
 		if err != nil {

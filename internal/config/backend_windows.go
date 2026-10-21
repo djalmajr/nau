@@ -17,8 +17,14 @@ func backendExecutable(path string, _ os.FileInfo) bool {
 	return err == nil
 }
 
-func trustedBackendChain(path string) error {
-	for {
+// trustedBackendChain checks path and its ancestors. The first near levels
+// (the backend and the directory that holds it) refuse any broad write
+// right, since a planted file beside the executable is a real risk. The
+// ancestors above only refuse the rights that can replace an entry of the
+// chain: the default ACL of a volume root lets Authenticated Users or Users
+// create a folder there, which replaces nothing.
+func trustedBackendChain(path string, near int) error {
+	for level := 0; ; level++ {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
 			return fmt.Errorf("cannot inspect backend ACL")
@@ -27,7 +33,11 @@ func trustedBackendChain(path string) error {
 		if err != nil {
 			return fmt.Errorf("cannot inspect backend DACL")
 		}
-		if err := trustedBackendDACL(dacl); err != nil {
+		mask := backendWriteMask
+		if level >= near {
+			mask = ancestorReplaceMask
+		}
+		if err := trustedBackendDACL(dacl, mask); err != nil {
 			return err
 		}
 		parent := filepath.Dir(path)
@@ -38,13 +48,17 @@ func trustedBackendChain(path string) error {
 	}
 }
 
-func trustedBackendDACL(dacl *windows.ACL) error {
+const fileDeleteChild = 0x40
+
+const backendWriteMask windows.ACCESS_MASK = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | fileDeleteChild
+
+const ancestorReplaceMask windows.ACCESS_MASK = windows.GENERIC_ALL | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE | fileDeleteChild
+
+func trustedBackendDACL(dacl *windows.ACL, writeMask windows.ACCESS_MASK) error {
 	// A null DACL grants everyone full access. An empty DACL grants none.
 	if dacl == nil {
 		return fmt.Errorf("backend has an unrestricted DACL")
 	}
-	const fileDeleteChild = 0x40
-	const writeMask = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE | windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | fileDeleteChild
 	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
