@@ -66,49 +66,24 @@ function Fail([string]$Message) {
 }
 
 function Set-BackendPin {
-    if ([string]::IsNullOrEmpty($env:APPDATA)) {
-        Write-Host 'nau install: warning: cannot determine the config directory; herdr_soho_bin unchanged'
-        return
-    }
-    $configPath = Join-Path $env:APPDATA 'herdr-hermes\config'
-    # A configuration nau itself cannot load is left alone: the pin
-    # would fail, and the install never failed on it before.
+    # Go owns classification, path safety and the locked conditional write.
     $null = Invoke-Quiet $NauTarget @('config', 'list')
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
         return
     }
-    $stored = ''
-    try {
-        if (Test-Path -LiteralPath $configPath) {
-            $configText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($configPath))
-            foreach ($line in ($configText -split "`n")) {
-                $line = $line.Trim()
-                # Ordinal comparisons, like Go: a culture-aware comparison
-                # ignores zero-width characters and would misread a value.
-                if ($line.Length -eq 0 -or $line[0] -eq [char]'#') { continue }
-                $equals = $line.IndexOf([char]'=')
-                if ($equals -lt 0) { throw 'Invalid configuration line' }
-                if ([string]::Equals($line.Substring(0, $equals).Trim(), 'herdr_soho_bin', [StringComparison]::Ordinal)) {
-                    $stored = $line.Substring($equals + 1).Trim()
-                }
-            }
-        }
-    }
-    catch {
-        Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
-        return
-    }
-    if ($stored.Length -ne 0 -and -not [string]::Equals($stored, 'herdr-soho', [StringComparison]::Ordinal)) {
-        Write-Host 'nau install: herdr_soho_bin is set explicitly; keeping it'
-        return
-    }
     foreach ($name in @('soho', 'herdr-soho')) {
         $backend = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($backend -and [IO.Path]::IsPathRooted($backend.Source)) {
-            $null = & $NauTarget config set herdr_soho_bin $backend.Source
-            if ($LASTEXITCODE -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
-            Write-Host 'nau install: herdr_soho_bin pinned to the absolute path of the backend found on the PATH'
+        if ($backend) {
+            # Native stderr warnings must pass through even in Windows PowerShell 5.1.
+            $pinPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $null = & $NauTarget config set --if-automatic herdr_soho_bin $backend.Source
+                $pinExit = $LASTEXITCODE
+            }
+            finally { $ErrorActionPreference = $pinPreference }
+            if ($pinExit -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
             return
         }
     }

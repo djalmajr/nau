@@ -51,69 +51,20 @@ EOF
 }
 
 pin_backend() {
-    # The config directory as Go's os.UserConfigDir resolves it: an
-    # absolute XDG_CONFIG_HOME on Linux needs no HOME.
-    BACKEND_CONFIG=""
-    if [ "$OS" = "Darwin" ]; then
-        if [ -n "${HOME:-}" ]; then
-            BACKEND_CONFIG="$HOME/Library/Application Support/herdr-hermes/config"
-        fi
-    else
-        case "${XDG_CONFIG_HOME:-}" in
-        /*) BACKEND_CONFIG="$XDG_CONFIG_HOME/herdr-hermes/config" ;;
-        *)
-            if [ -n "${HOME:-}" ]; then
-                BACKEND_CONFIG="$HOME/.config/herdr-hermes/config"
-            fi
-            ;;
-        esac
-    fi
-    if [ -z "$BACKEND_CONFIG" ]; then
-        echo "nau install: warning: cannot determine the config directory; herdr_soho_bin unchanged" >&2
-        return
-    fi
-    # A configuration nau itself cannot load is left alone: the pin
-    # would fail, and the install never failed on it before.
+    # Go owns classification, path safety and the locked conditional write.
     if ! "$NAU" config list >/dev/null 2>&1; then
         echo "nau install: warning: cannot read the config file; herdr_soho_bin unchanged" >&2
         return
     fi
-    STORED_BACKEND=""
-    if [ -e "$BACKEND_CONFIG" ]; then
-        # Match Load: trim lines and fields, skip comments, split once,
-        # and keep the last occurrence. Never print configuration data.
-        # Match Go's Unicode whitespace in UTF-8, independent of locale.
-        if ! STORED_BACKEND="$(LC_ALL=C awk '
-            BEGIN { space = "([\011\012\013\014\015 ]|\302\205|\302\240|\341\232\200|\342\200[\200-\212]|\342\200[\250\251\257]|\342\201\237|\343\200\200)" }
-            function trim(s) { sub("^" space "+", "", s); sub(space "+$", "", s); return s }
-            { line = trim($0); if (line == "" || substr(line, 1, 1) == "#") next
-              eq = index(line, "="); if (!eq) exit 1
-              if (trim(substr(line, 1, eq - 1)) == "herdr_soho_bin") value = trim(substr(line, eq + 1)) }
-            END { print value }
-        ' "$BACKEND_CONFIG" 2>/dev/null)"; then
-            echo "nau install: warning: cannot read the config file; herdr_soho_bin unchanged" >&2
-            return
-        fi
-    fi
-    case "$STORED_BACKEND" in
-    ""|herdr-soho) ;;
-    *)
-        echo "nau install: herdr_soho_bin is set explicitly; keeping it" >&2
-        return
-        ;;
-    esac
     for BACKEND_NAME in soho herdr-soho; do
         BACKEND_PATH="$(command -v "$BACKEND_NAME" 2>/dev/null)" || BACKEND_PATH=""
         case "$BACKEND_PATH" in
         /*)
-            if [ -f "$BACKEND_PATH" ] && [ -x "$BACKEND_PATH" ]; then
-                if ! "$NAU" config set herdr_soho_bin "$BACKEND_PATH" >/dev/null; then
-                    echo "nau install: nau config set herdr_soho_bin failed" >&2
-                    exit 1
-                fi
-                echo "nau install: herdr_soho_bin pinned to the absolute path of the backend found on the PATH" >&2
-                return
+            if ! "$NAU" config set --if-automatic herdr_soho_bin "$BACKEND_PATH" >/dev/null; then
+                echo "nau install: nau config set herdr_soho_bin failed" >&2
+                exit 1
             fi
+            return
             ;;
         esac
     done

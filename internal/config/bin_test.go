@@ -224,8 +224,8 @@ func TestSetOtherKeysKeepStoredForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "herdr_soho_bin=\n") {
-		t.Errorf("a set of another key must keep the empty auto form in the file, got %q", data)
+	if string(data) != "machine_label=m1\n" {
+		t.Errorf("setting another key must preserve the absent automatic backend record, got %q", data)
 	}
 	if strings.Contains(string(data), "herdr_soho_bin=soho") {
 		t.Errorf("the resolved path must not be persisted: %q", data)

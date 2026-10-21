@@ -77,6 +77,8 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 		explicit, missing, failGo, failSet, repeat, unreadable bool
 		// linuxEmptyHome runs with HOME empty (Linux only); noXDG also drops XDG_CONFIG_HOME.
 		linuxEmptyHome, noXDG bool
+		relativeCurrent       bool
+		unsafeKind            string
 	}{
 		{name: "no file", missing: true, backend: "soho"},
 		{name: "missing key", config: "# configuration\nmachine_label=node\n", backend: "soho"},
@@ -104,9 +106,15 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 		// os.UserConfigDir accepts an absolute XDG_CONFIG_HOME without HOME on Linux.
 		{name: "XDG without HOME", missing: true, backend: "soho", linuxEmptyHome: true},
 		{name: "no config dir", missing: true, backend: "soho", linuxEmptyHome: true, noXDG: true},
+		{name: "newline path refused", config: "# keep\nmachine_label=original\nherdr_soho_bin=\n", backend: "soho", unsafeKind: "newline"},
+		{name: "writable backend refused", config: "# keep\nmachine_label=original\nherdr_soho_bin=\n", backend: "soho", unsafeKind: "writable"},
+		{name: "relative PATH preserves absolute discovery", missing: true, backend: "soho", relativeCurrent: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if windows && (tc.unsafeKind != "" || tc.relativeCurrent) {
+				t.Skip("POSIX path and mode fixtures; Windows ACL cases are in config tests")
+			}
 			if tc.linuxEmptyHome && (windows || runtime.GOOS != "linux") {
 				t.Skip("an empty HOME only has a defined config directory on Linux")
 			}
@@ -116,6 +124,9 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			local := filepath.Join(root, "local space")
 			goDir := filepath.Join(root, "go space")
 			backendDir := filepath.Join(root, "backend space")
+			if tc.unsafeKind == "newline" {
+				backendDir += "\nmachine_label=injected\n#"
+			}
 			tmp := filepath.Join(root, "temp space")
 			bin := filepath.Join(root, "bin space")
 			for _, dir := range []string{home, app, local, goDir, backendDir, tmp} {
@@ -138,6 +149,18 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			if tc.backend == "soho" {
 				write(filepath.Join(backendDir, "herdr-soho"+suffix), helperBytes)
 			}
+			if tc.relativeCurrent {
+				if err := os.Remove(filepath.Join(backendDir, "herdr-soho"+suffix)); err != nil {
+					t.Fatal(err)
+				}
+				backendPath = filepath.Join(goDir, "herdr-soho"+suffix)
+				write(backendPath, helperBytes)
+			}
+			if tc.unsafeKind == "writable" {
+				if err := os.Chmod(backendDir, 0777); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cfgRoot := app
 			if runtime.GOOS == "darwin" {
 				cfgRoot = filepath.Join(home, "Library", "Application Support")
@@ -155,6 +178,16 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				write(cfgFile, []byte(initial))
 			}
 			paths := []string{goDir, backendDir}
+			if tc.relativeCurrent {
+				cwd, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				paths[1], err = filepath.Rel(cwd, backendDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			if windows {
 				system := filepath.Join(os.Getenv("SystemRoot"), "System32")
 				paths = append(paths, system, filepath.Join(system, "WindowsPowerShell", "v1.0"))
@@ -186,6 +219,24 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			}
 			if tc.failSet {
 				env = append(env, "HERDR_HERMES_NOWRITE=1")
+			}
+			if tc.relativeCurrent {
+				// Shells differ: some return a relative lookup and others
+				// prefix the working directory. Assert the actual discovery
+				// contract before running the real installer.
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				lookup := exec.CommandContext(ctx, shell, "-c", "command -v soho")
+				lookup.Env, lookup.WaitDelay = env, time.Second
+				out, err := lookup.Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				discovered := strings.TrimSuffix(string(out), "\n")
+				if filepath.IsAbs(discovered) {
+					backendPath = discovered
+				}
+				t.Logf("shell discovery=%q; expected pin=%q", discovered, backendPath)
 			}
 			run := func(want int) string {
 				t.Helper()
@@ -234,7 +285,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			}
 			output := run(wantExit)
 			data, readErr := os.ReadFile(cfgFile)
-			if tc.failGo || tc.failSet || tc.backend == "" || tc.explicit || tc.unreadable || tc.noXDG {
+			if tc.failGo || tc.failSet || tc.backend == "" || tc.explicit || tc.unreadable || tc.noXDG || tc.unsafeKind != "" {
 				if tc.missing {
 					if !os.IsNotExist(readErr) {
 						t.Fatal("config unexpectedly created")
@@ -247,13 +298,16 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 						t.Fatal("go failure touched bin directory")
 					}
 				}
-				if tc.explicit && !strings.Contains(output, "nau install: herdr_soho_bin is set explicitly; keeping it") {
+				if tc.unsafeKind != "" && !strings.Contains(output, "unsafe backend") {
+					t.Fatalf("unsafe backend warning absent: %s", output)
+				}
+				if tc.explicit && !strings.Contains(output, "herdr_soho_bin is set explicitly; keeping it") {
 					t.Fatal("missing explicit-value message")
 				}
 				if tc.backend == "" && !strings.Contains(output, "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend") {
 					t.Fatal("missing backend warning")
 				}
-				if tc.noXDG && !strings.Contains(output, "nau install: warning: cannot determine the config directory; herdr_soho_bin unchanged") {
+				if tc.noXDG && !strings.Contains(output, "nau install: warning: cannot read the config file; herdr_soho_bin unchanged") {
 					t.Fatal("missing config-directory warning")
 				}
 				if tc.unreadable && !strings.Contains(output, "nau install: warning: cannot read the config file; herdr_soho_bin unchanged") {
@@ -275,10 +329,35 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				}
 			}
 			if stored != backendPath {
-				t.Fatal("stored backend is not the discovered absolute path")
+				t.Fatalf("stored backend=%q want=%q; installer output=%s", stored, backendPath, output)
 			}
-			if !strings.Contains(output, "nau install: herdr_soho_bin pinned to the absolute path of the backend found on the PATH") {
-				t.Fatal("missing pin message")
+			// The pin must preserve every other byte, including duplicates,
+			// comments, whitespace and CRLF terminators.
+			lines := strings.SplitAfter(initial, "\n")
+			last := -1
+			for i, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				key, _, ok := strings.Cut(trimmed, "=")
+				if ok && strings.TrimSpace(key) == "herdr_soho_bin" {
+					last = i
+				}
+			}
+			want := initial
+			if last >= 0 {
+				ending := "\n"
+				if strings.HasSuffix(lines[last], "\r\n") {
+					ending = "\r\n"
+				}
+				lines[last] = "herdr_soho_bin=" + backendPath + ending
+				want = strings.Join(lines, "")
+			} else {
+				want += "herdr_soho_bin=" + backendPath + "\n"
+			}
+			if string(data) != want {
+				t.Fatalf("unrelated config bytes changed: got=%q want=%q", data, want)
 			}
 			if tc.repeat {
 				second := run(0)
@@ -286,7 +365,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				if err != nil || !bytes.Equal(data, after) {
 					t.Fatal("second install changed config bytes")
 				}
-				if !strings.Contains(second, "nau install: herdr_soho_bin is set explicitly; keeping it") {
+				if !strings.Contains(second, "herdr_soho_bin is set explicitly; keeping it") {
 					t.Fatal("second install did not keep pin")
 				}
 			}

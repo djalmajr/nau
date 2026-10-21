@@ -33,8 +33,8 @@ type Config struct {
 	RouteProbeTimeoutS    int    `json:"route_probe_timeout_s"`
 
 	// herdrSohoBinStored is the raw value the configuration file holds
-	// for herdr_soho_bin (the empty value is the auto form); Set rewrites
-	// the file with this form, never with the resolved path.
+	// for herdr_soho_bin (the empty value is the auto form), never the
+	// resolved path. Updating other keys preserves this record verbatim.
 	herdrSohoBinStored string
 }
 
@@ -105,15 +105,18 @@ func ResolveBin(stored string) string {
 // herdr_soho_bin value is resolved: the field holds the effective
 // executable, the stored form is kept for the next Set rewrite.
 func Load(dir string) (Config, error) {
-	cfg := defaultConfig()
 	data, err := outbox.ReadReplacedFile(filepath.Join(dir, "config"))
 	if os.IsNotExist(err) {
-		cfg.HerdrSohoBin = ResolveBin(cfg.HerdrSohoBin)
-		return cfg, nil
+		data, err = nil, nil
 	}
 	if err != nil {
-		return cfg, err
+		return defaultConfig(), err
 	}
+	return decodeConfig(data)
+}
+
+func decodeConfig(data []byte) (Config, error) {
+	cfg := defaultConfig()
 	for i, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -184,42 +187,81 @@ func Set(dir, key, value string) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := Load(dir)
+	_, err = setLocked(dir, key, stored, false)
+	return err
+}
+
+// SetIfAutomatic pins only an automatic backend selection. A nonempty warning
+// means no configuration bytes were written; unsafe candidates are not errors.
+func SetIfAutomatic(dir, key, value string) (string, error) {
+	if key != "herdr_soho_bin" {
+		return "", fmt.Errorf("--if-automatic is only valid for herdr_soho_bin")
+	}
+	return setLocked(dir, key, value, true)
+}
+
+func setLocked(dir, key, stored string, automatic bool) (string, error) {
+	unlock, err := lockConfig(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
-	switch key {
-	case "machine_label":
-		cfg.MachineLabel = stored
-	case "dispatcher_url":
-		cfg.DispatcherURL = stored
-	case "herdr_soho_bin":
-		cfg.HerdrSohoBin = ResolveBin(stored)
-		cfg.herdrSohoBinStored = stored
-	case "push_timeout_s":
-		cfg.PushTimeoutS = atoi(stored)
-	case "herdr_bin":
-		cfg.HerdrBin = stored
-	case "route_machines":
-		cfg.RouteMachines = stored
-	case "route_disabled":
-		cfg.RouteDisabled = stored
-	case "route_orchestrator_name":
-		cfg.RouteOrchestratorName = stored
-	case "route_probe_timeout_s":
-		cfg.RouteProbeTimeoutS = atoi(stored)
+	defer unlock()
+	data, err := outbox.ReadReplacedFile(filepath.Join(dir, "config"))
+	if os.IsNotExist(err) {
+		data, err = nil, nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	if err != nil {
+		return "", err
 	}
-	var b strings.Builder
-	for _, k := range Keys() {
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(valueOf(cfg, k))
-		b.WriteString("\n")
+	cfg, err := decodeConfig(data)
+	if err != nil {
+		return "", err
 	}
-	return outbox.WriteFileAtomic(filepath.Join(dir, "config"), []byte(b.String()))
+	if automatic {
+		if !IsAutoBin(cfg.HerdrSohoBinStored()) {
+			return "herdr_soho_bin is set explicitly; keeping it", nil
+		}
+		if err := safeBackend(stored); err != nil {
+			return "warning: unsafe backend; herdr_soho_bin unchanged: " + err.Error(), nil
+		}
+	}
+	return "", outbox.WriteFileAtomic(filepath.Join(dir, "config"), replaceRecord(data, key, stored))
+}
+
+// replaceRecord changes the last matching record (the one Load uses), retaining
+// all other bytes, including duplicate records and each line's terminator.
+func replaceRecord(data []byte, key, value string) []byte {
+	text := string(data)
+	lines := strings.SplitAfter(text, "\n")
+	last := -1
+	eol := "\n"
+	if i := strings.IndexByte(text, '\n'); i > 0 && text[i-1] == '\r' {
+		eol = "\r\n"
+	}
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		k, _, ok := strings.Cut(trimmed, "=")
+		if ok && strings.TrimSpace(k) == key {
+			last = i
+		}
+	}
+	if last >= 0 {
+		ending := ""
+		if strings.HasSuffix(lines[last], "\r\n") {
+			ending = "\r\n"
+		} else if strings.HasSuffix(lines[last], "\n") {
+			ending = "\n"
+		}
+		lines[last] = key + "=" + value + ending
+		return []byte(strings.Join(lines, ""))
+	}
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		text += eol
+	}
+	return []byte(text + key + "=" + value + eol)
 }
 
 // Value returns the effective value of a known key as a string, or
@@ -260,6 +302,9 @@ func (c Config) HerdrSohoBinStored() string {
 // in the configuration file (the trimmed herdr_bin, the normalized route
 // lists).
 func storedValue(key, value string) (string, error) {
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return "", fmt.Errorf("%s: value must not contain CR, LF or NUL", key)
+	}
 	switch key {
 	case "machine_label", "dispatcher_url":
 		return value, nil
@@ -299,25 +344,6 @@ func storedValue(key, value string) (string, error) {
 	default:
 		return "", fmt.Errorf("%w: %q", ErrUnknownKey, key)
 	}
-}
-
-func valueOf(cfg Config, key string) string {
-	// The file keeps the stored form of the backend binary, never the
-	// resolved path: a machine moved or a PATH change must not rewrite
-	// the operator's stored selection.
-	if key == "herdr_soho_bin" {
-		return cfg.herdrSohoBinStored
-	}
-	v, err := cfg.Value(key)
-	if err != nil {
-		return ""
-	}
-	return v
-}
-
-func atoi(s string) int {
-	n, _ := strconv.Atoi(s)
-	return n
 }
 
 // RouteMachineList returns route_machines as a list (nil when empty).

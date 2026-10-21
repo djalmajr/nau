@@ -13,7 +13,7 @@ import (
 // the gate lives here, not in the table entry).
 func cmdConfig(args []string, env Env) int {
 	if len(args) == 0 || (len(args) > 1 && (args[0] == "--help" || args[0] == "-h")) {
-		badUsage(env, "usage: config get <key> | config set <key> <value> | config list")
+		badUsage(env, "usage: config get <key> | config set [--if-automatic] <key> <value> | config list")
 		return 2
 	}
 	switch args[0] {
@@ -53,17 +53,27 @@ func cmdConfig(args []string, env Env) int {
 			_, _ = fmt.Fprintf(env.Stdout, "%s\n", nowriteErrorJSON)
 			return 2
 		}
+		automatic := len(args) > 1 && args[1] == "--if-automatic"
+		if automatic {
+			args = append([]string{args[0]}, args[2:]...)
+		}
 		if len(args) != 3 {
-			badUsage(env, "usage: config set <key> <value>")
+			badUsage(env, "usage: config set [--if-automatic] <key> <value>")
 			return 2
 		}
-		if err := config.Set(env.ConfigDir, args[1], args[2]); err != nil {
+		var warning string
+		var err error
+		if automatic {
+			warning, err = config.SetIfAutomatic(env.ConfigDir, args[1], args[2])
+		} else {
+			err = config.Set(env.ConfigDir, args[1], args[2])
+		}
+		if err != nil {
 			fail(env, 2, "config: "+err.Error())
 			return 2
 		}
 		// Print the stored value: the router lists are normalized on set.
 		value := args[2]
-		var warning string
 		if cfg, err := config.Load(env.ConfigDir); err == nil {
 			if stored, err := cfg.Value(args[1]); err == nil {
 				value = stored
@@ -77,6 +87,9 @@ func cmdConfig(args []string, env Env) int {
 		// changes the exit code: staging an exclusion before the fleet stays
 		// valid.
 		if warning != "" {
+			if automatic {
+				warning = env.program() + ": config: " + warning + "\n"
+			}
 			_, _ = fmt.Fprint(env.Stderr, warning)
 		}
 		return 0
