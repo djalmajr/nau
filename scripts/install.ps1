@@ -84,10 +84,12 @@ function Set-BackendPin {
             $configText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($configPath))
             foreach ($line in ($configText -split "`n")) {
                 $line = $line.Trim()
-                if ($line -eq '' -or $line.StartsWith('#')) { continue }
-                $equals = $line.IndexOf('=')
+                # Ordinal comparisons, like Go: a culture-aware comparison
+                # ignores zero-width characters and would misread a value.
+                if ($line.Length -eq 0 -or $line[0] -eq [char]'#') { continue }
+                $equals = $line.IndexOf([char]'=')
                 if ($equals -lt 0) { throw 'Invalid configuration line' }
-                if ($line.Substring(0, $equals).Trim() -ceq 'herdr_soho_bin') {
+                if ([string]::Equals($line.Substring(0, $equals).Trim(), 'herdr_soho_bin', [StringComparison]::Ordinal)) {
                     $stored = $line.Substring($equals + 1).Trim()
                 }
             }
@@ -97,7 +99,7 @@ function Set-BackendPin {
         Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
         return
     }
-    if ($stored -cne '' -and $stored -cne 'herdr-soho') {
+    if ($stored.Length -ne 0 -and -not [string]::Equals($stored, 'herdr-soho', [StringComparison]::Ordinal)) {
         Write-Host 'nau install: herdr_soho_bin is set explicitly; keeping it'
         return
     }
