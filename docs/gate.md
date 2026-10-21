@@ -82,7 +82,8 @@ How each sshd behaves cannot be proved here: the tests simulate `SSH_ORIGINAL_CO
 - A session with no command (what `restrict` leaves an interactive login as) is refused with class `empty` and does not wait for stdin.
 - A refused command (`nau config list`, `nau job note ...`, a `;` or a `$(...)`) returns exit 2 and the gate's line, and nothing runs.
 - The state directory the gate sees is the one the node's user sees: the `ultimo_seq` of `nau outbox` through ssh equals the local one. Which `HOME`, `PATH` and, on Windows, `APPDATA` the forced command runs with, and whether the backend and the Herdr server are found from it.
-- `nau outbox --wait 60000` and a connection that drops in the middle: whether the gate process ends on its own and when.
+- sshd runs the forced command with a minimal `PATH` that may omit the backend; `herdr_soho_bin` must then be an absolute path. The installers pin it when it is automatic, and `nau doctor` warns while it is automatic.
+- A dropped connection does not end a pending `nau outbox --wait`: the gate process stays alive until the wait expires, so dispatchers should keep `--wait` short.
 - Whether `command=` with the absolute path, and on Windows the shell the sshd uses and the rights on `administrators_authorized_keys`, behave as described here, and whether this version honors `restrict`.
 
 Until then the previous access of the dispatcher stays in place: `nau route` probes the nodes through the Herdr machine transport, not through this gate, and `nau a2a` is not accepted by it either.

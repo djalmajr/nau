@@ -249,6 +249,13 @@ func (c Config) Value(key string) (string, error) {
 	return "", fmt.Errorf("%w: %q", ErrUnknownKey, key)
 }
 
+// HerdrSohoBinStored returns the raw herdr_soho_bin value from the
+// configuration file. An empty result means the automatic form, including
+// when the key or the file is absent.
+func (c Config) HerdrSohoBinStored() string {
+	return c.herdrSohoBinStored
+}
+
 // storedValue validates the value of key and returns the form that is stored
 // in the configuration file (the trimmed herdr_bin, the normalized route
 // lists).

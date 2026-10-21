@@ -1,6 +1,7 @@
 # Install or update the nau binary and the optional Herdr plugin on
 # Windows. Re-running the script with another -Ref updates the node to
 # that ref, binary and plugin on the same ref.
+# Pin an automatic backend selection to its absolute path on each install.
 #
 # On Windows, -Serve installs (or rewrites) the a2a serve scheduled
 # task and (re)starts it, and a re-run restarts the installed service
@@ -46,6 +47,7 @@ plugin, both from the same ref. Updating is re-running the script with
 another -Ref. On Windows, -Serve installs the a2a serve scheduled task
 and (re)starts it; every re-run restarts the installed service after
 the binary swap, so the node never keeps running an old binary.
+An automatic backend selection is pinned to its absolute path on the PATH.
 
 Options:
   -Ref <ref>           ref to install (default: main)
@@ -61,6 +63,54 @@ Options:
 function Fail([string]$Message) {
     Write-Host "nau install: $Message"
     exit 1
+}
+
+function Set-BackendPin {
+    if ([string]::IsNullOrEmpty($env:APPDATA)) {
+        Write-Host 'nau install: warning: cannot determine the config directory; herdr_soho_bin unchanged'
+        return
+    }
+    $configPath = Join-Path $env:APPDATA 'herdr-hermes\config'
+    # A configuration nau itself cannot load is left alone: the pin
+    # would fail, and the install never failed on it before.
+    $null = Invoke-Quiet $NauTarget @('config', 'list')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
+        return
+    }
+    $stored = ''
+    try {
+        if (Test-Path -LiteralPath $configPath) {
+            $configText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($configPath))
+            foreach ($line in ($configText -split "`n")) {
+                $line = $line.Trim()
+                if ($line -eq '' -or $line.StartsWith('#')) { continue }
+                $equals = $line.IndexOf('=')
+                if ($equals -lt 0) { throw 'Invalid configuration line' }
+                if ($line.Substring(0, $equals).Trim() -ceq 'herdr_soho_bin') {
+                    $stored = $line.Substring($equals + 1).Trim()
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
+        return
+    }
+    if ($stored -cne '' -and $stored -cne 'herdr-soho') {
+        Write-Host 'nau install: herdr_soho_bin is set explicitly; keeping it'
+        return
+    }
+    foreach ($name in @('soho', 'herdr-soho')) {
+        $backend = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($backend -and [IO.Path]::IsPathRooted($backend.Source)) {
+            $null = & $NauTarget config set herdr_soho_bin $backend.Source
+            if ($LASTEXITCODE -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
+            Write-Host 'nau install: herdr_soho_bin pinned to the absolute path of the backend found on the PATH'
+            return
+        }
+    }
+    Write-Host 'nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend'
 }
 
 # Windows PowerShell 5.1 turns the redirected stderr of a native command
@@ -435,6 +485,8 @@ try {
             Write-Host 'nau install: machine_label is already set; keeping the current value'
         }
     }
+
+    Set-BackendPin
 
     # The Herdr plugin, unless skipped or Herdr is absent.
     if ($NoPlugin) {

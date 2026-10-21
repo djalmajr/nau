@@ -83,6 +83,10 @@ func cmdDoctor(args []string, env Env) int {
 		Outbox:        doctorOutboxCounts(env),
 	}
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(line))
+	if config.IsAutoBin(cfg.HerdrSohoBinStored()) {
+		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin is automatic and resolved from the PATH; an ssh forced command (nau gate) may run with a minimal PATH that omits the backend; '%s config set herdr_soho_bin <absolute path>' pins it\n",
+			env.program(), env.program())
+	}
 	if _, lerr := exec.LookPath("soho"); legacyBackendSelected(cfg.HerdrSohoBin) && lerr == nil {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin points to the legacy herdr-soho binary while soho is on the PATH; '%s config set herdr_soho_bin soho' switches to soho\n",
 			env.program(), env.program())
