@@ -2,6 +2,7 @@ package a2astore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -38,19 +39,19 @@ func TestRetryDeliveryOnce(t *testing.T) {
 				task string
 				id   int64
 			}{{"missing", id}, {"t1", id + 1}} {
-				found, err := s.Retry(ctx, wrong.task, wrong.id)
-				if found || err != nil {
+				found, err := s.Retry(ctx, wrong.task, wrong.id, retryRoutes{owner: "local/owner"})
+				if found != "" || err != nil {
 					t.Fatalf("wrong key %+v = %v, %v", wrong, found, err)
 				}
 			}
 			before := readDelivery(t, s, id)
 			var wg sync.WaitGroup
-			results := make(chan bool, 2)
+			results := make(chan string, 2)
 			for i := 0; i < 2; i++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					found, err := s.Retry(ctx, "t1", id)
+					found, err := s.Retry(ctx, "t1", id, retryRoutes{owner: "local/owner"})
 					if err != nil {
 						t.Error(err)
 					}
@@ -61,7 +62,7 @@ func TestRetryDeliveryOnce(t *testing.T) {
 			close(results)
 			count := 0
 			for found := range results {
-				if found {
+				if found != "" {
 					count++
 				}
 			}
@@ -91,8 +92,8 @@ func TestRetryDeliveryOnce(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer s.Close()
-			found, err := s.Retry(ctx, "t1", id)
-			if found || err != nil {
+			found, err := s.Retry(ctx, "t1", id, retryRoutes{owner: "local/owner"})
+			if found != "" || err != nil {
 				t.Fatalf("retry after reopen = %v, %v", found, err)
 			}
 		})
@@ -118,8 +119,8 @@ func TestRetryDeliveryStates(t *testing.T) {
 		if _, err := s.db.Exec(`UPDATE a2a_deliveries SET state = ? WHERE delivery_id = ?`, state, delivery); err != nil {
 			t.Fatal(err)
 		}
-		found, err := s.Retry(ctx, id, delivery)
-		if found || err != nil {
+		found, err := s.Retry(ctx, id, delivery, retryRoutes{owner: "local/owner"})
+		if found != "" || err != nil {
 			t.Fatalf("retry %s = %v, %v", state, found, err)
 		}
 		if row := readDelivery(t, s, delivery); row.state != state {
@@ -176,8 +177,8 @@ func TestRetryMigrationFromBaseline(t *testing.T) {
 			t.Fatalf("preserved rows = %d, %v", n, err)
 		}
 		if i == 1 {
-			found, err := s.Retry(context.Background(), "t1", 1)
-			if !found || err != nil {
+			found, err := s.Retry(context.Background(), "t1", 1, retryRoutes{owner: "local/owner"})
+			if found == "" || err != nil {
 				s.Close()
 				t.Fatalf("retry migrated row = %v, %v", found, err)
 			}
@@ -202,8 +203,8 @@ func TestRetryTerminalTasks(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := state == a2acore.StateWorking
-				found, err := s.Retry(context.Background(), "t1", c.DeliveryID)
-				if err != nil || found != want {
+				found, err := s.Retry(context.Background(), "t1", c.DeliveryID, retryRoutes{owner: "local/owner"})
+				if err != nil || (found != "") != want {
 					t.Fatalf("retry=%v %v, want %v", found, err, want)
 				}
 				var markers int
@@ -216,5 +217,115 @@ func TestRetryTerminalTasks(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// retryRoutes supplies current registrations, independently of stored plans.
+type retryRoutes struct {
+	owner, guardian string
+}
+
+func (r retryRoutes) OwnerRef(project string) (string, error) {
+	if project != "org/example" {
+		return "", nil
+	}
+	return r.owner, nil
+}
+func (r retryRoutes) GuardianRef() (string, error) { return r.guardian, nil }
+
+func TestRetryCurrentRole(t *testing.T) {
+	for _, tc := range []struct {
+		name, role, project string
+		routes              retryRoutes
+		want                string
+	}{
+		{"owner_changed", a2acore.RoleOwner, "org/example", retryRoutes{owner: "local/new-owner"}, "local/new-owner"},
+		{"owner_unchanged", a2acore.RoleOwner, "org/example", retryRoutes{owner: "local/owner"}, "local/owner"},
+		{"guardian_with_owner_present", a2acore.RoleGuardian, "org/example", retryRoutes{owner: "local/new-owner", guardian: "local/new-guardian"}, "local/new-guardian"},
+		{"owner_missing_with_guardian", a2acore.RoleOwner, "org/example", retryRoutes{guardian: "local/guardian"}, ""},
+		{"guardian_missing_with_owner", a2acore.RoleGuardian, "org/example", retryRoutes{owner: "local/owner"}, ""},
+		{"task_project_is_authoritative", a2acore.RoleOwner, "org/other", retryRoutes{owner: "local/owner"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &clock{t: testNow}
+			s, c := attemptFixture(t, clk)
+			ctx := context.Background()
+			if err := s.Complete(ctx, c, notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "deadline"}, clk.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE a2a_deliveries SET role=?`, tc.role); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.db.Exec(`UPDATE a2a_tasks SET project=?`, tc.project); err != nil {
+				t.Fatal(err)
+			}
+			before := readDelivery(t, s, c.DeliveryID)
+			ref, err := s.Retry(ctx, "t1", c.DeliveryID, tc.routes)
+			if tc.want == "" {
+				if ref != "" || !errors.Is(err, ErrNoRoute) {
+					t.Fatalf("ref=%q err=%v", ref, err)
+				}
+			} else if err != nil || ref != tc.want {
+				t.Fatalf("ref=%q err=%v want=%q", ref, err, tc.want)
+			}
+			var stored string
+			var markers int
+			if err := s.db.QueryRow(`SELECT ref FROM a2a_deliveries WHERE delivery_id=?`, c.DeliveryID).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.db.QueryRow(`SELECT COUNT(*) FROM a2a_delivery_retries`).Scan(&markers); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if stored != c.Ref || markers != 0 || readDelivery(t, s, c.DeliveryID) != before {
+					t.Fatalf("no_route changed row: ref=%q markers=%d", stored, markers)
+				}
+			} else {
+				claims, err := s.ClaimDue(ctx, clk.Now(), 1, time.Minute)
+				if err != nil || len(claims) != 1 || claims[0].Ref != tc.want || stored != tc.want || markers != 1 {
+					t.Fatalf("claims=%+v ref=%q markers=%d err=%v", claims, stored, markers, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRetryReferenceRollback(t *testing.T) {
+	clk := &clock{t: testNow}
+	s, c := attemptFixture(t, clk)
+	ctx := context.Background()
+	if err := s.Complete(ctx, c, notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: 15}, clk.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := readDelivery(t, s, c.DeliveryID)
+	if _, err := s.db.Exec(`CREATE TRIGGER refuse_retry BEFORE INSERT ON a2a_delivery_retries BEGIN SELECT RAISE(ABORT, 'retry marker rejected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	routes := retryRoutes{owner: "local/new-owner"}
+	ref, err := s.Retry(ctx, "t1", c.DeliveryID, routes)
+	if err == nil || ref != "" {
+		t.Fatalf("failed transaction=%q %v", ref, err)
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT ref FROM a2a_deliveries WHERE delivery_id=?`, c.DeliveryID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	var markers int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM a2a_delivery_retries`).Scan(&markers); err != nil {
+		t.Fatal(err)
+	}
+	if stored != c.Ref || readDelivery(t, s, c.DeliveryID) != before || markers != 0 {
+		t.Fatalf("partial commit: ref=%q markers=%d", stored, markers)
+	}
+	if _, err := s.db.Exec(`DROP TRIGGER refuse_retry`); err != nil {
+		t.Fatal(err)
+	}
+	ref, err = s.Retry(ctx, "t1", c.DeliveryID, routes)
+	if err != nil || ref != routes.owner {
+		t.Fatalf("restored retry=%q %v", ref, err)
+	}
+	claims, err := s.ClaimDue(ctx, clk.Now(), 1, time.Minute)
+	if err != nil || len(claims) != 1 || claims[0].Ref != routes.owner {
+		t.Fatalf("claims=%+v %v", claims, err)
 	}
 }

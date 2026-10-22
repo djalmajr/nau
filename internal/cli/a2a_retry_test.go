@@ -19,6 +19,7 @@ func retryFixture(t *testing.T, outcome string) (string, string, int64) {
 	t.Helper()
 	dir := t.TempDir()
 	task, db := a2aReplyActorFixture(t, dir, "local/owner")
+	a2aReplyActorRegisterOwner(t, dir, "org/example", "local/owner")
 	s, err := a2astore.OpenFile(db, a2astore.Options{Now: func() time.Time { return serveFixedNow }})
 	if err != nil {
 		t.Fatal(err)
@@ -47,8 +48,8 @@ func TestA2ARetryExhausted(t *testing.T) {
 	dir, task, id := retryFixture(t, notify.OutcomeTransient)
 	db := filepath.Join(dir, "state", "registry.db")
 	args := []string{"retry", "--task", task, "--delivery", fmt.Sprint(id), "--db", db}
-	out, stderr, exit := runA2A(t, t.TempDir(), args...)
-	if exit != 0 || out != "{\"retried\":true}\n" || stderr != "" {
+	out, stderr, exit := runA2A(t, dir, args...)
+	if exit != 0 || out != "{\"retried\":true,\"ref\":\"local/owner\"}\n" || stderr != "" {
 		t.Fatalf("exhausted retry = %d %q %q", exit, out, stderr)
 	}
 	out, _, exit = runA2A(t, dir, args...)
@@ -74,7 +75,7 @@ func TestA2ARetryOnce(t *testing.T) {
 	})
 	args := []string{"retry", "--task", task, "--delivery", fmt.Sprint(id)}
 	out, stderr, exit := runA2A(t, dir, args...)
-	if exit != 0 || out != "{\"retried\":true}\n" || stderr != "" {
+	if exit != 0 || out != "{\"retried\":true,\"ref\":\"local/owner\"}\n" || stderr != "" {
 		t.Fatalf("retry = %d %q %q", exit, out, stderr)
 	}
 	out, _, exit = runA2A(t, dir, args...)
@@ -157,5 +158,73 @@ func TestA2ARetryTerminalTask(t *testing.T) {
 	out, _, exit := runA2A(t, dir, "retry", "--task", task, "--delivery", fmt.Sprint(id))
 	if exit != 2 || !strings.Contains(out, "non-terminal task") {
 		t.Fatalf("terminal retry=%d %q", exit, out)
+	}
+}
+
+func TestA2ARetryCurrentRecipient(t *testing.T) {
+	for _, ref := range []string{"local/new-owner", "local/owner"} {
+		t.Run(ref, func(t *testing.T) {
+			dir, task, id := retryFixture(t, notify.OutcomeUncertain)
+			a2aReplyActorRegisterOwner(t, dir, "org/example", ref)
+			_, exits, cancel, _, sender := startA2AServe(t, dir, "--listen", "127.0.0.1:0")
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case exit := <-exits:
+					if exit != 0 {
+						t.Errorf("serve exit=%d", exit)
+					}
+				case <-time.After(10 * time.Second):
+					t.Error("serve did not stop")
+				}
+			})
+			out, stderr, exit := runA2A(t, dir, "retry", "--task", task, "--delivery", fmt.Sprint(id))
+			want := fmt.Sprintf("{\"retried\":true,\"ref\":%q}\n", ref)
+			if exit != 0 || out != want || stderr != "" {
+				t.Errorf("retry=%d %q %q; want %q", exit, out, stderr, want)
+			}
+			deadline := time.After(5 * time.Second)
+			for {
+				out, _, exit = runA2A(t, dir, "show", "--task", task)
+				if exit == 0 && strings.Contains(out, `"state":"accepted"`) {
+					break
+				}
+				select {
+				case <-deadline:
+					t.Fatalf("retry not accepted: %d %q", exit, out)
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			calls := sender.callsCopy()
+			if len(calls) != 1 || calls[0].Ref != ref {
+				t.Fatalf("sends=%+v, want ref %q", calls, ref)
+			}
+		})
+	}
+}
+
+func TestA2ARetryNoRoute(t *testing.T) {
+	dir, task, id := retryFixture(t, notify.OutcomeUncertain)
+	out, stderr, exit := runNotifyFlow(t, dir, &testClock{t: serveFixedNow}, nil, "", "notify", "unregister", "owner", "--projeto", "org/example")
+	if exit != 0 {
+		t.Fatalf("unregister=%d %q %q", exit, out, stderr)
+	}
+	before, _, exit := runA2A(t, dir, "show", "--task", task)
+	if exit != 0 {
+		t.Fatal(before)
+	}
+	args := []string{"retry", "--task", task, "--delivery", fmt.Sprint(id)}
+	out, stderr, exit = runA2A(t, dir, args...)
+	if exit != 2 || !strings.Contains(out, "no_route") || stderr != "" {
+		t.Errorf("retry without registration=%d %q %q", exit, out, stderr)
+	}
+	after, _, exit := runA2A(t, dir, "show", "--task", task)
+	if exit != 0 || after != before {
+		t.Errorf("refusal changed delivery: before=%s after=%s", before, after)
+	}
+	a2aReplyActorRegisterOwner(t, dir, "org/example", "local/restored-owner")
+	out, _, exit = runA2A(t, dir, args...)
+	if exit != 0 || !strings.Contains(out, `"ref":"local/restored-owner"`) {
+		t.Fatalf("retry after restoring registration=%d %q", exit, out)
 	}
 }

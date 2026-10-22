@@ -352,35 +352,51 @@ func (s *Store) Release(ctx context.Context, c a2acore.DeliveryClaim) error {
 	})
 }
 
-// Retry requeues an uncertain or exhausted delivery once, after an operator
-// checked that its recipient did not receive it. Attempts and their outcomes
-// are preserved. The durable retry marker and the queue update commit together;
-// even another uncertain or exhausted outcome cannot unlock a second retry.
-// found is false for an unknown task, a mismatched delivery or a refusal.
-func (s *Store) Retry(ctx context.Context, taskID string, deliveryID int64) (bool, error) {
-	var found bool
+// ErrNoRoute means the delivery role has no current registration.
+var ErrNoRoute = errors.New("a2astore: no_route")
+
+// Retry requeues an uncertain or exhausted delivery once, resolving its role
+// in the task's project again. The new reference, pending state and durable
+// retry marker commit together. Attempts and their outcomes are preserved.
+// An empty reference with no error means an ineligible task or delivery.
+func (s *Store) Retry(ctx context.Context, taskID string, deliveryID int64, routes a2acore.RouteSource) (string, error) {
+	var usedRef string
 	err := s.tx(ctx, func(tx *sql.Tx) error {
-		res, err := tx.Exec(`UPDATE a2a_deliveries SET state = ?, next_attempt_unix = ?, lease_until_unix = NULL
-			WHERE delivery_id = ? AND task_id = ? AND state IN (?, ?)
-			AND EXISTS (SELECT 1 FROM a2a_tasks WHERE task_id = ? AND state NOT IN (?, ?, ?, ?))
-			AND NOT EXISTS (SELECT 1 FROM a2a_delivery_retries WHERE delivery_id = ?)`,
-			a2acore.DeliveryPending, s.now().Unix(), deliveryID, taskID,
-			a2acore.DeliveryUncertain, a2acore.DeliveryExhausted, taskID,
-			a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected, deliveryID)
+		var project, role string
+		err := tx.QueryRow(`SELECT t.project, d.role FROM a2a_deliveries d
+			JOIN a2a_tasks t ON t.task_id = d.task_id
+			WHERE d.delivery_id = ? AND d.task_id = ? AND d.state IN (?, ?)
+			AND t.state NOT IN (?, ?, ?, ?)
+			AND NOT EXISTS (SELECT 1 FROM a2a_delivery_retries WHERE delivery_id = d.delivery_id)`,
+			deliveryID, taskID, a2acore.DeliveryUncertain, a2acore.DeliveryExhausted,
+			a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected).Scan(&project, &role)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil || n == 0 {
+		ref, err := a2acore.RecipientRef(routes, project, role)
+		if err != nil {
+			return err
+		}
+		if ref == "" {
+			return ErrNoRoute
+		}
+		if _, err := tx.Exec(`UPDATE a2a_deliveries SET ref = ?, state = ?, next_attempt_unix = ?, lease_until_unix = NULL
+			WHERE delivery_id = ? AND task_id = ?`, ref, a2acore.DeliveryPending, s.now().Unix(), deliveryID, taskID); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO a2a_delivery_retries(delivery_id) VALUES (?)`, deliveryID); err != nil {
 			return err
 		}
-		found = true
+		usedRef = ref
 		return nil
 	})
-	return found && err == nil, err
+	if err != nil {
+		return "", err
+	}
+	return usedRef, nil
 }
 
 // RecoverHeld marks obsolete the held deliveries whose ingress is older

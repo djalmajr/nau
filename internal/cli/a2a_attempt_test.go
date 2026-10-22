@@ -44,67 +44,74 @@ func TestA2AAttemptViews(t *testing.T) {
 }
 
 func TestA2AServeAttemptLog(t *testing.T) {
-	dir := t.TempDir()
-	_, db := a2aReplyActorFixture(t, dir, "local/owner")
-	s, err := sql.Open("sqlite", "file:"+filepath.ToSlash(db))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const marker = "notice-text-canary-400"
-	if _, err = s.Exec(`UPDATE a2a_ingress SET job=?`, marker); err != nil {
-		s.Close()
-		t.Fatal(err)
-	}
-	s.Close()
-	out, stderr := &testLockedBuffer{}, &testLockedBuffer{}
-	ctx, cancel := context.WithCancel(context.Background())
-	oldCtx, oldSender := a2aServeContext, newA2aNoticeSender
-	a2aServeContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
-	sender := &fakeA2ASender{script: map[string][]notify.SendResult{"local/owner": {{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "deadline"}}}}
-	newA2aNoticeSender = func(string, []string) notify.Sender { return sender }
-	exits := make(chan int, 1)
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case exit := <-exits:
-			if exit != 0 {
-				t.Errorf("serve exit=%d", exit)
+	for _, tc := range []struct {
+		state, level, category string
+		exit                   int
+	}{{"accepted", "INFO", "", 0}, {"uncertain", "WARN", "deadline", 15}} {
+		t.Run(tc.state, func(t *testing.T) {
+			dir := t.TempDir()
+			_, db := a2aReplyActorFixture(t, dir, "local/owner")
+			s, err := sql.Open("sqlite", "file:"+filepath.ToSlash(db))
+			if err != nil {
+				t.Fatal(err)
 			}
-		case <-time.After(10 * time.Second):
-			t.Error("serve did not stop")
-		}
-		a2aServeContext, newA2aNoticeSender = oldCtx, oldSender
-	})
-	env := a2aTestEnv(t, dir, out, stderr)
-	go func() { exits <- cmdA2A([]string{"serve", "--listen", "127.0.0.1:0"}, env) }()
-	out.nextLine(t, 10*time.Second)
-	a2aWaitLogRecord(t, stderr, "a2a: delivery", 3*time.Second)
-	logs := a2aLogRecordLines(t, stderr.snapshot(), "a2a: delivery")
-	if len(logs) != 1 {
-		t.Fatalf("attempt logs=%q", logs)
-	}
-	var fields map[string]any
-	if err := json.Unmarshal([]byte(logs[0]), &fields); err != nil {
-		t.Fatal(err)
-	}
-	for k, v := range map[string]any{"level": "WARN", "msg": "a2a: delivery", "delivery": float64(1), "task": "task-actor", "role": "owner", "ref": "local/owner", "state": "uncertain", "error": "deadline", "exit": float64(15), "ms": float64(0)} {
-		if fields[k] != v {
-			t.Errorf("log %s=%v, want %v: %s", k, fields[k], v, logs[0])
-		}
-	}
-	prev := -1
-	for _, k := range []string{"delivery", "task", "role", "ref", "state", "error", "exit", "ms"} {
-		pos := strings.Index(logs[0], `"`+k+`":`)
-		if pos <= prev {
-			t.Fatalf("field order %s: %s", k, logs[0])
-		}
-		prev = pos
-	}
-	if strings.Contains(stderr.snapshot(), marker) {
-		t.Fatalf("notice leaked: %s", stderr.snapshot())
-	}
-	calls := sender.callsCopy()
-	if len(calls) != 1 || !strings.Contains(calls[0].Message, marker) {
-		t.Fatalf("synthetic marker was not in the notice: %+v", calls)
+			const marker = "notice-text-canary-400"
+			if _, err = s.Exec(`UPDATE a2a_ingress SET job=?`, marker); err != nil {
+				s.Close()
+				t.Fatal(err)
+			}
+			s.Close()
+			out, stderr := &testLockedBuffer{}, &testLockedBuffer{}
+			ctx, cancel := context.WithCancel(context.Background())
+			oldCtx, oldSender := a2aServeContext, newA2aNoticeSender
+			a2aServeContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
+			sender := &fakeA2ASender{script: map[string][]notify.SendResult{"local/owner": {{Outcome: tc.state, Exit: tc.exit, Category: tc.category}}}}
+			newA2aNoticeSender = func(string, []string) notify.Sender { return sender }
+			exits := make(chan int, 1)
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case exit := <-exits:
+					if exit != 0 {
+						t.Errorf("serve exit=%d", exit)
+					}
+				case <-time.After(10 * time.Second):
+					t.Error("serve did not stop")
+				}
+				a2aServeContext, newA2aNoticeSender = oldCtx, oldSender
+			})
+			env := a2aTestEnv(t, dir, out, stderr)
+			go func() { exits <- cmdA2A([]string{"serve", "--listen", "127.0.0.1:0"}, env) }()
+			out.nextLine(t, 10*time.Second)
+			a2aWaitLogRecord(t, stderr, "a2a: delivery", 3*time.Second)
+			logs := a2aLogRecordLines(t, stderr.snapshot(), "a2a: delivery")
+			if len(logs) != 1 {
+				t.Fatalf("attempt logs=%q", logs)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(logs[0]), &fields); err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range map[string]any{"level": tc.level, "msg": "a2a: delivery", "delivery": float64(1), "task": "task-actor", "role": "owner", "ref": "local/owner", "state": tc.state, "error": tc.category, "exit": float64(tc.exit), "ms": float64(0)} {
+				if fields[k] != v {
+					t.Errorf("log %s=%v, want %v: %s", k, fields[k], v, logs[0])
+				}
+			}
+			prev := -1
+			for _, k := range []string{"delivery", "task", "role", "ref", "state", "error", "exit", "ms"} {
+				pos := strings.Index(logs[0], `"`+k+`":`)
+				if pos <= prev {
+					t.Fatalf("field order %s: %s", k, logs[0])
+				}
+				prev = pos
+			}
+			if strings.Contains(stderr.snapshot(), marker) {
+				t.Fatalf("notice leaked: %s", stderr.snapshot())
+			}
+			calls := sender.callsCopy()
+			if len(calls) != 1 || !strings.Contains(calls[0].Message, marker) {
+				t.Fatalf("synthetic marker was not in the notice: %+v", calls)
+			}
+		})
 	}
 }

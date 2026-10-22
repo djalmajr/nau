@@ -338,15 +338,27 @@ func cmdA2ARetry(args []string, env Env) int {
 		return 2
 	}
 	defer store.Close()
-	found, err := store.Retry(context.Background(), task, delivery)
+	ro, err := outbox.Open(outbox.StateDir(env.ConfigDir), outbox.Options{Now: env.Now, ReadOnly: true})
+	if err != nil {
+		fail(env, 2, "a2a retry: registry unavailable")
+		return 2
+	}
+	ref, err := store.Retry(context.Background(), task, delivery, a2aNotifyRoutes{ob: ro, now: env.Now})
+	if errors.Is(err, a2astore.ErrNoRoute) {
+		_, _ = fmt.Fprintln(env.Stdout, mustJSON(errorLine{Status: "refused", Motivo: "a2a retry: no_route"}))
+		return 2
+	}
 	if err != nil {
 		fail(env, 2, "a2a retry: registry database unavailable")
 		return 2
 	}
-	if !found {
+	if ref == "" {
 		return refused()
 	}
-	_, _ = fmt.Fprintln(env.Stdout, `{"retried":true}`)
+	_, _ = fmt.Fprintln(env.Stdout, mustJSON(struct {
+		Retried bool   `json:"retried"`
+		Ref     string `json:"ref"`
+	}{true, ref}))
 	return 0
 }
 

@@ -82,10 +82,14 @@ func TestA2AServeLoggerMasksURL(t *testing.T) {
 	if rec["count"] != float64(3) || rec["ok"] != true {
 		t.Fatalf("count/ok = %v/%v, want the untouched values", rec["count"], rec["ok"])
 	}
-	// The WARN level of the handler: an INFO record never reaches the
-	// writer.
+	buf.Reset()
 	logger.Info("info for http://a/one")
-	if got := strings.TrimSpace(buf.String()); !strings.HasSuffix(got, line) {
-		t.Fatalf("buffer %q, want the INFO record dropped by the level", buf.String())
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &rec); err != nil || rec["level"] != "INFO" || rec["msg"] != "info for <url>" {
+		t.Fatalf("INFO record = %q: %v", buf.String(), err)
+	}
+	line = buf.String()
+	logger.Debug("debug for http://a/one")
+	if buf.String() != line {
+		t.Fatalf("DEBUG record reached writer: %q", buf.String())
 	}
 }

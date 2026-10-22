@@ -1,7 +1,7 @@
 package cli
 
 // The a2a serve logger: the JSON handler the a2a serve puts on stderr,
-// at the WARN level, with every URL of a record masked before it is
+// at the INFO level, with every URL of a record masked before it is
 // written. A webhook URL can carry a secret in the path or the query,
 // and a log record must never carry it.
 
@@ -24,13 +24,13 @@ func a2aMaskURLs(value string) string {
 }
 
 // a2aServeLogger builds the logger of the a2a serve: a JSON handler on
-// the given writer at the WARN level whose ReplaceAttr masks every URL
+// the given writer at the INFO level whose ReplaceAttr masks every URL
 // of the message and of every string or error attribute (an error
 // becomes the string of the already-masked error); the other values
 // are untouched.
 func a2aServeLogger(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{
-		Level:       slog.LevelWarn,
+		Level:       slog.LevelInfo,
 		ReplaceAttr: a2aServeMaskAttr,
 	}))
 }
