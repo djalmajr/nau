@@ -155,6 +155,12 @@ func (s *Store) deliveriesOf(ctx context.Context, taskID string) ([]a2acore.Deli
 			d.LastExit = &exit
 		}
 		d.LastError = lastError.String
+		startTime, startErr := time.Parse(time.RFC3339Nano, start.String)
+		endTime, endErr := time.Parse(time.RFC3339Nano, end.String)
+		if endErr != nil || startErr != nil || endTime.Before(startTime) {
+			end = sql.NullString{}
+			ms = sql.NullInt64{}
+		}
 		d.LastAttemptEnd = end.String
 		if ms.Valid {
 			d.LastAttemptMS = &ms.Int64

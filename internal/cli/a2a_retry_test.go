@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -140,5 +141,21 @@ func TestA2ARetryNowrite(t *testing.T) {
 	stdout, _, exit := runA2A(t, dir, "retry", "--task", task, "--delivery", fmt.Sprint(id))
 	if exit != 0 {
 		t.Fatalf("retry after nowrite = %d %q", exit, stdout)
+	}
+}
+
+func TestA2ARetryTerminalTask(t *testing.T) {
+	dir, task, id := retryFixture(t, notify.OutcomeUncertain)
+	s, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "state", "registry.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Exec(`UPDATE a2a_tasks SET state='completed'`); err != nil {
+		t.Fatal(err)
+	}
+	out, _, exit := runA2A(t, dir, "retry", "--task", task, "--delivery", fmt.Sprint(id))
+	if exit != 2 || !strings.Contains(out, "non-terminal task") {
+		t.Fatalf("terminal retry=%d %q", exit, out)
 	}
 }

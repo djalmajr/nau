@@ -102,3 +102,88 @@ func TestDoctorA2ARegistryOnlyReadOnly(t *testing.T) {
 		t.Fatalf("doctor mutated registry: %v", err)
 	}
 }
+
+// Removing the terminal-task filter keeps resolved notices in the count and warning.
+func TestDoctorA2ATerminalTasks(t *testing.T) {
+	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0))
+	for _, state := range []string{"completed", "canceled", "failed", "rejected", "working"} {
+		t.Run(state, func(t *testing.T) {
+			dir, _, _ := retryFixture(t, notify.OutcomeUncertain)
+			setSohoConfig(t, dir, exe, "machine-a")
+			s, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(outbox.StateDir(dir), "registry.db")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if _, err := s.Exec(`UPDATE a2a_tasks SET state=?`, state); err != nil {
+				t.Fatal(err)
+			}
+			out, stderr, exit := doctorAt(t, dir)
+			want := `"a2a":{"uncertain":0}`
+			if state == "working" {
+				want = `"a2a":{"uncertain":1,"uncertain_oldest_s":0}`
+			}
+			if exit != 0 || !strings.Contains(out, want) || strings.Contains(stderr, "A2A owner") != (state == "working") {
+				t.Fatalf("doctor=%d %q %q want=%s", exit, out, stderr, want)
+			}
+		})
+	}
+}
+
+func TestDoctorA2ANowriteExistingDatabase(t *testing.T) {
+	dir, _, _ := retryFixture(t, notify.OutcomeUncertain)
+	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0))
+	setSohoConfig(t, dir, exe, "machine-a")
+	state := outbox.StateDir(dir)
+	before, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, _, exit := doctorAt(t, dir)
+	if exit != 0 || !strings.Contains(out, `"uncertain":1`) {
+		t.Fatalf("doctor=%d %q", exit, out)
+	}
+	after, err := os.ReadDir(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := func(es []os.DirEntry) string {
+		var n []string
+		for _, e := range es {
+			n = append(n, e.Name())
+		}
+		return strings.Join(n, ",")
+	}
+	if names(before) != names(after) {
+		t.Fatalf("before=%s after=%s", names(before), names(after))
+	}
+	if err := os.Chmod(state, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(state, 0o700)
+	out, _, exit = doctorAt(t, dir)
+	if exit != 0 || !strings.Contains(out, `"uncertain":1`) {
+		t.Fatalf("read-only doctor=%d %q", exit, out)
+	}
+}
+
+func TestDoctorA2AReadError(t *testing.T) {
+	dir := t.TempDir()
+	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0))
+	setSohoConfig(t, dir, exe, "machine-a")
+	state := outbox.StateDir(dir)
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "registry.db"), []byte("invalid database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(state, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(state, 0o700)
+	out, stderr, exit := doctorAt(t, dir)
+	if exit != 0 || !strings.Contains(out, `"a2a":{"error":"unavailable"}`) || strings.Contains(out, `"uncertain"`) || strings.Contains(stderr, "A2A owner") {
+		t.Fatalf("read error=%d %q %q", exit, out, stderr)
+	}
+}

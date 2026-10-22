@@ -21,8 +21,10 @@ func TestA2AAttemptViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	end := serveFixedNow.Add(-125 * time.Second).Format(time.RFC3339)
-	if _, err = s.Exec(`UPDATE a2a_deliveries SET last_attempt_end=?, last_attempt_ms=2175 WHERE delivery_id=?`, end, id); err != nil {
+	endTime := serveFixedNow.Add(-125 * time.Second)
+	end := endTime.Format(time.RFC3339)
+	start := endTime.Add(-2175 * time.Millisecond).Format(time.RFC3339)
+	if _, err = s.Exec(`UPDATE a2a_deliveries SET last_attempt=?, last_attempt_end=?, last_attempt_ms=2175 WHERE delivery_id=?`, start, end, id); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"inbox"}, {"show", "--task", task}} {

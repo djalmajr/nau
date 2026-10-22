@@ -362,10 +362,11 @@ func (s *Store) Retry(ctx context.Context, taskID string, deliveryID int64) (boo
 	err := s.tx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.Exec(`UPDATE a2a_deliveries SET state = ?, next_attempt_unix = ?, lease_until_unix = NULL
 			WHERE delivery_id = ? AND task_id = ? AND state IN (?, ?)
-			AND EXISTS (SELECT 1 FROM a2a_tasks WHERE task_id = ?)
+			AND EXISTS (SELECT 1 FROM a2a_tasks WHERE task_id = ? AND state NOT IN (?, ?, ?, ?))
 			AND NOT EXISTS (SELECT 1 FROM a2a_delivery_retries WHERE delivery_id = ?)`,
 			a2acore.DeliveryPending, s.now().Unix(), deliveryID, taskID,
-			a2acore.DeliveryUncertain, a2acore.DeliveryExhausted, taskID, deliveryID)
+			a2acore.DeliveryUncertain, a2acore.DeliveryExhausted, taskID,
+			a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected, deliveryID)
 		if err != nil {
 			return err
 		}

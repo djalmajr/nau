@@ -326,7 +326,7 @@ func cmdA2ARetry(args []string, env Env) int {
 		return 2
 	}
 	refused := func() int {
-		_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(errorLine{Status: "refused", Motivo: "a2a retry: delivery must belong to an existing task, be uncertain or exhausted, and not have been retried"}))
+		_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(errorLine{Status: "refused", Motivo: "a2a retry: delivery must belong to an existing non-terminal task, be uncertain or exhausted, and not have been retried"}))
 		return 2
 	}
 	if a2aDBMissing(db) {

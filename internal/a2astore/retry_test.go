@@ -187,3 +187,34 @@ func TestRetryMigrationFromBaseline(t *testing.T) {
 		}
 	}
 }
+
+// Removing Retry's terminal-task filter consumes a retry marker and queues a closed task.
+func TestRetryTerminalTasks(t *testing.T) {
+	for _, state := range []string{a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected, a2acore.StateWorking} {
+		for _, delivery := range []string{a2acore.DeliveryUncertain, a2acore.DeliveryExhausted} {
+			t.Run(state+"/"+delivery, func(t *testing.T) {
+				clk := &clock{t: testNow}
+				s, c := attemptFixture(t, clk)
+				if _, err := s.db.Exec(`UPDATE a2a_tasks SET state=?`, state); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(`UPDATE a2a_deliveries SET state=?`, delivery); err != nil {
+					t.Fatal(err)
+				}
+				want := state == a2acore.StateWorking
+				found, err := s.Retry(context.Background(), "t1", c.DeliveryID)
+				if err != nil || found != want {
+					t.Fatalf("retry=%v %v, want %v", found, err, want)
+				}
+				var markers int
+				if err := s.db.QueryRow(`SELECT COUNT(*) FROM a2a_delivery_retries`).Scan(&markers); err != nil {
+					t.Fatal(err)
+				}
+				claims, err := s.ClaimDue(context.Background(), clk.Now(), 1, time.Minute)
+				if err != nil || (len(claims) == 1) != want || (markers == 1) != want {
+					t.Fatalf("claims=%+v markers=%d err=%v", claims, markers, err)
+				}
+			})
+		}
+	}
+}

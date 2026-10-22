@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,7 +118,11 @@ func TestAttemptReleaseKeepsTiming(t *testing.T) {
 }
 
 func TestAttemptMigrationAndLegacyAge(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "registry ? # .db")
+	name := "registry # % & .db"
+	if runtime.GOOS != "windows" {
+		name += " ?"
+	}
+	path := filepath.Join(t.TempDir(), name)
 	reg, err := registry.Open(path, registry.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -127,6 +132,9 @@ func TestAttemptMigrationAndLegacyAge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = reg.DB().Exec(`INSERT INTO a2a_deliveries(ingress_id,task_id,role,state,attempts,last_attempt,created,created_unix) VALUES(1,'t1','owner','uncertain',1,? ,?,1)`, testNow.Format(tsLayout), testNow.Format(tsLayout)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = reg.DB().Exec(`INSERT INTO a2a_tasks(task_id,context_id,owner,project,state,version,messages,task_json,created,created_unix,updated,updated_nano) VALUES('t1','c1','local','org/example','working',1,1,'{}',?,1,?,1)`, testNow.Format(tsLayout), testNow.Format(tsLayout)); err != nil {
 		t.Fatal(err)
 	}
 	reg.Close()
@@ -156,5 +164,72 @@ func TestAttemptMigrationAndLegacyAge(t *testing.T) {
 			t.Fatalf("legacy json=%s", b)
 		}
 		s.Close()
+	}
+}
+
+// Removing either end/start comparison exposes a previous attempt's age or duration.
+func TestAttemptMixedVersionAge(t *testing.T) {
+	for _, delta := range []time.Duration{-time.Hour, 0, time.Second} {
+		t.Run(delta.String(), func(t *testing.T) {
+			clk := &clock{t: testNow}
+			s, c := attemptFixture(t, clk)
+			// A previous binary completes without updating the new columns.
+			end := testNow.Add(delta)
+			if _, err := s.db.Exec(`UPDATE a2a_deliveries SET state='uncertain',last_attempt_end=?,last_attempt_ms=1000 WHERE delivery_id=?`, end.Format(time.RFC3339Nano), c.DeliveryID); err != nil {
+				t.Fatal(err)
+			}
+			clk.Add(time.Hour)
+			wantAge := int64(3600)
+			if delta > 0 {
+				wantAge -= int64(delta / time.Second)
+			}
+			for _, query := range []string{"inbox", "show"} {
+				var d []a2acore.Delivery
+				if query == "inbox" {
+					items, err := s.Inbox(context.Background(), a2acore.InboxFilter{})
+					if err != nil || len(items) != 1 {
+						t.Fatalf("inbox=%+v %v", items, err)
+					}
+					d = items[0].Deliveries
+				} else {
+					_, item, _, err := s.Show(context.Background(), "t1")
+					if err != nil {
+						t.Fatalf("show=%+v %v", item, err)
+					}
+					d = item.Deliveries
+				}
+				if len(d) != 1 || d[0].UncertainAgeS == nil || *d[0].UncertainAgeS != wantAge {
+					t.Errorf("%s delivery=%+v, want age=%d", query, d, wantAge)
+				}
+				if (d[0].LastAttemptMS == nil) != (delta < 0) {
+					t.Errorf("%s duration=%v end=%s start=%s", query, d[0].LastAttemptMS, end, testNow)
+				}
+			}
+			var seq int
+			var name, path string
+			if err := s.db.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+				t.Fatal(err)
+			}
+			summary, err := ReadUncertain(context.Background(), path, clk.Now())
+			if err != nil || summary == nil || summary.Oldest == nil || *summary.Oldest != wantAge {
+				t.Fatalf("summary=%+v err=%v want age=%d", summary, err, wantAge)
+			}
+		})
+	}
+}
+
+func TestReadUncertainLegacyWithoutTasks(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "registry.db")
+	reg, err := registry.Open(path, registry.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reg.Close()
+	if _, err := reg.DB().Exec(`CREATE TABLE a2a_deliveries(state TEXT,last_attempt TEXT); INSERT INTO a2a_deliveries VALUES('uncertain',?)`, testNow.Format(tsLayout)); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := ReadUncertain(context.Background(), path, testNow.Add(time.Minute))
+	if err != nil || summary == nil || summary.Uncertain != 1 || summary.Oldest == nil || *summary.Oldest != 60 {
+		t.Fatalf("legacy without tasks=%+v %v", summary, err)
 	}
 }

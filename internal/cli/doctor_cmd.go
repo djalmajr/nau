@@ -69,13 +69,13 @@ func cmdDoctor(args []string, env Env) int {
 		so.Capabilities = &raw
 	}
 	line := struct {
-		HerdrSoho     doctorSoho                 `json:"herdr_soho"`
-		MachineLabel  bool                       `json:"machine_label"`
-		DispatcherURL bool                       `json:"dispatcher_url"`
-		KeyConfigured bool                       `json:"key_configured"`
-		WakeHook      string                     `json:"wake_hook"`
-		Outbox        doctorOutbox               `json:"outbox"`
-		A2A           *a2astore.UncertainSummary `json:"a2a,omitempty"`
+		HerdrSoho     doctorSoho   `json:"herdr_soho"`
+		MachineLabel  bool         `json:"machine_label"`
+		DispatcherURL bool         `json:"dispatcher_url"`
+		KeyConfigured bool         `json:"key_configured"`
+		WakeHook      string       `json:"wake_hook"`
+		Outbox        doctorOutbox `json:"outbox"`
+		A2A           any          `json:"a2a,omitempty"`
 	}{
 		HerdrSoho:     so,
 		MachineLabel:  cfg.MachineLabel != "",
@@ -85,10 +85,17 @@ func cmdDoctor(args []string, env Env) int {
 		Outbox:        doctorOutboxCounts(env),
 	}
 	db := filepath.Join(outbox.StateDir(env.ConfigDir), "registry.db")
-	line.A2A, _ = a2astore.ReadUncertain(ctx, db, env.Now())
+	summary, readErr := a2astore.ReadUncertain(ctx, db, env.Now())
+	if readErr != nil {
+		line.A2A = struct {
+			Error string `json:"error"`
+		}{Error: "unavailable"}
+	} else if summary != nil {
+		line.A2A = summary
+	}
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(line))
-	if line.A2A != nil && line.A2A.Uncertain > 0 {
-		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: %d A2A owner notice(s) uncertain, the oldest for %ds; once you have checked that the owner did not get it, re-queue it with '%s a2a retry --task <task-id> --delivery <delivery-id>'\n", env.program(), line.A2A.Uncertain, *line.A2A.Oldest, env.program())
+	if summary != nil && summary.Uncertain > 0 {
+		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: %d A2A owner notice(s) uncertain, the oldest for %ds; once you have checked that the owner did not get it, re-queue it with '%s a2a retry --task <task-id> --delivery <delivery-id>'\n", env.program(), summary.Uncertain, *summary.Oldest, env.program())
 	}
 	if config.IsAutoBin(cfg.HerdrSohoBinStored()) {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin is automatic and resolved from the PATH; an ssh forced command (nau gate) may run with a minimal PATH that omits the backend; '%s config set herdr_soho_bin <absolute path>' pins it\n",

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/djalmajr/nau/internal/a2acore"
 )
 
 // UncertainSummary is the optional A2A block of the local doctor output.
@@ -39,10 +41,15 @@ func ReadUncertain(ctx context.Context, path string, now time.Time) (*UncertainS
 	for i := range parts {
 		parts[i] = url.PathEscape(parts[i])
 	}
-	// SQLite may create WAL bookkeeping sidecars while reading an existing
-	// database. Keep normal WAL locking: immutable mode would miss a running
-	// serve's commits and would be unsafe if a writer starts during this read.
-	db, err := sql.Open("sqlite", "file:"+strings.Join(parts, "/")+"?mode=ro&_pragma=busy_timeout(10000)")
+	query := "?mode=ro&_pragma=busy_timeout(10000)"
+	if _, err := os.Stat(path + "-wal"); os.IsNotExist(err) {
+		// A cleanly closed database needs no WAL bookkeeping. Preserve normal
+		// WAL reads when a writer is alive so its committed rows remain visible.
+		query += "&immutable=1"
+	} else if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", "file:"+strings.Join(parts, "/")+query)
 	if err != nil {
 		return nil, err
 	}
@@ -59,9 +66,18 @@ func ReadUncertain(ctx context.Context, path string, now time.Time) (*UncertainS
 	}
 	stamp := "last_attempt"
 	if n > 0 {
-		stamp = "COALESCE(last_attempt_end,last_attempt)"
+		stamp = "CASE WHEN julianday(last_attempt_end) >= julianday(last_attempt) THEN last_attempt_end ELSE last_attempt END"
 	}
-	rows, err := db.QueryContext(ctx, `SELECT `+stamp+` FROM a2a_deliveries WHERE state='uncertain'`)
+	filter := ""
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='a2a_tasks'`).Scan(&n); err != nil {
+		return nil, err
+	}
+	var args []any
+	if n > 0 {
+		filter = ` AND EXISTS (SELECT 1 FROM a2a_tasks t WHERE t.task_id=d.task_id AND t.state NOT IN (?, ?, ?, ?))`
+		args = []any{a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected}
+	}
+	rows, err := db.QueryContext(ctx, `SELECT `+stamp+` FROM a2a_deliveries d WHERE d.state='uncertain'`+filter, args...)
 	if err != nil {
 		return nil, err
 	}
