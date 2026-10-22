@@ -37,6 +37,8 @@ powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.loca
 
 Updating is re-running the same script with another `--ref`. The script sets `machine_label` only when it is still empty, never installs over a plugin linked to a local path (run `herdr plugin unlink djalmajr.herdr-hermes` first), and finishes with `nau version` and the informational `nau doctor`.
 
+On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. Go rechecks the stored selection under `config.lock`, shared by all `config set` writers, and pins only an automatic selection to a regular executable with trusted ownership and permissions along both the supplied and resolved paths. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues. The pin changes only the effective backend record and preserves other lines and their terminators; `config set` rejects CR, LF and NUL in values with exit 2.
+
 The script can also install `nau a2a serve` as a user service on macOS and Windows only — a LaunchAgent on macOS, the `nau a2a serve` scheduled task on Windows — with `--serve` (macOS) / `-Serve` (Windows), which installs or rewrites the service and (re)starts it; a re-run without the option restarts the already-installed service after the binary swap, so the node never keeps running an old binary, and `--serve-dry-run` / `-ServeDryRun` print what the service would install and exit 0 without touching anything (see [`docs/a2a.md`](docs/a2a.md#running-the-agent-as-a-service)).
 
 For development, from a checkout of the module `github.com/djalmajr/nau`:

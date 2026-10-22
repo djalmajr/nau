@@ -114,6 +114,39 @@ func TestLoadResolvesSohoBin(t *testing.T) {
 	}
 }
 
+func TestHerdrSohoBinStored(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	cases := []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "missing file", want: ""},
+		{name: "missing key", data: "machine_label=machine-a\n", want: ""},
+		{name: "empty auto", data: "herdr_soho_bin=\n", want: ""},
+		{name: "legacy auto", data: "herdr_soho_bin=herdr-soho\n", want: "herdr-soho"},
+		{name: "explicit path", data: "herdr_soho_bin=/opt/bin/backend\n", want: "/opt/bin/backend"},
+		{name: "last occurrence wins", data: "herdr_soho_bin=first\nherdr_soho_bin=second\n", want: "second"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.data != "" {
+				if err := os.WriteFile(filepath.Join(dir, "config"), []byte(tc.data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := config.Load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.HerdrSohoBinStored(); got != tc.want {
+				t.Errorf("HerdrSohoBinStored() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSetStoresAutoEmpty: setting herdr_soho_bin to the auto value
 // (empty or a legacy name) stores the empty auto form in the file; an
 // explicit value is stored unchanged. Setting the auto value again is
@@ -191,8 +224,8 @@ func TestSetOtherKeysKeepStoredForm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "herdr_soho_bin=\n") {
-		t.Errorf("a set of another key must keep the empty auto form in the file, got %q", data)
+	if string(data) != "machine_label=m1\n" {
+		t.Errorf("setting another key must preserve the absent automatic backend record, got %q", data)
 	}
 	if strings.Contains(string(data), "herdr_soho_bin=soho") {
 		t.Errorf("the resolved path must not be persisted: %q", data)

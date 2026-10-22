@@ -2,6 +2,7 @@
 # Install or update the nau binary and the optional Herdr plugin on
 # macOS and Linux. Re-running the script with another --ref updates
 # the node to that ref, binary and plugin on the same ref.
+# Pin an automatic backend selection to its absolute path on each install.
 #
 # On macOS, --serve installs (or rewrites) the a2a serve LaunchAgent
 # and (re)starts it, and a re-run restarts the installed service after
@@ -36,6 +37,7 @@ plugin, both from the same ref. Updating is re-running the script with
 another --ref. On macOS, --serve installs the a2a serve LaunchAgent and
 (re)starts it; every re-run restarts the installed service after the
 binary swap, so the node never keeps running an old binary.
+An automatic backend selection is pinned to its absolute path on the PATH.
 
 Options:
   --ref <ref>            ref to install (default: main)
@@ -46,6 +48,27 @@ Options:
   --serve-dry-run        print the LaunchAgent plist that --serve would install and exit (macOS)
   -h, --help             show this help
 EOF
+}
+
+pin_backend() {
+    # Go owns classification, path safety and the locked conditional write.
+    if ! "$NAU" config list >/dev/null 2>&1; then
+        echo "nau install: warning: cannot read the config file; herdr_soho_bin unchanged" >&2
+        return
+    fi
+    for BACKEND_NAME in soho herdr-soho; do
+        BACKEND_PATH="$(command -v "$BACKEND_NAME" 2>/dev/null)" || BACKEND_PATH=""
+        case "$BACKEND_PATH" in
+        /*)
+            if ! "$NAU" config set --if-automatic herdr_soho_bin "$BACKEND_PATH" >/dev/null; then
+                echo "nau install: nau config set herdr_soho_bin failed" >&2
+                exit 1
+            fi
+            return
+            ;;
+        esac
+    done
+    echo "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend" >&2
 }
 
 # The bin directory as an absolute path, for the plist arguments: if
@@ -351,6 +374,8 @@ if [ -n "$MACHINE_LABEL" ]; then
         echo "nau install: machine_label is already set; keeping the current value" >&2
     fi
 fi
+
+pin_backend
 
 # The Herdr plugin, unless skipped or Herdr is absent.
 if [ "$NO_PLUGIN" -eq 1 ]; then

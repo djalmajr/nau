@@ -1,6 +1,7 @@
 # Install or update the nau binary and the optional Herdr plugin on
 # Windows. Re-running the script with another -Ref updates the node to
 # that ref, binary and plugin on the same ref.
+# Pin an automatic backend selection to its absolute path on each install.
 #
 # On Windows, -Serve installs (or rewrites) the a2a serve scheduled
 # task and (re)starts it, and a re-run restarts the installed service
@@ -46,6 +47,7 @@ plugin, both from the same ref. Updating is re-running the script with
 another -Ref. On Windows, -Serve installs the a2a serve scheduled task
 and (re)starts it; every re-run restarts the installed service after
 the binary swap, so the node never keeps running an old binary.
+An automatic backend selection is pinned to its absolute path on the PATH.
 
 Options:
   -Ref <ref>           ref to install (default: main)
@@ -61,6 +63,31 @@ Options:
 function Fail([string]$Message) {
     Write-Host "nau install: $Message"
     exit 1
+}
+
+function Set-BackendPin {
+    # Go owns classification, path safety and the locked conditional write.
+    $null = Invoke-Quiet $NauTarget @('config', 'list')
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
+        return
+    }
+    foreach ($name in @('soho', 'herdr-soho')) {
+        $backend = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($backend) {
+            # Native stderr warnings must pass through even in Windows PowerShell 5.1.
+            $pinPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $null = & $NauTarget config set --if-automatic herdr_soho_bin $backend.Source
+                $pinExit = $LASTEXITCODE
+            }
+            finally { $ErrorActionPreference = $pinPreference }
+            if ($pinExit -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
+            return
+        }
+    }
+    Write-Host 'nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend'
 }
 
 # Windows PowerShell 5.1 turns the redirected stderr of a native command
@@ -435,6 +462,8 @@ try {
             Write-Host 'nau install: machine_label is already set; keeping the current value'
         }
     }
+
+    Set-BackendPin
 
     # The Herdr plugin, unless skipped or Herdr is absent.
     if ($NoPlugin) {

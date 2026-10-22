@@ -23,6 +23,51 @@ func TestConfigGetDefaults(t *testing.T) {
 	assertDirEmpty(t, dir)
 }
 
+func TestConfigConditionalRefusals(t *testing.T) {
+	t.Run("NOWRITE", func(t *testing.T) {
+		dir := t.TempDir()
+		stdout, _, code := runCLI(t, dir, true, "config", "set", "--if-automatic", "herdr_soho_bin", "/backend")
+		if code != 2 || !strings.Contains(stdout, "nowrite") {
+			t.Fatalf("exit=%d stdout=%q", code, stdout)
+		}
+		assertDirEmpty(t, dir)
+	})
+	for _, tc := range []struct {
+		key, value string
+		code       int
+		warning    string
+	}{
+		{"machine_label", "node", 2, ""},
+		{"herdr_soho_bin", "relative", 0, "unsafe backend"},
+		{"herdr_soho_bin", "/missing\nlabel=x", 0, "unsafe backend"},
+		{"herdr_soho_bin", "/missing\rlabel=x", 0, "unsafe backend"},
+		{"herdr_soho_bin", "/missing\x00", 0, "unsafe backend"},
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config")
+		const initial = "# keep\nmachine_label=original\n"
+		if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stdout, stderr, code := runCLI(t, dir, false, "config", "set", "--if-automatic", tc.key, tc.value)
+		if code != tc.code || !strings.Contains(stderr, tc.warning) || strings.Count(stdout, "\n") != 1 || !json.Valid([]byte(stdout)) {
+			t.Fatalf("key=%q value=%q exit=%d stdout=%q stderr=%q", tc.key, tc.value, code, stdout, stderr)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != initial {
+			t.Fatalf("config changed: %q %v", data, err)
+		}
+	}
+	for _, sep := range []string{"\r", "\n", "\x00"} {
+		dir := t.TempDir()
+		_, _, code := runCLI(t, dir, false, "config", "set", "machine_label", "node"+sep+"x=y")
+		if code != 2 {
+			t.Fatalf("record separator exit=%d", code)
+		}
+		assertDirEmpty(t, dir)
+	}
+}
+
 func TestConfigSetGet(t *testing.T) {
 	dir := t.TempDir()
 	stdout, _, exit := runCLI(t, dir, false, "config", "set", "machine_label", "lab-1")
@@ -39,23 +84,12 @@ func TestConfigSetGet(t *testing.T) {
 	if exit != 0 || stdout != "{\"key\":\"machine_label\",\"value\":\"lab-1\"}\n" {
 		t.Errorf("config get after set = %q (exit %d)", stdout, exit)
 	}
-	// Other keys keep their defaults; the file holds the nine keys as
-	// key=value lines in canonical order. The herdr_soho_bin key is
-	// stored in its empty auto form, never the resolved name, so a soho
-	// installed later is found.
+	// Other keys keep their defaults without materializing absent records.
 	data, err := os.ReadFile(filepath.Join(dir, "config"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "machine_label=lab-1\n" +
-		"dispatcher_url=\n" +
-		"herdr_soho_bin=\n" +
-		"push_timeout_s=15\n" +
-		"herdr_bin=herdr\n" +
-		"route_machines=\n" +
-		"route_disabled=\n" +
-		"route_orchestrator_name=orchestrator\n" +
-		"route_probe_timeout_s=20\n"
+	want := "machine_label=lab-1\n"
 	if string(data) != want {
 		t.Errorf("config file = %q, want %q", data, want)
 	}
@@ -224,7 +258,7 @@ func TestConfigCommentsAndBlanks(t *testing.T) {
 	if exit != 0 || stdout != "{\"key\":\"machine_label\",\"value\":\"lab-9\"}\n" {
 		t.Errorf("config get with comments = %q (exit %d)", stdout, exit)
 	}
-	// set rewrites the file canonically (no comments kept, all keys present)
+	// Set changes only the requested record and preserves surrounding text.
 	if _, _, exit := runCLI(t, dir, false, "config", "set", "machine_label", "lab-10"); exit != 0 {
 		t.Fatal("config set")
 	}
@@ -232,14 +266,8 @@ func TestConfigCommentsAndBlanks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(data)
-	if strings.Contains(s, "#") || strings.Contains(s, "lab-9") {
-		t.Errorf("rewritten file keeps old content:\n%s", s)
-	}
-	for _, want := range []string{"machine_label=lab-10", "dispatcher_url=\n", "herdr_soho_bin=\n", "push_timeout_s=15", "herdr_bin=herdr", "route_machines=\n", "route_disabled=\n", "route_orchestrator_name=orchestrator", "route_probe_timeout_s=20\n"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("rewritten file missing %q:\n%s", want, s)
-		}
+	if want := strings.Replace(content, "machine_label=lab-9", "machine_label=lab-10", 1); string(data) != want {
+		t.Errorf("config = %q, want %q", data, want)
 	}
 }
 

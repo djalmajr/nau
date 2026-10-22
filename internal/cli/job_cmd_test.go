@@ -1323,13 +1323,14 @@ func TestJobForwardNowriteGraceDiagAfterDelivery(t *testing.T) {
 		t.Fatalf("stderr = %q, want the diagnostic kept", errb.String())
 	}
 	// Under NOWRITE nothing is written to the config dir but the config
-	// file itself: no state dir, no friction.
+	// file itself and the lock its setup write left: no state dir, no
+	// friction.
 	if _, err := os.Stat(filepath.Join(cfgDir, "state")); !os.IsNotExist(err) {
 		t.Fatalf("state dir under NOWRITE: stat err = %v, want not exist", err)
 	}
 	var files []string
 	_ = filepath.Walk(cfgDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && info.Mode().IsRegular() {
+		if err == nil && info.Mode().IsRegular() && info.Name() != "config.lock" {
 			files = append(files, path)
 		}
 		return nil

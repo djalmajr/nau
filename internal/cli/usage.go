@@ -64,6 +64,7 @@ commands:
                                     [<resumo>|-]
   auth login|status|logout          manage the per-user dispatcher API key
   config get|set|list               manage the machine configuration
+                                    set [--if-automatic] <key> <value>
   doctor                            check the bridge prerequisites
   capabilities --json               print the bridge capability line
   version                           print the version
