@@ -520,6 +520,7 @@ func cmdA2AServe(args []string, env Env) int {
 			Grants:   a2acore.RoutingGrants{Routes: routes},
 		}
 	}
+	deliveryLogger := a2aServeLogger(env.Stderr)
 	srv, err := a2aserver.New(a2aserver.Config{
 		Store: store,
 		Auth:  a2aserver.LocalOrBearer{Local: a2aserver.LocalOperator{}, Bearer: bearer},
@@ -536,7 +537,7 @@ func cmdA2AServe(args []string, env Env) int {
 		// above; stdout keeps the JSON status lines. Every URL of a
 		// record is masked as <url> before it is written: a webhook URL
 		// can carry a secret in the path or the query.
-		Logger: a2aServeLogger(env.Stderr),
+		Logger: slog.New(a2aWarnHandler{deliveryLogger.Handler()}),
 	})
 	if err != nil {
 		_ = ln.Close()
@@ -584,7 +585,7 @@ func cmdA2AServe(args []string, env Env) int {
 	loops.Add(2)
 	go func() {
 		defer loops.Done()
-		a2aDeliverLoop(deliverCtx, store, newA2aNoticeSender(cfg.HerdrSohoBin, childEnviron(env)), deliver, env.Now, a2aServeLogger(env.Stderr))
+		a2aDeliverLoop(deliverCtx, store, newA2aNoticeSender(cfg.HerdrSohoBin, childEnviron(env)), deliver, env.Now, deliveryLogger)
 	}()
 	go func() {
 		defer loops.Done()

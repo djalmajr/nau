@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -631,5 +632,85 @@ func TestA2AServeInvalidPushURLLive(t *testing.T) {
 				t.Fatalf("stdout = %q, want the serving line", stdout)
 			}
 		})
+	}
+}
+
+// Exercise the production SDK's error fallback through the actual serve.
+func TestA2AServeSDKInfoFiltered(t *testing.T) {
+	dir := t.TempDir()
+	a2aRegisterNotify(t, dir)
+	exits, cancel, out, stderr, _ := startA2A337Serve(t, dir, a2acore.NewMemorySecrets())
+	defer func() {
+		cancel()
+		select {
+		case exit := <-exits:
+			if exit != 0 {
+				t.Errorf("serve exit=%d", exit)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("serve did not stop")
+		}
+	}()
+	var start struct {
+		Listen string `json:"listen"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out.snapshot())), &start); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(outbox.StateDir(dir), "registry.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER fail_admit_log BEFORE INSERT ON a2a_ingress BEGIN SELECT RAISE(ABORT, 'admission write refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	req := &a2a.SendMessageRequest{
+		Message: &a2a.Message{
+			ID: "admission-log-message", Role: a2a.MessageRoleUser,
+			Parts: a2a.ContentParts{a2a.NewTextPart("admission-content-canary")},
+			Metadata: map[string]any{
+				a2acore.MetaProject: "org/example", a2acore.MetaSession: "admission-log-session",
+				a2acore.MetaEpoch: float64(1), a2acore.MetaSeq: float64(1),
+			},
+		},
+		Config: &a2a.SendMessageConfig{ReturnImmediately: true},
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post("http://"+start.Listen+"/message:send", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("HTTP=%d response=%s stderr=%s", resp.StatusCode, data, stderr.snapshot())
+	if resp.StatusCode != 500 {
+		t.Fatalf("fault fixture did not reach admission: status=%d body=%s", resp.StatusCode, data)
+	}
+	warned := false
+	for _, line := range strings.Split(strings.TrimSpace(stderr.snapshot()), "\n") {
+		var rec struct{ Level, Msg string }
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Level == "WARN" && rec.Msg == "agent execution failed" {
+			warned = true
+		}
+		if rec.Level == "INFO" && rec.Msg != "a2a: delivery" {
+			t.Errorf("serve enabled another INFO producer: %s", line)
+		}
+	}
+	if !warned {
+		t.Error("SDK admission failure warning was dropped")
+	}
+	if strings.Contains(stderr.snapshot(), "admission-content-canary") {
+		t.Error("message content reached log")
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -91,5 +92,65 @@ func TestA2AServeLoggerMasksURL(t *testing.T) {
 	logger.Debug("debug for http://a/one")
 	if buf.String() != line {
 		t.Fatalf("DEBUG record reached writer: %q", buf.String())
+	}
+}
+
+// SDK derivation must retain WARN filtering without losing the shared mask.
+func TestA2AServeWarnHandler(t *testing.T) {
+	for _, name := range []string{"root", "attrs", "group"} {
+		t.Run(name, func(t *testing.T) {
+			var buf bytes.Buffer
+			delivery := a2aServeLogger(&buf)
+			agent := slog.New(a2aWarnHandler{delivery.Handler()})
+			switch name {
+			case "attrs":
+				agent = agent.With("endpoint", "https://example.test/attribute-canary")
+			case "group":
+				agent = agent.WithGroup("sdk").With("endpoint", "https://example.test/group-canary")
+			}
+			agent.Debug("SDK debug")
+			agent.Info("SDK info")
+			if buf.Len() != 0 {
+				t.Fatalf("below-WARN SDK records reached stderr: %s", buf.String())
+			}
+			delivery.Info("a2a: delivery", "state", "accepted", "ref", "https://example.test/attempt-canary")
+			agent.Warn("SDK warning https://example.test/message-canary", "url", "https://example.test/value-canary")
+			agent.Error("SDK error")
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 3 {
+				t.Fatalf("records=%s", buf.String())
+			}
+			for i, level := range []string{"INFO", "WARN", "ERROR"} {
+				var rec map[string]any
+				if err := json.Unmarshal([]byte(lines[i]), &rec); err != nil {
+					t.Fatal(err)
+				}
+				if rec["level"] != level {
+					t.Fatalf("record %d=%s", i, lines[i])
+				}
+				if i == 0 && (rec["msg"] != "a2a: delivery" || rec["ref"] != "<url>") {
+					t.Fatalf("attempt=%s", lines[i])
+				}
+				if i == 1 {
+					if rec["msg"] != "SDK warning <url>" {
+						t.Fatalf("warning=%s", lines[i])
+					}
+					attrs := rec
+					if name == "group" {
+						var ok bool
+						attrs, ok = rec["sdk"].(map[string]any)
+						if !ok {
+							t.Fatalf("missing group: %s", lines[i])
+						}
+					}
+					if attrs["url"] != "<url>" || (name != "root" && attrs["endpoint"] != "<url>") {
+						t.Fatalf("attributes lost or unmasked: %s", lines[i])
+					}
+				}
+			}
+			if strings.Contains(buf.String(), "canary") || strings.Contains(buf.String(), "example.test") {
+				t.Fatalf("URL leaked: %s", buf.String())
+			}
+		})
 	}
 }

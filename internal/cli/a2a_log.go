@@ -1,11 +1,12 @@
 package cli
 
-// The a2a serve logger: the JSON handler the a2a serve puts on stderr,
-// at the INFO level, with every URL of a record masked before it is
-// written. A webhook URL can carry a secret in the path or the query,
-// and a log record must never carry it.
+// The a2a serve loggers share one JSON handler on stderr. Notice attempts
+// use INFO; the SDK and other producers use a WARN filter. Every URL is
+// masked before writing. A webhook URL can carry a secret in the path or
+// the query, and a log record must never carry it.
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"regexp"
@@ -23,7 +24,7 @@ func a2aMaskURLs(value string) string {
 	return a2aURLPattern.ReplaceAllString(value, a2aURLMask)
 }
 
-// a2aServeLogger builds the logger of the a2a serve: a JSON handler on
+// a2aServeLogger builds the notice-attempt logger: a JSON handler on
 // the given writer at the INFO level whose ReplaceAttr masks every URL
 // of the message and of every string or error attribute (an error
 // becomes the string of the already-masked error); the other values
@@ -33,6 +34,25 @@ func a2aServeLogger(w io.Writer) *slog.Logger {
 		Level:       slog.LevelInfo,
 		ReplaceAttr: a2aServeMaskAttr,
 	}))
+}
+
+// a2aWarnHandler preserves the shared JSON handler and its URL mask while
+// keeping SDK and agent records below WARN out of stderr. Derived handlers
+// retain this filter when the SDK adds attributes or groups.
+type a2aWarnHandler struct {
+	slog.Handler
+}
+
+func (h a2aWarnHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn && h.Handler.Enabled(ctx, level)
+}
+
+func (h a2aWarnHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return a2aWarnHandler{h.Handler.WithAttrs(attrs)}
+}
+
+func (h a2aWarnHandler) WithGroup(name string) slog.Handler {
+	return a2aWarnHandler{h.Handler.WithGroup(name)}
 }
 
 // a2aServeMaskAttr implements the ReplaceAttr of the a2a serve logger:
