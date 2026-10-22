@@ -304,34 +304,10 @@ func TestA2AServeMasksPushURLInStderr(t *testing.T) {
 		case <-time.After(15 * time.Second):
 		}
 	})
-	// The first stderr line is the sender's record: the decision loop
-	// applies the decision out of band every 50 ms, the gate passes
-	// the local config through and the send fails at the SSRF guard.
-	line := errb.nextLine(t, 10*time.Second)
-	var rec map[string]any
-	if err := json.Unmarshal([]byte(line), &rec); err != nil {
-		t.Fatalf("first stderr line %q is not JSON: %v", line, err)
-	}
-	if rec["msg"] != "push sending failed" {
-		t.Fatalf("record = %v, want msg %q", rec, "push sending failed")
-	}
 	// The gate's push logger classifies the SSRF guard's refusal (a
 	// transport error): the fixed class, never the error text, which
 	// carries the URL — the canary of the hook path never appears.
-	if rec["error"] != "push endpoint unreachable" {
-		t.Fatalf("record error = %v, want the fixed classification %q", rec["error"], "push endpoint unreachable")
-	}
-	stderr := errb.snapshot()
-	for _, banned := range []string{a2a337bURL, "secret-canary-337", a2a337bAnswer} {
-		if strings.Contains(stderr, banned) {
-			t.Fatalf("stderr carries %q (%q)", banned, stderr)
-		}
-	}
-	// Exactly one stderr line (the JSON record) and stdout keeps the
-	// serving line and nothing else.
-	if n := strings.Count(stderr, "\n"); n != 1 {
-		t.Fatalf("stderr has %d line(s), want exactly the one JSON record (%q)", n, stderr)
-	}
+	a2a337CheckFailedPushRecord(t, errb, "push endpoint unreachable", 1, a2a337bURL, "secret-canary-337", a2a337bAnswer)
 	stdout := out.snapshot()
 	if n := strings.Count(stdout, "\n"); n != 1 {
 		t.Fatalf("stdout has %d line(s), want exactly the serving line (%q)", n, stdout)
@@ -362,14 +338,11 @@ func TestA2AServeLogsSuppressedPushOnStderr(t *testing.T) {
 		case <-time.After(15 * time.Second):
 		}
 	})
-	// The first stderr line is the suppression record: the decision
-	// loop applies the decision out of band every 50 ms and the gate
-	// suppresses the final push with no_owner_reference. Poll with a
-	// bounded deadline, no fixed sleep.
-	line := errb.nextLine(t, 10*time.Second)
+	// Find the suppression among any concurrent delivery records.
+	line := a2aWaitLogRecord(t, errb, "a2a: push suppressed", 10*time.Second)
 	var rec map[string]any
 	if err := json.Unmarshal([]byte(line), &rec); err != nil {
-		t.Fatalf("first stderr line %q is not JSON: %v", line, err)
+		t.Fatalf("stderr line %q is not JSON: %v", line, err)
 	}
 	if len(rec) != 5 {
 		t.Fatalf("record has %d keys (%v), want exactly time, level, msg, task_id and reason", len(rec), rec)
@@ -413,11 +386,11 @@ func TestA2AServeLogsSuppressedPushOnStderr(t *testing.T) {
 		// deadline bounds the wait.
 		wake.waitWoken(t, deadline)
 	}
-	// Exactly one stderr line (the JSON record, no text lines) and
-	// none of the fixture values in it.
+	// Exactly one suppression record, excluding delivery records, and
+	// none of the fixture values anywhere in stderr.
 	stderr := errb.snapshot()
-	if n := strings.Count(stderr, "\n"); n != 1 {
-		t.Fatalf("stderr has %d line(s), want exactly the one JSON record (%q)", n, stderr)
+	if n := len(a2aLogRecordLines(t, stderr, "a2a: push suppressed", "push sending failed")); n != 1 {
+		t.Fatalf("stderr has %d push records, want exactly one suppression (%q)", n, stderr)
 	}
 	for _, banned := range []string{a2a337Token, a2a337URL, a2a337Owner, a2a337Project, a2a337Answer} {
 		if strings.Contains(stderr, banned) {
@@ -435,23 +408,23 @@ func TestA2AServeLogsSuppressedPushOnStderr(t *testing.T) {
 }
 
 // a2a337CheckFailedPushRecord asserts the stderr of failed push sends:
-// one to maxRecords JSON records, each the sender's message at ERROR
+// one to maxRecords push JSON records, each the sender's message at ERROR
 // level with the fixed classification of the failure, and none of the
 // banned values (the URL or the canary) anywhere in the stderr. A live
 // send may push both its submitted and its working event, so its
 // failures log one or two records depending on timing.
 func a2a337CheckFailedPushRecord(t *testing.T, errb *testLockedBuffer, wantClass string, maxRecords int, banned ...string) {
 	t.Helper()
-	errb.nextLine(t, 10*time.Second)
+	a2aWaitLogRecord(t, errb, "push sending failed", 10*time.Second)
 	stderr := errb.snapshot()
 	for _, banned := range banned {
 		if strings.Contains(stderr, banned) {
 			t.Fatalf("stderr carries %q (the error text must not reach the log): %s", banned, stderr)
 		}
 	}
-	lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+	lines := a2aLogRecordLines(t, stderr, "push sending failed", "a2a: push suppressed")
 	if len(lines) < 1 || len(lines) > maxRecords {
-		t.Fatalf("stderr has %d line(s), want 1 to %d JSON records (%q)", len(lines), maxRecords, stderr)
+		t.Fatalf("stderr has %d push records, want 1 to %d (%q)", len(lines), maxRecords, stderr)
 	}
 	for _, line := range lines {
 		var rec map[string]any
@@ -464,6 +437,62 @@ func a2a337CheckFailedPushRecord(t *testing.T, errb *testLockedBuffer, wantClass
 		if rec["error"] != wantClass {
 			t.Fatalf("record error = %v, want the fixed classification %q", rec["error"], wantClass)
 		}
+	}
+}
+
+func a2aWaitLogRecord(t *testing.T, buf *testLockedBuffer, msg string, timeout time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			t.Fatalf("no %q log within %v (buffer %q)", msg, timeout, buf.snapshot())
+		}
+		line := buf.nextLine(t, time.Until(deadline))
+		if len(a2aLogRecordLines(t, line, msg)) == 1 {
+			return line
+		}
+	}
+}
+
+func a2aLogRecordLines(t *testing.T, stderr string, messages ...string) []string {
+	t.Helper()
+	var records []string
+	for _, line := range strings.Split(strings.TrimSuffix(stderr, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("stderr line %q is not JSON: %v", line, err)
+		}
+		for _, msg := range messages {
+			if rec["msg"] == msg {
+				records = append(records, line)
+				break
+			}
+		}
+	}
+	return records
+}
+
+// Counting every stderr record as a push fails when a delivery log interleaves.
+func TestA2AServePushLogInterleaving(t *testing.T) {
+	const delivery = `{"level":"WARN","msg":"a2a: delivery","state":"uncertain"}`
+	const push = `{"level":"ERROR","msg":"push sending failed","error":"invalid push URL"}`
+	for name, records := range map[string][]string{
+		"delivery_before":  {delivery, push},
+		"delivery_between": {push, delivery, push},
+		"delivery_after":   {push, delivery},
+	} {
+		t.Run(name, func(t *testing.T) {
+			buf := &testLockedBuffer{}
+			buf.Write([]byte(strings.Join(records, "\n") + "\n"))
+			maxRecords := 1
+			if name == "delivery_between" {
+				maxRecords = 2
+			}
+			a2a337CheckFailedPushRecord(t, buf, "invalid push URL", maxRecords)
+		})
 	}
 }
 

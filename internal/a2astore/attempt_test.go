@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -231,5 +233,74 @@ func TestReadUncertainLegacyWithoutTasks(t *testing.T) {
 	summary, err := ReadUncertain(context.Background(), path, testNow.Add(time.Minute))
 	if err != nil || summary == nil || summary.Uncertain != 1 || summary.Oldest == nil || *summary.Oldest != 60 {
 		t.Fatalf("legacy without tasks=%+v %v", summary, err)
+	}
+}
+
+// Start the writer at database/sql's first context check, before the first
+// SQLite query but after ReadUncertain has selected its connection parameters.
+type startWriterContext struct {
+	context.Context
+	once  sync.Once
+	start func()
+}
+
+func (c *startWriterContext) Done() <-chan struct{} {
+	c.once.Do(c.start)
+	return nil
+}
+
+func (c *startWriterContext) Err() error {
+	c.once.Do(c.start)
+	return nil
+}
+
+// Using immutable=1 when the WAL is absent hides a writer's committed notice.
+func TestReviewWriterStartsDuringDoctorRead(t *testing.T) {
+	clk := &clock{t: testNow}
+	s, claim := attemptFixture(t, clk)
+	var seq int
+	var name, path string
+	if err := s.db.QueryRow(`PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("expected no WAL before reader: %v", err)
+	}
+	var writer *Store
+	t.Cleanup(func() {
+		if writer != nil {
+			writer.Close()
+		}
+	})
+	started := false
+	ctx := &startWriterContext{Context: context.Background(), start: func() {
+		var err error
+		writer, err = OpenFile(path, Options{Now: clk.Now})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Complete(context.Background(), claim, notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "deadline"}, clk.Now()); err != nil {
+			t.Fatal(err)
+		}
+		started = true
+		t.Log("writer opened WAL and committed uncertain before the first reader query")
+	}}
+	got, err := ReadUncertain(ctx, path, clk.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started {
+		t.Fatal("writer did not start during the read")
+	}
+	control, err := ReadUncertain(context.Background(), path, clk.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("racing read=%+v subsequent normal WAL read=%+v", got, control)
+	if got == nil || control == nil || got.Uncertain != 1 || control.Uncertain != 1 || got.Oldest == nil || control.Oldest == nil || *got.Oldest != 60 || *control.Oldest != 60 {
+		t.Fatalf("a committed notice was hidden: racing=%+v normal=%+v; want count=1 age=60", got, control)
 	}
 }

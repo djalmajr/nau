@@ -193,10 +193,12 @@ func Deliver(ctx context.Context, q Queue, sender notify.Sender, now func() time
 					ms = 0
 				}
 				category := res.Category
+				level := slog.LevelWarn
 				if state == DeliveryAccepted {
 					category = ""
+					level = slog.LevelInfo
 				}
-				opts.Logger.Warn("a2a: delivery", "delivery", c.DeliveryID, "task", c.TaskID, "role", c.Role, "ref", c.Ref, "state", state, "error", category, "exit", res.Exit, "ms", ms)
+				opts.Logger.Log(ctx, level, "a2a: delivery", "delivery", c.DeliveryID, "task", c.TaskID, "role", c.Role, "ref", c.Ref, "state", state, "error", category, "exit", res.Exit, "ms", ms)
 			}
 			mu.Lock()
 			switch state {

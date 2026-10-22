@@ -60,7 +60,7 @@ func TestA2AServeAttemptLog(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	oldCtx, oldSender := a2aServeContext, newA2aNoticeSender
 	a2aServeContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
-	sender := &fakeA2ASender{script: map[string][]notify.SendResult{}}
+	sender := &fakeA2ASender{script: map[string][]notify.SendResult{"local/owner": {{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "deadline"}}}}
 	newA2aNoticeSender = func(string, []string) notify.Sender { return sender }
 	exits := make(chan int, 1)
 	t.Cleanup(func() {
@@ -78,15 +78,8 @@ func TestA2AServeAttemptLog(t *testing.T) {
 	env := a2aTestEnv(t, dir, out, stderr)
 	go func() { exits <- cmdA2A([]string{"serve", "--listen", "127.0.0.1:0"}, env) }()
 	out.nextLine(t, 10*time.Second)
-	deadline := time.After(3 * time.Second)
-	for !strings.Contains(stderr.snapshot(), `"delivery"`) {
-		select {
-		case <-deadline:
-			t.Fatalf("no attempt log: %s", stderr.snapshot())
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-	logs := strings.Split(strings.TrimSpace(stderr.snapshot()), "\n")
+	a2aWaitLogRecord(t, stderr, "a2a: delivery", 3*time.Second)
+	logs := a2aLogRecordLines(t, stderr.snapshot(), "a2a: delivery")
 	if len(logs) != 1 {
 		t.Fatalf("attempt logs=%q", logs)
 	}
@@ -94,7 +87,7 @@ func TestA2AServeAttemptLog(t *testing.T) {
 	if err := json.Unmarshal([]byte(logs[0]), &fields); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]any{"delivery": float64(1), "task": "task-actor", "role": "owner", "ref": "local/owner", "state": "accepted", "error": "", "exit": float64(0), "ms": float64(0)} {
+	for k, v := range map[string]any{"level": "WARN", "msg": "a2a: delivery", "delivery": float64(1), "task": "task-actor", "role": "owner", "ref": "local/owner", "state": "uncertain", "error": "deadline", "exit": float64(15), "ms": float64(0)} {
 		if fields[k] != v {
 			t.Errorf("log %s=%v, want %v: %s", k, fields[k], v, logs[0])
 		}

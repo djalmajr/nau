@@ -42,13 +42,6 @@ func ReadUncertain(ctx context.Context, path string, now time.Time) (*UncertainS
 		parts[i] = url.PathEscape(parts[i])
 	}
 	query := "?mode=ro&_pragma=busy_timeout(10000)"
-	if _, err := os.Stat(path + "-wal"); os.IsNotExist(err) {
-		// A cleanly closed database needs no WAL bookkeeping. Preserve normal
-		// WAL reads when a writer is alive so its committed rows remain visible.
-		query += "&immutable=1"
-	} else if err != nil {
-		return nil, err
-	}
 	db, err := sql.Open("sqlite", "file:"+strings.Join(parts, "/")+query)
 	if err != nil {
 		return nil, err

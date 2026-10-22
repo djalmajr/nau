@@ -12,6 +12,7 @@ import (
 	"github.com/djalmajr/nau/internal/notify"
 )
 
+// Logging every attempt at WARN fails the accepted case; INFO must be reserved for accepted.
 func TestDeliverAttemptLogOutcomes(t *testing.T) {
 	for _, tc := range []struct {
 		outcome, state string
@@ -39,10 +40,12 @@ func TestDeliverAttemptLogOutcomes(t *testing.T) {
 				t.Fatal(err)
 			}
 			category := "deadline"
+			level := "WARN"
 			if tc.state == DeliveryAccepted {
 				category = ""
+				level = "INFO"
 			}
-			if fields["state"] != tc.state || fields["error"] != category || fields["exit"] != float64(15) || fields["ms"] != float64(2175) {
+			if fields["level"] != level || fields["state"] != tc.state || fields["error"] != category || fields["exit"] != float64(15) || fields["ms"] != float64(2175) {
 				t.Fatalf("fields=%+v", fields)
 			}
 			if strings.Contains(log.String(), c.Job) {

@@ -139,6 +139,11 @@ func TestDoctorA2ANowriteExistingDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	db := filepath.Join(state, "registry.db")
+	contents, err := os.ReadFile(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, _, exit := doctorAt(t, dir)
 	if exit != 0 || !strings.Contains(out, `"uncertain":1`) {
 		t.Fatalf("doctor=%d %q", exit, out)
@@ -147,15 +152,21 @@ func TestDoctorA2ANowriteExistingDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := func(es []os.DirEntry) string {
-		var n []string
-		for _, e := range es {
-			n = append(n, e.Name())
-		}
-		return strings.Join(n, ",")
+	names := make(map[string]bool)
+	for _, e := range before {
+		names[e.Name()] = true
 	}
-	if names(before) != names(after) {
-		t.Fatalf("before=%s after=%s", names(before), names(after))
+	for _, e := range after {
+		if !names[e.Name()] && e.Name() != "registry.db-wal" && e.Name() != "registry.db-shm" {
+			t.Errorf("doctor created unexpected file %q", e.Name())
+		}
+		delete(names, e.Name())
+	}
+	if len(names) != 0 {
+		t.Errorf("doctor removed files: %v", names)
+	}
+	if after, err := os.ReadFile(db); err != nil || !bytes.Equal(contents, after) {
+		t.Fatalf("doctor mutated registry: %v", err)
 	}
 	if err := os.Chmod(state, 0o500); err != nil {
 		t.Fatal(err)
@@ -164,6 +175,9 @@ func TestDoctorA2ANowriteExistingDatabase(t *testing.T) {
 	out, _, exit = doctorAt(t, dir)
 	if exit != 0 || !strings.Contains(out, `"uncertain":1`) {
 		t.Fatalf("read-only doctor=%d %q", exit, out)
+	}
+	if after, err := os.ReadFile(db); err != nil || !bytes.Equal(contents, after) {
+		t.Fatalf("read-only doctor mutated registry: %v", err)
 	}
 }
 

@@ -38,8 +38,9 @@ type doctorSoho struct {
 }
 
 // cmdDoctor implements `doctor`: a read-only JSON line with the bridge
-// prerequisites. It works under HERDR_HERMES_NOWRITE=1 and creates no
-// missing state or database files. It exits 43 when the backend is missing or lacks either
+// prerequisites. It works under HERDR_HERMES_NOWRITE=1 without creating a
+// database, migrating schemas or writing data; SQLite may create WAL/SHM
+// control files beside an existing database. It exits 43 when the backend is missing or lacks either
 // capability, else 0. When the selected backend binary still carries
 // the legacy herdr-soho name while the renamed soho binary is on the
 // machine's PATH, it adds one documented warning to stderr; the JSON
