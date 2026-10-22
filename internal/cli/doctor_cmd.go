@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/djalmajr/nau/internal/a2astore"
 	"github.com/djalmajr/nau/internal/config"
 	"github.com/djalmajr/nau/internal/jobapi"
 	"github.com/djalmajr/nau/internal/outbox"
@@ -37,8 +38,9 @@ type doctorSoho struct {
 }
 
 // cmdDoctor implements `doctor`: a read-only JSON line with the bridge
-// prerequisites. It works under HERDR_HERMES_NOWRITE=1 and creates no
-// files. It exits 43 when the backend is missing or lacks either
+// prerequisites. It works under HERDR_HERMES_NOWRITE=1 without creating a
+// database, migrating schemas or writing data; SQLite may create WAL/SHM
+// control files beside an existing database. It exits 43 when the backend is missing or lacks either
 // capability, else 0. When the selected backend binary still carries
 // the legacy herdr-soho name while the renamed soho binary is on the
 // machine's PATH, it adds one documented warning to stderr; the JSON
@@ -74,6 +76,7 @@ func cmdDoctor(args []string, env Env) int {
 		KeyConfigured bool         `json:"key_configured"`
 		WakeHook      string       `json:"wake_hook"`
 		Outbox        doctorOutbox `json:"outbox"`
+		A2A           any          `json:"a2a,omitempty"`
 	}{
 		HerdrSoho:     so,
 		MachineLabel:  cfg.MachineLabel != "",
@@ -82,7 +85,19 @@ func cmdDoctor(args []string, env Env) int {
 		WakeHook:      wakeHookConfigured(ctx, runner, env),
 		Outbox:        doctorOutboxCounts(env),
 	}
+	db := filepath.Join(outbox.StateDir(env.ConfigDir), "registry.db")
+	summary, readErr := a2astore.ReadUncertain(ctx, db, env.Now())
+	if readErr != nil {
+		line.A2A = struct {
+			Error string `json:"error"`
+		}{Error: "unavailable"}
+	} else if summary != nil {
+		line.A2A = summary
+	}
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(line))
+	if summary != nil && summary.Uncertain > 0 {
+		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: %d A2A owner notice(s) uncertain, the oldest for %ds; once you have checked that the owner did not get it, re-queue it with '%s a2a retry --task <task-id> --delivery <delivery-id>'\n", env.program(), summary.Uncertain, *summary.Oldest, env.program())
+	}
 	if config.IsAutoBin(cfg.HerdrSohoBinStored()) {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin is automatic and resolved from the PATH; an ssh forced command (nau gate) may run with a minimal PATH that omits the backend; '%s config set herdr_soho_bin <absolute path>' pins it\n",
 			env.program(), env.program())

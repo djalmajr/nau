@@ -49,6 +49,8 @@ commands:
   a2a inbox [--db <path>] [--project <org/repo>] [--state <state>]
   a2a show --task <id> [--db <path>]
                                     list and read the A2A tasks of this machine (read-only)
+  a2a retry --task <id> --delivery <id> [--db <path>]
+                                    re-queue once an uncertain or exhausted A2A delivery
   a2a reply --task <id> --answer|--ask|--decline [--decision-id <id>] [--db <path>]
                         (<text>|-)
                                     record the owner decision on a task awaiting it
@@ -65,7 +67,7 @@ commands:
   auth login|status|logout          manage the per-user dispatcher API key
   config get|set|list               manage the machine configuration
                                     set [--if-automatic] <key> <value>
-  doctor                            check the bridge prerequisites
+  doctor                            check the bridge prerequisites and uncertain A2A deliveries
   capabilities --json               print the bridge capability line
   version                           print the version
   help                              print this usage

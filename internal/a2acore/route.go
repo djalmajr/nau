@@ -7,7 +7,7 @@ package a2acore
 // A RouteSource error is returned as is, with no plan: the caller
 // refuses and nothing is admitted.
 func Route(src RouteSource, project, subjectRef string) ([]PlannedDelivery, error) {
-	ownerRef, err := src.OwnerRef(project)
+	ownerRef, err := RecipientRef(src, project, RoleOwner)
 	if err != nil {
 		return nil, err
 	}
@@ -22,7 +22,7 @@ func Route(src RouteSource, project, subjectRef string) ([]PlannedDelivery, erro
 	if ownerRef != "" {
 		return []PlannedDelivery{{Role: RoleOwner, Ref: ownerRef, State: selfState(ownerRef)}}, nil
 	}
-	guardianRef, err := src.GuardianRef()
+	guardianRef, err := RecipientRef(src, project, RoleGuardian)
 	if err != nil {
 		return nil, err
 	}
@@ -33,4 +33,18 @@ func Route(src RouteSource, project, subjectRef string) ([]PlannedDelivery, erro
 		plan = append(plan, PlannedDelivery{Role: RoleGuardian, Ref: "", State: DeliveryNoRoute})
 	}
 	return plan, nil
+}
+
+// RecipientRef resolves the current registration for one delivery role.
+// Missing or unknown roles have no route; owner and guardian never substitute
+// for each other here. Route applies the new-message fallback separately.
+func RecipientRef(src RouteSource, project, role string) (string, error) {
+	switch role {
+	case RoleOwner:
+		return src.OwnerRef(project)
+	case RoleGuardian:
+		return src.GuardianRef()
+	default:
+		return "", nil
+	}
 }

@@ -77,7 +77,8 @@ func (s *Store) Admit(ctx context.Context, a a2acore.Admission) (a2acore.AdmitRe
 			}
 			if _, err := tx.Exec(`UPDATE a2a_deliveries SET task_id = ?, state = ?, attempts = 0,
 				next_attempt_unix = NULL, lease_until_unix = NULL, first_attempt = NULL, last_attempt = NULL,
-				accepted = NULL, accept_status = NULL, last_exit = NULL, last_error = NULL
+				accepted = NULL, accept_status = NULL, last_exit = NULL, last_error = NULL,
+				last_attempt_end = NULL, last_attempt_ms = NULL
 				WHERE ingress_id = ?`, a.TaskID, a2acore.DeliveryHeld, existingIngress); err != nil {
 				return err
 			}
@@ -262,6 +263,7 @@ func (s *Store) ClaimDue(ctx context.Context, now time.Time, limit int, lease ti
 				Ref:        d.ref,
 				Attempt:    d.attempts + 1,
 				TaskState:  d.state,
+				StartedAt:  now,
 			})
 		}
 		return nil
@@ -282,8 +284,9 @@ func (s *Store) Complete(ctx context.Context, c a2acore.DeliveryClaim, r notify.
 	return s.tx(ctx, func(tx *sql.Tx) error {
 		var state string
 		var attempts int
-		err := tx.QueryRow(`SELECT state, attempts FROM a2a_deliveries WHERE delivery_id = ?`, c.DeliveryID).
-			Scan(&state, &attempts)
+		var last sql.NullString
+		err := tx.QueryRow(`SELECT state, attempts, last_attempt FROM a2a_deliveries WHERE delivery_id = ?`, c.DeliveryID).
+			Scan(&state, &attempts, &last)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -307,9 +310,17 @@ func (s *Store) Complete(ctx context.Context, c a2acore.DeliveryClaim, r notify.
 		if r.Exit >= 0 {
 			lastExit = r.Exit
 		}
+		start := c.StartedAt
+		if start.IsZero() {
+			start, _ = time.Parse(time.RFC3339Nano, last.String)
+		}
+		ms := now.Sub(start).Milliseconds()
+		if start.IsZero() || ms < 0 {
+			ms = 0
+		}
 		_, err = tx.Exec(`UPDATE a2a_deliveries SET state = ?, next_attempt_unix = ?, lease_until_unix = NULL,
-			accepted = ?, accept_status = ?, last_exit = ?, last_error = ? WHERE delivery_id = ?`,
-			newState, nextUnix, accepted, acceptStatus, lastExit, lastError, c.DeliveryID)
+			accepted = ?, accept_status = ?, last_exit = ?, last_error = ?, last_attempt_end = ?, last_attempt_ms = ? WHERE delivery_id = ?`,
+			newState, nextUnix, accepted, acceptStatus, lastExit, lastError, now.Format("2006-01-02T15:04:05.999999999-07:00"), ms, c.DeliveryID)
 		return err
 	})
 }
@@ -339,6 +350,53 @@ func (s *Store) Release(ctx context.Context, c a2acore.DeliveryClaim) error {
 			WHERE delivery_id = ?`, a2acore.DeliveryPending, c.DeliveryID)
 		return err
 	})
+}
+
+// ErrNoRoute means the delivery role has no current registration.
+var ErrNoRoute = errors.New("a2astore: no_route")
+
+// Retry requeues an uncertain or exhausted delivery once, resolving its role
+// in the task's project again. The new reference, pending state and durable
+// retry marker commit together. Attempts and their outcomes are preserved.
+// An empty reference with no error means an ineligible task or delivery.
+func (s *Store) Retry(ctx context.Context, taskID string, deliveryID int64, routes a2acore.RouteSource) (string, error) {
+	var usedRef string
+	err := s.tx(ctx, func(tx *sql.Tx) error {
+		var project, role string
+		err := tx.QueryRow(`SELECT t.project, d.role FROM a2a_deliveries d
+			JOIN a2a_tasks t ON t.task_id = d.task_id
+			WHERE d.delivery_id = ? AND d.task_id = ? AND d.state IN (?, ?)
+			AND t.state NOT IN (?, ?, ?, ?)
+			AND NOT EXISTS (SELECT 1 FROM a2a_delivery_retries WHERE delivery_id = d.delivery_id)`,
+			deliveryID, taskID, a2acore.DeliveryUncertain, a2acore.DeliveryExhausted,
+			a2acore.StateCompleted, a2acore.StateCanceled, a2acore.StateFailed, a2acore.StateRejected).Scan(&project, &role)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		ref, err := a2acore.RecipientRef(routes, project, role)
+		if err != nil {
+			return err
+		}
+		if ref == "" {
+			return ErrNoRoute
+		}
+		if _, err := tx.Exec(`UPDATE a2a_deliveries SET ref = ?, state = ?, next_attempt_unix = ?, lease_until_unix = NULL
+			WHERE delivery_id = ? AND task_id = ?`, ref, a2acore.DeliveryPending, s.now().Unix(), deliveryID, taskID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO a2a_delivery_retries(delivery_id) VALUES (?)`, deliveryID); err != nil {
+			return err
+		}
+		usedRef = ref
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return usedRef, nil
 }
 
 // RecoverHeld marks obsolete the held deliveries whose ingress is older

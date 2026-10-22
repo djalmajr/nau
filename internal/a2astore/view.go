@@ -126,19 +126,22 @@ func (s *Store) inboxItem(ctx context.Context, row taskRow) (a2acore.InboxItem, 
 
 // deliveriesOf lists the deliveries of one task in delivery-id order.
 func (s *Store) deliveriesOf(ctx context.Context, taskID string) ([]a2acore.Delivery, error) {
-	rows, err := s.db.Query(`SELECT delivery_id, ingress_id, role, ref, state, attempts, next_attempt_unix, accepted, accept_status, last_exit, last_error
+	rows, err := s.db.Query(`SELECT delivery_id, ingress_id, role, ref, state, attempts, next_attempt_unix, accepted, accept_status, last_exit, last_error, last_attempt_end, last_attempt_ms, last_attempt
 		FROM a2a_deliveries WHERE task_id = ? ORDER BY delivery_id ASC`, taskID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	loc := s.now().Location()
+	now := s.now()
+	loc := now.Location()
 	var deliveries []a2acore.Delivery
 	for rows.Next() {
 		var d a2acore.Delivery
 		var ref, accepted, acceptStatus, lastError sql.NullString
 		var nextUnix, lastExit sql.NullInt64
-		if err := rows.Scan(&d.DeliveryID, &d.IngressID, &d.Role, &ref, &d.State, &d.Attempts, &nextUnix, &accepted, &acceptStatus, &lastExit, &lastError); err != nil {
+		var end, start sql.NullString
+		var ms sql.NullInt64
+		if err := rows.Scan(&d.DeliveryID, &d.IngressID, &d.Role, &ref, &d.State, &d.Attempts, &nextUnix, &accepted, &acceptStatus, &lastExit, &lastError, &end, &ms, &start); err != nil {
 			return nil, err
 		}
 		d.Ref = ref.String
@@ -152,12 +155,38 @@ func (s *Store) deliveriesOf(ctx context.Context, taskID string) ([]a2acore.Deli
 			d.LastExit = &exit
 		}
 		d.LastError = lastError.String
+		startTime, startErr := time.Parse(time.RFC3339Nano, start.String)
+		endTime, endErr := time.Parse(time.RFC3339Nano, end.String)
+		if endErr != nil || startErr != nil || endTime.Before(startTime) {
+			end = sql.NullString{}
+			ms = sql.NullInt64{}
+		}
+		d.LastAttemptEnd = end.String
+		if ms.Valid {
+			d.LastAttemptMS = &ms.Int64
+		}
+		if d.State == a2acore.DeliveryUncertain {
+			stamp := end.String
+			if !end.Valid {
+				stamp = start.String
+			}
+			age := uncertainAge(stamp, now)
+			d.UncertainAgeS = &age
+		}
 		deliveries = append(deliveries, d)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return deliveries, nil
+}
+
+func uncertainAge(stamp string, now time.Time) int64 {
+	end, err := time.Parse(time.RFC3339Nano, stamp)
+	if err != nil || now.Before(end) {
+		return 0
+	}
+	return int64(now.Sub(end) / time.Second)
 }
 
 // unixToTS renders a Unix second as the local timestamp text in the

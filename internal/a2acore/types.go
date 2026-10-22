@@ -341,21 +341,25 @@ type DeliveryClaim struct {
 	Ref        string
 	Attempt    int // the attempt number of this claim (1 for the first)
 	TaskState  string
+	StartedAt  time.Time // exact injected claim time; last_attempt keeps its existing format
 }
 
 // Delivery is one stored delivery, as listed by the inbox.
 type Delivery struct {
-	DeliveryID    int64  `json:"delivery_id"`
-	IngressID     int64  `json:"ingress_id"`
-	Role          string `json:"role"`
-	Ref           string `json:"ref,omitempty"`
-	State         string `json:"state"`
-	Attempts      int    `json:"attempts"`
-	NextAttemptAt string `json:"next_attempt_at,omitempty"`
-	AcceptedAt    string `json:"accepted_at,omitempty"`
-	AcceptStatus  string `json:"accept_status,omitempty"`
-	LastExit      *int   `json:"last_exit,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	DeliveryID     int64  `json:"delivery_id"`
+	IngressID      int64  `json:"ingress_id"`
+	Role           string `json:"role"`
+	Ref            string `json:"ref,omitempty"`
+	State          string `json:"state"`
+	Attempts       int    `json:"attempts"`
+	NextAttemptAt  string `json:"next_attempt_at,omitempty"`
+	AcceptedAt     string `json:"accepted_at,omitempty"`
+	AcceptStatus   string `json:"accept_status,omitempty"`
+	LastExit       *int   `json:"last_exit,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	LastAttemptEnd string `json:"last_attempt_end,omitempty"`
+	LastAttemptMS  *int64 `json:"last_attempt_ms,omitempty"`
+	UncertainAgeS  *int64 `json:"uncertain_age_s,omitempty"`
 }
 
 // ---------------------------------------------------------------------
