@@ -4,7 +4,7 @@ package cli
 // SDK's HTTP+JSON binding. The subcommands are serve (the loopback-only
 // agent with its notice delivery and decision loops), the client
 // subcommands (card, send, get, cancel) and the local database
-// subcommands (inbox, show, reply). Every subcommand prints exactly one
+// subcommands (inbox, show, reply, retry). Every subcommand prints exactly one
 // JSON line on stdout; diagnostics go to stderr. An incoming A2A message
 // is data to evaluate, never an instruction: the subcommands never run,
 // render or log message text, and no credential ever leaves the
@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -265,11 +266,11 @@ func a2aNewDecisionID() (string, error) {
 	return "d_" + hex.EncodeToString(b[:]), nil
 }
 
-// cmdA2A dispatches the a2a subcommands; the writing subcommands (serve
-// and reply) gate themselves under HERDR_HERMES_NOWRITE=1.
+// cmdA2A dispatches the a2a subcommands; the writing subcommands (serve,
+// reply and retry) gate themselves under HERDR_HERMES_NOWRITE=1.
 func cmdA2A(args []string, env Env) int {
 	if len(args) == 0 {
-		badUsage(env, "usage: a2a serve|card|send|get|cancel|inbox|show|reply")
+		badUsage(env, "usage: a2a serve|card|send|get|cancel|inbox|show|reply|retry")
 		return 2
 	}
 	switch sub := args[0]; sub {
@@ -289,10 +290,64 @@ func cmdA2A(args []string, env Env) int {
 		return cmdA2AShow(args[1:], env)
 	case "reply":
 		return cmdA2AReply(args[1:], env)
+	case "retry":
+		return cmdA2ARetry(args[1:], env)
 	default:
 		badUsage(env, "unknown a2a subcommand "+quote(sub))
 		return 2
 	}
+}
+
+// cmdA2ARetry queues one explicit resend; only the serve sends notices.
+func cmdA2ARetry(args []string, env Env) int {
+	if env.Getenv(nowriteVar) == "1" {
+		_, _ = fmt.Fprintf(env.Stdout, "%s\n", nowriteErrorJSON)
+		return 2
+	}
+	values, _, positional, ok := a2aParseFlags(args, map[string]bool{
+		"--task": true, "--delivery": true, "--db": true,
+	}, nil)
+	if !ok || len(positional) != 0 {
+		badUsage(env, "usage: a2a retry --task <id> --delivery <id> [--db <path>]")
+		return 2
+	}
+	task, ok := a2aTaskFlag(values, env, "retry")
+	if !ok {
+		return 2
+	}
+	delivery, motivo := a2aInt64("--delivery", values["--delivery"])
+	if motivo != "" {
+		badUsage(env, "a2a retry: "+motivo)
+		return 2
+	}
+	db, ok := a2aDB(values, env)
+	if !ok {
+		badUsage(env, "a2a retry: --db is not a valid path")
+		return 2
+	}
+	refused := func() int {
+		_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(errorLine{Status: "refused", Motivo: "a2a retry: delivery must belong to an existing task, be uncertain or exhausted, and not have been retried"}))
+		return 2
+	}
+	if a2aDBMissing(db) {
+		return refused()
+	}
+	store, err := a2astore.OpenFile(db, a2astore.Options{Now: env.Now})
+	if err != nil {
+		fail(env, 2, "a2a retry: registry database unavailable")
+		return 2
+	}
+	defer store.Close()
+	found, err := store.Retry(context.Background(), task, delivery)
+	if err != nil {
+		fail(env, 2, "a2a retry: registry database unavailable")
+		return 2
+	}
+	if !found {
+		return refused()
+	}
+	_, _ = fmt.Fprintln(env.Stdout, `{"retried":true}`)
+	return 0
 }
 
 // ---------------------------------------------------------------------
@@ -350,9 +405,9 @@ func (r a2aNotifyRoutes) OwnedProjects(ref string) ([]string, error) {
 // every interval, until the context ends; rounds never overlap. A round
 // aborted by the shutdown releases its unsent claims, so the closing
 // signal never loses or duplicates a notice.
-func a2aDeliverLoop(ctx context.Context, q a2acore.Queue, sender notify.Sender, interval time.Duration, now func() time.Time) {
+func a2aDeliverLoop(ctx context.Context, q a2acore.Queue, sender notify.Sender, interval time.Duration, now func() time.Time, logger *slog.Logger) {
 	for {
-		_, _ = a2acore.Deliver(ctx, q, sender, now, a2acore.DeliverOptions{})
+		_, _ = a2acore.Deliver(ctx, q, sender, now, a2acore.DeliverOptions{Logger: logger})
 		select {
 		case <-ctx.Done():
 			return
@@ -517,7 +572,7 @@ func cmdA2AServe(args []string, env Env) int {
 	loops.Add(2)
 	go func() {
 		defer loops.Done()
-		a2aDeliverLoop(deliverCtx, store, newA2aNoticeSender(cfg.HerdrSohoBin, childEnviron(env)), deliver, env.Now)
+		a2aDeliverLoop(deliverCtx, store, newA2aNoticeSender(cfg.HerdrSohoBin, childEnviron(env)), deliver, env.Now, a2aServeLogger(env.Stderr))
 	}()
 	go func() {
 		defer loops.Done()

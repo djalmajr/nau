@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS a2a_ingress(ingress_id INTEGER PRIMARY KEY AUTOINCREM
 CREATE TABLE IF NOT EXISTS a2a_fences(subject TEXT NOT NULL, session TEXT NOT NULL, epoch INTEGER NOT NULL, last_seq INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(subject, session));
 CREATE TABLE IF NOT EXISTS a2a_deliveries(delivery_id INTEGER PRIMARY KEY AUTOINCREMENT, ingress_id INTEGER NOT NULL, task_id TEXT NOT NULL, role TEXT NOT NULL, ref TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_unix INTEGER, lease_until_unix INTEGER, first_attempt TEXT, last_attempt TEXT, accepted TEXT, accept_status TEXT, last_exit INTEGER, last_error TEXT, created TEXT NOT NULL, created_unix INTEGER NOT NULL, UNIQUE(ingress_id, role));
 CREATE INDEX IF NOT EXISTS a2a_deliveries_due ON a2a_deliveries(state, next_attempt_unix);
+CREATE TABLE IF NOT EXISTS a2a_delivery_retries(delivery_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS a2a_decisions(decision_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, kind TEXT NOT NULL, text TEXT NOT NULL, actor TEXT NOT NULL, state TEXT NOT NULL, refusal TEXT, recorded TEXT NOT NULL, recorded_seq INTEGER NOT NULL, applied TEXT);
 CREATE TABLE IF NOT EXISTS a2a_push_configs(task_id TEXT NOT NULL, config_id TEXT NOT NULL, url TEXT NOT NULL, auth_scheme TEXT, token_ref TEXT, credentials_ref TEXT, created TEXT NOT NULL, PRIMARY KEY(task_id, config_id));
 CREATE TABLE IF NOT EXISTS a2a_secret_cleanup(handle TEXT PRIMARY KEY, scheduled TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, last_attempt TEXT);
@@ -172,6 +173,19 @@ func (s *Store) installSchema() error {
 	// migrated in place, a second open never alters it again.
 	if err := ensurePushOwnerRef(txn); err != nil {
 		return err
+	}
+	for _, column := range []struct{ name, kind string }{
+		{"last_attempt_end", "TEXT"}, {"last_attempt_ms", "INTEGER"},
+	} {
+		var n int
+		if err := txn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('a2a_deliveries') WHERE name = ?`, column.name).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := txn.Exec(`ALTER TABLE a2a_deliveries ADD COLUMN ` + column.name + ` ` + column.kind); err != nil {
+				return err
+			}
+		}
 	}
 	_, err = txn.Exec(`INSERT OR IGNORE INTO a2a_meta(key, value) VALUES('schema', '1')`)
 	if err != nil {

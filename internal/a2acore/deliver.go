@@ -2,6 +2,7 @@ package a2acore
 
 import (
 	"context"
+	"log/slog"
 	"regexp"
 	"strings"
 	"sync"
@@ -95,6 +96,8 @@ type DeliverOptions struct {
 	Concurrency int
 	// Lease is the in-flight lease of a claimed delivery.
 	Lease time.Duration
+	// Logger receives one metadata-only record per finished send, never releases.
+	Logger *slog.Logger
 }
 
 // DeliverSummary counts the outcomes of one delivery pass.
@@ -175,11 +178,26 @@ func Deliver(ctx context.Context, q Queue, sender notify.Sender, now func() time
 				mu.Unlock()
 				continue
 			}
+			start := c.StartedAt
+			if start.IsZero() {
+				start = now()
+			}
 			res := sender.Send(ctx, c.Ref, RenderNotice(c))
 			// The retry schedule counts from the end of the attempt.
 			ts := now()
 			state, _ = NextDeliveryState(c.Attempt, res, ts)
 			err = q.Complete(context.Background(), c, res, ts)
+			if opts.Logger != nil {
+				ms := ts.Sub(start).Milliseconds()
+				if ms < 0 {
+					ms = 0
+				}
+				category := res.Category
+				if state == DeliveryAccepted {
+					category = ""
+				}
+				opts.Logger.Warn("a2a: delivery", "delivery", c.DeliveryID, "task", c.TaskID, "role", c.Role, "ref", c.Ref, "state", state, "error", category, "exit", res.Exit, "ms", ms)
+			}
 			mu.Lock()
 			switch state {
 			case DeliveryAccepted:

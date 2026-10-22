@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/djalmajr/nau/internal/a2astore"
 	"github.com/djalmajr/nau/internal/config"
 	"github.com/djalmajr/nau/internal/jobapi"
 	"github.com/djalmajr/nau/internal/outbox"
@@ -38,7 +39,7 @@ type doctorSoho struct {
 
 // cmdDoctor implements `doctor`: a read-only JSON line with the bridge
 // prerequisites. It works under HERDR_HERMES_NOWRITE=1 and creates no
-// files. It exits 43 when the backend is missing or lacks either
+// missing state or database files. It exits 43 when the backend is missing or lacks either
 // capability, else 0. When the selected backend binary still carries
 // the legacy herdr-soho name while the renamed soho binary is on the
 // machine's PATH, it adds one documented warning to stderr; the JSON
@@ -68,12 +69,13 @@ func cmdDoctor(args []string, env Env) int {
 		so.Capabilities = &raw
 	}
 	line := struct {
-		HerdrSoho     doctorSoho   `json:"herdr_soho"`
-		MachineLabel  bool         `json:"machine_label"`
-		DispatcherURL bool         `json:"dispatcher_url"`
-		KeyConfigured bool         `json:"key_configured"`
-		WakeHook      string       `json:"wake_hook"`
-		Outbox        doctorOutbox `json:"outbox"`
+		HerdrSoho     doctorSoho                 `json:"herdr_soho"`
+		MachineLabel  bool                       `json:"machine_label"`
+		DispatcherURL bool                       `json:"dispatcher_url"`
+		KeyConfigured bool                       `json:"key_configured"`
+		WakeHook      string                     `json:"wake_hook"`
+		Outbox        doctorOutbox               `json:"outbox"`
+		A2A           *a2astore.UncertainSummary `json:"a2a,omitempty"`
 	}{
 		HerdrSoho:     so,
 		MachineLabel:  cfg.MachineLabel != "",
@@ -82,7 +84,12 @@ func cmdDoctor(args []string, env Env) int {
 		WakeHook:      wakeHookConfigured(ctx, runner, env),
 		Outbox:        doctorOutboxCounts(env),
 	}
+	db := filepath.Join(outbox.StateDir(env.ConfigDir), "registry.db")
+	line.A2A, _ = a2astore.ReadUncertain(ctx, db, env.Now())
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(line))
+	if line.A2A != nil && line.A2A.Uncertain > 0 {
+		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: %d A2A owner notice(s) uncertain, the oldest for %ds; once you have checked that the owner did not get it, re-queue it with '%s a2a retry --task <task-id> --delivery <delivery-id>'\n", env.program(), line.A2A.Uncertain, *line.A2A.Oldest, env.program())
+	}
 	if config.IsAutoBin(cfg.HerdrSohoBinStored()) {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin is automatic and resolved from the PATH; an ssh forced command (nau gate) may run with a minimal PATH that omits the backend; '%s config set herdr_soho_bin <absolute path>' pins it\n",
 			env.program(), env.program())
