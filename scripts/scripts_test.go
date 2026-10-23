@@ -34,6 +34,10 @@ func shAvailable(t *testing.T) string {
 	return sh
 }
 
+// installerRunBound bounds one installer run. A run takes 10-12 s on a
+// Windows node and has crossed 20 s on a busy Windows CI runner (DJA-488).
+const installerRunBound = 90 * time.Second
+
 func installerBuild(t *testing.T, output, source string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -240,7 +244,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			}
 			run := func(want int) string {
 				t.Helper()
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
 				defer cancel()
 				args := []string{"install.sh", "--no-plugin", "--bin-dir", bin}
 				if windows {
@@ -259,6 +263,11 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				cmd.Stdout, cmd.Stderr = &stdout, &stderr
 				err := cmd.Run()
 				out := stdout.String() + stderr.String()
+				if err != nil && ctx.Err() != nil {
+					// A killed process exits 1 on Windows; never report the
+					// bound as an installer failure.
+					t.Fatalf("installer did not finish within %s: %s", installerRunBound, out)
+				}
 				code := 0
 				if err != nil {
 					var exit *exec.ExitError
