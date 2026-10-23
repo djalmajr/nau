@@ -17,8 +17,8 @@ soho job status  --id <id>                      # read-only; state, event count,
 soho job wait    --id <id> [--timeout MS]       # blocks until a terminal state
 soho job events  --id <id> [--since <seq>] [--wait MS]   # JSON lines; long-poll
 soho job collect --id <id> [--md] [--verify]    # final report (JSON, or report.md with --md)
-soho job amend   --id <id> [<file>|-]           # contract change or answer to a question
-soho job send    --id <id> [<file>|-]           # non-blocking note to the job orchestrator
+soho job amend   --id <id> [<file>|-]           # contract change or answer to a question; prints numeric seq
+soho job send    --id <id> [<file>|-]           # non-blocking note to the job orchestrator; prints numeric seq
 soho job ack     --id <id> --upto <seq>         # dispatcher routed every decision up to <seq>
 soho job cancel  --id <id> [--grace <seconds>]
 soho job close   --id <id> [--force]
@@ -131,9 +131,9 @@ When the checkout is missing, the job clones it into `<job_repos_root>/<org>/<re
 ## Git: always in sync, always a draft pull request
 
 - The job orchestrator commits once per integrated slice; workers never commit or push.
-- Every new commit on `job/<id>` is pushed by the supervisor (it watches `HEAD` every 30 seconds; `job checkpoint` pushes immediately). Pushes never use `--force`; a rejected push becomes a `blocked` event.
+- Every new commit on `job/<id>` is pushed by the supervisor (it watches `HEAD` every 30 seconds; `job checkpoint` pushes immediately). Pushes never use `--force`; only a push the remote refused (`git push --porcelain` exits non-zero and prints a rejected ref line) becomes a `blocked` event. Any other failure (network, authentication, a missing repository) is a git sync error: the supervisor records it in the friction log with the redacted detail (an identical failure right after it is not repeated: one line with the count of the repeats replaces them, and the first clean pass after failures adds one recovery line) and the next cycle pushes again, with no `blocked` event and the job still `running`.
 - The first push opens a draft pull request against `base`. The final push happens in `finishing`. The job never merges and never marks the pull request ready for review.
-- A job that ends with no commit (research, review) opens no pull request: `report.json` has `"pr": null` and `"motivo": "sem commits"`.
+- A job that ends with no commit (research, review) opens no pull request: `report.json` has `"pr": null` and `"motivo": "sem commits"`. A job whose commit did not reach the remote has `"motivo": "push pendente"`, and when the git facts could not be read (and the commit list is unknown) the `motivo` is `"fatos de git indisponíveis"`. A `motivo` the job already recorded is never replaced.
 - On cancel or timeout, uncommitted changes in the job worktree become a `wip(job): checkpoint` commit, which is pushed; the pull request stays a draft.
 - Pull request bodies and commit messages use only the report's `resumo` and `publico` block (verdict, generic blockers, identifiers). They never carry hosts, paths, machine labels, models, costs, memory entries or event text.
 
@@ -257,7 +257,7 @@ State lives in `<checkout>/.soho/jobs/<id>/`: `state.json` (atomic write: temp f
 }
 ```
 
-- `done`: every item `[done]` or `[skipped]` with a reason, the acceptance checks pass, the review (from another model family) passes when code changed, and `sincronizado` is true. When the job orchestrator completed but a collaboration was still partial after the graceful closure, the job is still `done` (exit 0) and says so explicitly: `partial: true` and the collaboration IDs in `partial_collaborations`, with the detail in `colaboracoes`. A dispatcher must read those fields; `done` alone does not mean every collaboration finished.
+- `done`: every item `[done]` or `[skipped]` with a reason, the acceptance checks pass, the review passes when code changed, and `sincronizado` is true. When the job orchestrator completed but a collaboration was still partial after the graceful closure, the job is still `done` (exit 0) and says so explicitly: `partial: true` and the collaboration IDs in `partial_collaborations`, with the detail in `colaboracoes`. A dispatcher must read those fields; `done` alone does not mean every collaboration finished.
 - `failed`: partial items with no pending decision, a failed check or review, or a job orchestrator that settled without a report or disappeared.
 - `blocked`: an unresolved question, dialog, quota or provider error; the question goes in `perguntas`.
 - `memoria.global` holds suggestions that may apply beyond this repository; `memoria.projeto` holds notes that apply only to it. The job never writes them anywhere else; the dispatcher routes them.
@@ -320,8 +320,8 @@ Events are private to the dispatcher and are never copied to a public forge.
 
 ## Feedback from the dispatcher
 
-- `job amend`: the feedback changes the contract (goal, acceptance, decisions, constraints, scope) or answers a `question`/`blocked`. It becomes a formal amendment with a new report and unblocks the job.
-- `job send`: a non-blocking note that does not change the contract. The supervisor delivers it to the job orchestrator's pane on the same machine. It does not unblock the job.
+- `job amend`: the feedback changes the contract (goal, acceptance, decisions, constraints, scope) or answers a `question`/`blocked`. It becomes a formal amendment with a new report and unblocks the job. The JSON reply includes the request's numeric `seq`, matching the text `refs.seq_ref` in that request's `amend_received` event after delivery.
+- `job send`: a non-blocking note that does not change the contract. The supervisor delivers it to the job orchestrator's pane on the same machine. It does not unblock the job. The JSON reply includes the request's numeric `seq`, matching the text `refs.seq_ref` in that request's `amend_received` event after delivery.
 - When in doubt, use `amend`. The job orchestrator treats both as information from the dispatcher, never as user intent beyond their text.
 
 ## Input limits
