@@ -81,7 +81,14 @@ const NAV_GROUPS: Array<{ labelKey: TranslationKey; items: NavItem[] }> = [
   },
 ];
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({
+  children,
+  headerActions,
+}: {
+  children: React.ReactNode;
+  /** Ações da página à direita do título no header (ex.: troca Board | Lista). */
+  headerActions?: React.ReactNode;
+}) {
   const { t } = useI18n();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
@@ -146,11 +153,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </span>
             )}
           </div>
-          <div className="ml-auto flex items-center gap-1.5">
-            <LiveStatusPill />
-            <ThemeMenu />
-            <LanguageMenu />
-            <UserMenu />
+          <div className="ml-auto flex items-center gap-2">
+            {headerActions}
+            <div className="flex items-center gap-1.5">
+              <LiveStatusPill />
+              <ThemeMenu />
+              <LanguageMenu />
+              <UserMenu />
+            </div>
           </div>
         </header>
         <ScrollArea className="min-h-0 flex-1">

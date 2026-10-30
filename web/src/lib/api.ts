@@ -86,6 +86,114 @@ export interface SessionResponse {
   user: SessionUser;
 }
 
+// Tipos do contrato de leitura do hub (docs/hub-api.md). Nomes e formatos
+// espelham o JSON do contrato; o servidor aplica a regra de permissão — a UI
+// nunca filtra por permissão.
+
+export type AgentState = "needs_you" | "working" | "done" | "idle" | "unknown";
+
+export type AgentReason =
+  | "question"
+  | "approval"
+  | "quota"
+  | "provider"
+  | "not_received"
+  | "no_report"
+  | "compact";
+
+export interface Machine {
+  id: string;
+  name: string;
+  online: boolean;
+}
+
+export interface Developer {
+  id: string;
+  name: string;
+}
+
+/** Contagens sempre com as cinco chaves (projetos ocultos e totais). */
+export interface Counts {
+  working: number;
+  needs_you: number;
+  done: number;
+  idle: number;
+  unknown: number;
+}
+
+/** Um agente vivo, como o último inventário da máquina o reportou. */
+export interface Agent {
+  id: string;
+  machine: Machine;
+  developer: Developer;
+  project: string;
+  session: string;
+  terminal: string;
+  name: string;
+  role: string;
+  kind: string;
+  model: string;
+  effort: string;
+  state: AgentState;
+  reason: AgentReason | null;
+  task: string | null;
+  report_ready: boolean;
+  started_ms: number;
+  since_ms: number | null;
+  observed_ms: number;
+}
+
+/** Projeto oculto: o hub expõe a máquina e as contagens, não os agentes. */
+export interface HiddenCounts {
+  machine: Machine;
+  counts: Counts;
+}
+
+export interface AgentsResponse {
+  generated_ms: number;
+  agents: Agent[];
+  hidden: HiddenCounts[];
+}
+
+export interface AgentHistoryEntry {
+  state: AgentState;
+  reason: AgentReason | null;
+  at_ms: number;
+}
+
+export interface AgentDetailResponse {
+  agent: Agent;
+  history: AgentHistoryEntry[];
+}
+
+export interface OverviewPerMachine {
+  machine: Machine;
+  developer: Developer;
+  counts: Counts;
+}
+
+export interface WorkingHour {
+  hour_ms: number;
+  working: number;
+}
+
+export interface TopProject {
+  project: string;
+  agents: number;
+  working: number;
+}
+
+export interface OverviewResponse {
+  generated_ms: number;
+  counts: Counts;
+  machines: { online: number; offline: number };
+  developers: number;
+  needs_you: Agent[];
+  per_machine: OverviewPerMachine[];
+  working_24h: WorkingHour[];
+  top_projects: TopProject[];
+}
+
 export const api = {
   /** GET /api/session — 200 { user } ou 401 { error: "unauthenticated" }. */
   getSession: () => req<SessionResponse>("/session"),
@@ -97,4 +205,12 @@ export const api = {
     }),
   /** DELETE /api/session — 204. */
   logout: () => req<void>("/session", { method: "DELETE" }),
+  /** GET /api/agents — 200 { generated_ms, agents, hidden }. A UI filtra a
+   *  lista completa no cliente (opção prevista no contrato); os parâmetros
+   *  opcionais `developer`, `machine` e `project` ficam no servidor. */
+  getAgents: () => req<AgentsResponse>("/agents"),
+  /** GET /api/agents/{id} — 200 { agent, history } ou 404 { error: "not_found" }. */
+  getAgent: (id: string) => req<AgentDetailResponse>(`/agents/${encodeURIComponent(id)}`),
+  /** GET /api/overview — 200 com contagens, máquinas, espera, 24 h e projetos. */
+  getOverview: () => req<OverviewResponse>("/overview"),
 };
