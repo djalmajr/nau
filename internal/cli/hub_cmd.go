@@ -103,6 +103,16 @@ func cmdHubServe(args []string, env Env) int {
 		listen = hubDefaultListen
 	}
 	var static fs.FS
+	// closeRoot releases the web root; it stays nil without --web. Until
+	// the server starts no handler can use the root, so an early return
+	// closes it; once serving, only a clean shutdown does.
+	var closeRoot func() error
+	serving := false
+	defer func() {
+		if !serving && closeRoot != nil {
+			_ = closeRoot()
+		}
+	}()
 	if f.webSet {
 		st, err := os.Stat(f.web)
 		if err != nil || !st.IsDir() {
@@ -118,9 +128,11 @@ func cmdHubServe(args []string, env Env) int {
 			fail(env, 2, "hub serve: --web is not a directory")
 			return 2
 		}
-		// The root keeps a handle on the directory: it is closed when the
-		// server stops (Windows cannot remove an open directory).
-		defer root.Close()
+		// The root keeps a handle on the directory. It is closed only
+		// once no handler can still use it: after a clean shutdown, or
+		// on an early return before the server ever started (Windows
+		// cannot remove an open directory).
+		closeRoot = root.Close
 		static = root.FS()
 	}
 	dbURL := env.Getenv(hubEnvDBURL)
@@ -176,6 +188,7 @@ func cmdHubServe(args []string, env Env) int {
 	ctx, cancel := hubServeContext()
 	defer cancel()
 	errCh := make(chan error, 1)
+	serving = true
 	go func() {
 		errCh <- srv.Serve(ln)
 	}()
@@ -189,9 +202,17 @@ func cmdHubServe(args []string, env Env) int {
 		code = 4
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), hubShutdownTimeout)
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: shutdown: %v\n", env.program(), err)
-	}
+	err = srv.Shutdown(shutdownCtx)
 	shutdownCancel()
+	if err != nil {
+		_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: shutdown: %v\n", env.program(), err)
+		// A handler may still be running past the deadline and read
+		// from the web root: the root is left open. The process is
+		// exiting; the system releases the root with it.
+		return code
+	}
+	if closeRoot != nil {
+		_ = closeRoot()
+	}
 	return code
 }
