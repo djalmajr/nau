@@ -56,6 +56,9 @@ var commands = []command{
 	// (no config dir needed: the gate refuses without one, and an accepted
 	// job or outbox applies its own requirement)
 	{"gate", false, false, cmdGate},
+	// DJA-620: the central hub server (no local state: the store is the
+	// remote database named by the environment)
+	{"hub", false, false, cmdHub},
 }
 
 // Run executes args[0] as a command and returns its exit code. An unknown

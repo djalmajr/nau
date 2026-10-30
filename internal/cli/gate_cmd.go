@@ -296,7 +296,7 @@ func gateValid(kind gateValueKind, value string) bool {
 var gateTopCommands = []string{
 	"job", "sync", "doctor", "outbox", "wake", "session", "decision", "push",
 	"auth", "config", "capabilities", "version", "help",
-	"route", "gate",
+	"route", "gate", "hub",
 }
 
 // gateLogWord reports whether tok belongs to the gate's fixed vocabulary:
