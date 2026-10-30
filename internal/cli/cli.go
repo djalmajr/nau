@@ -51,15 +51,11 @@ var commands = []command{
 	{"version", false, false, cmdVersion},
 	{"help", false, false, cmdHelp},
 	{"plugin", false, true, cmdPlugin},
-	// slice 5: notify
-	{"notify", false, true, cmdNotify},
 	// DJA-195: route
 	{"route", false, true, cmdRoute},
 	// DJA-229: registry service and its client
 	{"serve", true, true, cmdServe},
 	{"jobs", false, false, cmdJobs},
-	// DJA-283: A2A agent and client (serve and reply gate NOWRITE themselves)
-	{"a2a", false, true, cmdA2A},
 	// DJA-430: the forced command of the dispatch ssh key
 	// (no config dir needed: the gate refuses without one, and an accepted
 	// job or outbox applies its own requirement)

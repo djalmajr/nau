@@ -145,7 +145,7 @@ func sameChildEnv(got, want []string) bool {
 }
 
 // runRouteEnv runs Run with a hermetic env whose child environment is
-// exactly childEnv, like the notify flow tests do.
+// exactly childEnv.
 func runRouteEnv(t *testing.T, dir string, childEnv []string, args ...string) (string, string, int) {
 	t.Helper()
 	var out, errb bytes.Buffer

@@ -1,6 +1,6 @@
 # Nau
 
-Nau is a universal messaging and registry core: a neutral core (durable outbox, current-state registry, notifications, routing, job bookkeeping) with four boundary adapters, described in `README.md` and `docs/adapters.md`. The repository holds the Go CLI in `cmd/nau`, the vendored job contract in `docs/upstream/`, the protocol in `docs/protocol.md`, the optional Herdr plugin in `plugin/` and the embedded agent skill in `skills/herdr-hermes/`.
+Nau is a universal messaging and registry core: a neutral core (durable outbox, current-state registry, routing, job bookkeeping) with four boundary adapters, described in `README.md` and `docs/adapters.md`. The repository holds the Go CLI in `cmd/nau`, the vendored job contract in `docs/upstream/`, the protocol in `docs/protocol.md`, the optional Herdr plugin in `plugin/` and the embedded agent skill in `skills/herdr-hermes/`.
 
 - Go is the sole project runtime and test implementation, with no Node.js, Bun, Bash or interpreter fallback. Well-established, maintained community libraries are appropriate when a dependency is justified; follow normal engineering and security best practices when adding or updating one.
 - `soho` (the backend) is used only through its public CLI (`soho job …`, `soho send …`, `soho capabilities --json`, `soho config`), executed as an argv subprocess with a context deadline and `WaitDelay` — never a shell, and never by reading or writing backend state files.
