@@ -103,12 +103,21 @@ func TestLoadEmbeddedMigrations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(migrations) != 1 {
-		t.Fatalf("migrations = %d, want 1", len(migrations))
+	if len(migrations) < 1 {
+		t.Fatal("no embedded migrations")
 	}
+	// The versions are sorted and unique.
+	for i := 1; i < len(migrations); i++ {
+		if migrations[i].Version <= migrations[i-1].Version {
+			t.Fatalf("versions are not sorted: %v", versionsOf(migrations))
+		}
+	}
+	// The first migration is the initial schema and is stable: it
+	// creates exactly schema_migrations and hub_meta. New migrations
+	// are added after it without changing this.
 	m := migrations[0]
 	if m.Version != 1 || m.Name != "0001_init" {
-		t.Fatalf("migration = %+v", m)
+		t.Fatalf("first migration = %+v", m)
 	}
 	if !strings.Contains(m.SQL, "CREATE TABLE schema_migrations") {
 		t.Fatal("0001 does not create schema_migrations")
@@ -121,12 +130,26 @@ func TestLoadEmbeddedMigrations(t *testing.T) {
 	}
 }
 
+// versionsOf is the version list of a migration set, for the failure
+// messages.
+func versionsOf(migrations []Migration) []int {
+	out := make([]int, 0, len(migrations))
+	for _, m := range migrations {
+		out = append(out, m.Version)
+	}
+	return out
+}
+
 // countCreateTables counts the CREATE TABLE statements of a migration.
 func countCreateTables(sql string) int {
 	return strings.Count(sql, "CREATE TABLE")
 }
 
 func TestApplyFromZero(t *testing.T) {
+	want, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	db := newFakeDB()
 	r := &Runner{Store: db, Now: fixedNow}
 	if err := r.Apply(context.Background()); err != nil {
@@ -134,31 +157,45 @@ func TestApplyFromZero(t *testing.T) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if len(db.batchLogs) != 1 {
-		t.Fatalf("batches = %d, want 1", len(db.batchLogs))
+	// Every embedded migration ran once, in order, in its own batch:
+	// its statements and then the registration.
+	if len(db.batchLogs) != len(want) {
+		t.Fatalf("batches = %d, want %d (one per migration)", len(db.batchLogs), len(want))
 	}
-	batch := db.batchLogs[0]
-	if len(batch) != 3 {
-		t.Fatalf("the batch has %d statements, want 3 (2 creates + the registration)", len(batch))
+	for i, m := range want {
+		stmts := splitStatements(m.SQL)
+		batch := db.batchLogs[i]
+		if len(batch) != len(stmts)+1 {
+			t.Fatalf("migration %d: the batch has %d statements, want %d (%d + the registration)", m.Version, len(batch), len(stmts)+1, len(stmts))
+		}
+		for j, s := range stmts {
+			if batch[j].SQL != s.SQL {
+				t.Fatalf("migration %d: statement %d = %q, want %q", m.Version, j, batch[j].SQL, s.SQL)
+			}
+		}
+		reg := batch[len(batch)-1]
+		if reg.SQL != registration {
+			t.Fatalf("migration %d: the last statement is not the registration: %q", m.Version, reg.SQL)
+		}
+		if len(reg.Args) != 2 || reg.Args[0] != store.Value(int64(m.Version)) {
+			t.Fatalf("migration %d: the registration args = %v, want the version", m.Version, reg.Args)
+		}
 	}
-	if !strings.Contains(batch[0].SQL, "CREATE TABLE schema_migrations") {
-		t.Fatalf("statement 0 = %q", batch[0].SQL)
+	if len(db.versions) != len(want) {
+		t.Fatalf("versions = %v, want %v", db.versions, versionsOf(want))
 	}
-	if !strings.Contains(batch[1].SQL, "CREATE TABLE hub_meta") {
-		t.Fatalf("statement 1 = %q", batch[1].SQL)
-	}
-	if !strings.Contains(batch[2].SQL, "INSERT INTO schema_migrations") {
-		t.Fatalf("statement 2 = %q, want the registration", batch[2].SQL)
-	}
-	if len(db.versions) != 1 || db.versions[0] != 1 {
-		t.Fatalf("versions = %v, want [1]", db.versions)
-	}
-	if !db.tables["schema_migrations"] || !db.tables["hub_meta"] {
-		t.Fatalf("tables = %v", db.tables)
+	for i, m := range want {
+		if db.versions[i] != int64(m.Version) {
+			t.Fatalf("versions = %v, want %v", db.versions, versionsOf(want))
+		}
 	}
 }
 
 func TestApplyAgainIsANoOp(t *testing.T) {
+	want, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	db := newFakeDB()
 	r := &Runner{Store: db, Now: fixedNow}
 	if err := r.Apply(context.Background()); err != nil {
@@ -169,11 +206,11 @@ func TestApplyAgainIsANoOp(t *testing.T) {
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
-	if len(db.batchLogs) != 1 {
-		t.Fatalf("batches = %d, want 1 (the second apply changes nothing)", len(db.batchLogs))
+	if len(db.batchLogs) != len(want) {
+		t.Fatalf("batches = %d, want %d (the second apply changes nothing)", len(db.batchLogs), len(want))
 	}
-	if len(db.versions) != 1 || db.versions[0] != 1 {
-		t.Fatalf("versions = %v, want [1]", db.versions)
+	if len(db.versions) != len(want) {
+		t.Fatalf("versions = %v, want %v", db.versions, versionsOf(want))
 	}
 }
 
@@ -270,14 +307,57 @@ func TestApplyStoreErrorIsReported(t *testing.T) {
 }
 
 func TestSplitStatements(t *testing.T) {
-	stmts := splitStatements(" CREATE A (x) ;\n\n CREATE B (y);  \n")
-	if len(stmts) != 2 {
-		t.Fatalf("statements = %v", stmts)
+	for _, tc := range []struct {
+		in   string
+		want []string
+	}{
+		{in: " CREATE A (x) ;\n\n CREATE B (y);  \n", want: []string{"CREATE A (x)", "CREATE B (y)"}},
+		{in: "", want: nil},
+		{in: "   \n \t ", want: nil},
+		{in: "-- only a comment\n-- another; with a semicolon", want: nil},
+		{in: "/* block; comment */", want: nil},
+		{in: "-- head\n   ;  /* mid */ ;", want: nil},
+		{in: "INSERT INTO hub_meta (key,value) VALUES ('review-quoted','a;b');", want: []string{`INSERT INTO hub_meta (key,value) VALUES ('review-quoted','a;b')`}},
+		{in: `SELECT 'it''s; a; test'; SELECT 2;`, want: []string{`SELECT 'it''s; a; test'`, "SELECT 2"}},
+		{in: `SELECT "a;b" FROM t;`, want: []string{`SELECT "a;b" FROM t`}},
+		{in: "-- split; in a comment\nCREATE A (x);", want: []string{`-- split; in a comment
+CREATE A (x)`}},
+		{in: "/* keep; */ CREATE B (y); -- tail;", want: []string{`/* keep; */ CREATE B (y)`}},
+		{in: "SELECT 'a;b', 'c;d'; /* x; y */ SELECT 'e;f';", want: []string{`SELECT 'a;b', 'c;d'`, `/* x; y */ SELECT 'e;f'`}},
+		{in: "SELECT 'unterminated;", want: []string{`SELECT 'unterminated;`}},
+		{in: "-1; -2;", want: []string{"-1", "-2"}},
+	} {
+		stmts := splitStatements(tc.in)
+		if len(stmts) != len(tc.want) {
+			t.Fatalf("splitStatements(%q) = %v, want %v", tc.in, stmts, tc.want)
+		}
+		for i := range tc.want {
+			if stmts[i].SQL != tc.want[i] {
+				t.Fatalf("splitStatements(%q)[%d] = %q, want %q", tc.in, i, stmts[i].SQL, tc.want[i])
+			}
+		}
 	}
-	if stmts[0].SQL != "CREATE A (x)" || stmts[1].SQL != "CREATE B (y)" {
-		t.Fatalf("statements = %v", stmts)
+}
+
+// TestSplitStatementsKeepsTheMigrationSQL: the split of the real
+// embedded migrations is stable: every statement is a prefix of the
+// file text and the join of the statements reconstructs the file up
+// to whitespace and the dropped terminators. This keeps the splitter
+// honest about not losing or reordering content of the real files.
+func TestSplitStatementsKeepsTheMigrationSQL(t *testing.T) {
+	migrations, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	if len(splitStatements("")) != 0 {
-		t.Fatal("an empty file has no statements")
+	for _, m := range migrations {
+		stmts := splitStatements(m.SQL)
+		if len(stmts) == 0 {
+			t.Fatalf("migration %d: no statements split from %q", m.Version, m.Name)
+		}
+		for _, s := range stmts {
+			if !strings.Contains(m.SQL, s.SQL) {
+				t.Fatalf("migration %d: the statement %q is not in the file text", m.Version, s.SQL)
+			}
+		}
 	}
 }

@@ -101,14 +101,23 @@ func cmdHubServe(args []string, env Env) int {
 			fail(env, 2, "hub serve: --web is not a directory")
 			return 2
 		}
-		static = os.DirFS(f.web)
+		// Open the root confined to the directory: a symbolic link
+		// that points outside the root is refused by the filesystem,
+		// while a link that stays inside keeps being served. The core
+		// sees only the fs.FS.
+		root, err := os.OpenRoot(f.web)
+		if err != nil {
+			fail(env, 2, "hub serve: --web is not a directory")
+			return 2
+		}
+		static = root.FS()
 	}
 	dbURL := env.Getenv(hubEnvDBURL)
 	if dbURL == "" {
 		fail(env, 2, "hub serve: "+hubEnvDBURL+" is required")
 		return 2
 	}
-	if u, err := url.Parse(dbURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if u, err := url.Parse(dbURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		fail(env, 2, "hub serve: "+hubEnvDBURL+" must be an http:// or https:// URL")
 		return 2
 	}

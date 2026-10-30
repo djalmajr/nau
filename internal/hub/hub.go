@@ -8,6 +8,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"mime"
@@ -161,7 +162,10 @@ func (s *Server) api(ctx context.Context, req Request) Response {
 // staticFile serves the path from the static filesystem outside /api/:
 // the named file when it exists, the index.html fallback when it does
 // not (the SPA routing), and 404 when there is no filesystem or the path
-// is not a valid one.
+// is not a valid one. A name the filesystem refuses for any reason
+// other than absence (a symbolic link that escapes the root, an
+// unreadable file) is not a SPA route: it answers 404, never the
+// fallback.
 func (s *Server) staticFile(req Request) Response {
 	if s.static == nil {
 		return Response{Status: 404}
@@ -170,7 +174,7 @@ func (s *Server) staticFile(req Request) Response {
 	// The root path has no file name of its own: it takes the SPA
 	// fallback directly.
 	if p == "" {
-		if r, ok := s.readStatic("index.html"); ok {
+		if r, ok, _ := s.readStatic("index.html"); ok {
 			return r
 		}
 		return Response{Status: 404}
@@ -180,30 +184,39 @@ func (s *Server) staticFile(req Request) Response {
 	if !fs.ValidPath(p) {
 		return Response{Status: 404}
 	}
-	if r, ok := s.readStatic(p); ok {
+	if r, ok, absent := s.readStatic(p); ok {
 		return r
+	} else if !absent {
+		return Response{Status: 404}
 	}
-	if r, ok := s.readStatic("index.html"); ok {
+	if r, ok, _ := s.readStatic("index.html"); ok {
 		return r
 	}
 	return Response{Status: 404}
 }
 
 // readStatic reads one file of the static filesystem and builds its
-// response. It reports false when the file is absent or is a directory.
-func (s *Server) readStatic(name string) (Response, bool) {
+// response. It reports whether the file was served and, when it was
+// not, whether the cause was absence (ErrNotExist: the caller may fall
+// back to the SPA index) or some other refusal (a symbolic link that
+// escapes the root, a directory or an unreadable file: the caller
+// answers 404).
+func (s *Server) readStatic(name string) (Response, bool, bool) {
 	f, err := s.static.Open(name)
 	if err != nil {
-		return Response{}, false
+		return Response{}, false, errors.Is(err, fs.ErrNotExist)
 	}
 	defer f.Close()
 	st, err := f.Stat()
-	if err != nil || st.IsDir() {
-		return Response{}, false
+	if err != nil {
+		return Response{}, false, false
+	}
+	if st.IsDir() {
+		return Response{}, false, true
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return Response{}, false
+		return Response{}, false, false
 	}
 	ct := mime.TypeByExtension(filepath.Ext(name))
 	if ct == "" {
@@ -211,7 +224,7 @@ func (s *Server) readStatic(name string) (Response, bool) {
 	}
 	h := make(Header)
 	h.Set("Content-Type", ct)
-	return Response{Status: 200, Header: h, Body: data}, true
+	return Response{Status: 200, Header: h, Body: data}, true, false
 }
 
 // health answers 200 {"ok":true} when the store ping passes within the

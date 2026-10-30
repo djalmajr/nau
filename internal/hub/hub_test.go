@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -284,6 +286,72 @@ func TestStaticNoFSIs404(t *testing.T) {
 		if resp.Status != 404 {
 			t.Fatalf("%s: status = %d, want 404 without a filesystem", path, resp.Status)
 		}
+	}
+}
+
+// TestStaticSymlinkContainment: a filesystem confined to its root (the
+// (*os.Root).FS() the command hands the core for --web) must not serve
+// a file a symbolic link points to outside the root, not even through
+// the SPA fallback; a link that stays inside the root keeps being
+// served.
+func TestStaticSymlinkContainment(t *testing.T) {
+	dir := t.TempDir()
+	web := filepath.Join(dir, "web")
+	if err := os.Mkdir(web, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("<html>hub</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "inside.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "deep.txt"), []byte("deep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []struct{ name, target string }{
+		{"link.txt", outside},
+		{"inlink.txt", "inside.txt"},
+		{"linkdir", sub},
+	} {
+		if err := os.Symlink(l.target, filepath.Join(web, l.name)); err != nil {
+			t.Skipf("cannot create symbolic links here: %v", err)
+		}
+	}
+	root, err := os.OpenRoot(web)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newTestServer(t, &fakeStore{}, root.FS())
+	// A link that escapes the root answers 404, even with an index
+	// available: it is a refusal, not a missing SPA route.
+	for _, path := range []string{"/link.txt", "/linkdir", "/linkdir/deep.txt"} {
+		resp := s.Serve(context.Background(), Request{Method: "GET", Path: path})
+		if resp.Status != 404 {
+			t.Fatalf("%s: status = %d, want 404 (body %q)", path, resp.Status, resp.Body)
+		}
+	}
+	// A link that stays inside the root keeps being served.
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/inlink.txt"})
+	if resp.Status != 200 || string(resp.Body) != "inside" {
+		t.Fatalf("/inlink.txt: status = %d body = %q, want 200 and the inside content", resp.Status, resp.Body)
+	}
+	// Controls: the plain file and the SPA fallback are unchanged.
+	resp = s.Serve(context.Background(), Request{Method: "GET", Path: "/inside.txt"})
+	if resp.Status != 200 || string(resp.Body) != "inside" {
+		t.Fatalf("/inside.txt: status = %d, want 200", resp.Status)
+	}
+	resp = s.Serve(context.Background(), Request{Method: "GET", Path: "/spa/route"})
+	if resp.Status != 200 || string(resp.Body) != "<html>hub</html>" {
+		t.Fatalf("/spa/route: status = %d, want the index fallback", resp.Status)
 	}
 }
 

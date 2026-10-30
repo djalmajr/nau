@@ -34,13 +34,20 @@ func New(server *hub.Server) *Handler {
 	return &Handler{server: server}
 }
 
-// ServeHTTP implements http.Handler. A body larger than the limit
-// answers 413 without calling the handler; a path that is not in the
-// origin form answers 404.
+// ServeHTTP implements http.Handler. The API response headers are set
+// before any early answer, so even the 413 of an over-limit body on an
+// /api/... route carries them; a body larger than the limit answers
+// 413 without calling the handler; a path that is not in the origin
+// form answers 404.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/") {
 		w.WriteHeader(http.StatusNotFound)
 		return
+	}
+	if isAPIPath(r.URL.Path) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	body, over, err := readBody(r.Body)
 	if err != nil || over {
@@ -54,11 +61,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Query:  r.URL.Query(),
 		Header: headersFrom(r.Header),
 		Body:   body,
-	}
-	if isAPIPath(r.URL.Path) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
 	resp := h.server.Serve(r.Context(), req)
 	for name, values := range resp.Header {

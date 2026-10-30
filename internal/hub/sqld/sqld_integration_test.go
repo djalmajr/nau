@@ -45,6 +45,10 @@ func TestSQLDPing(t *testing.T) {
 }
 
 func TestSQLDMigrationsFromZero(t *testing.T) {
+	want, err := migrate.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
 	c := realClient(t)
 	ctx, cancel := ctxForTest()
 	defer cancel()
@@ -54,30 +58,36 @@ func TestSQLDMigrationsFromZero(t *testing.T) {
 	if err := r.Apply(ctx); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	// The schema is in place.
+	// The initial tables are in the schema.
 	for _, table := range []string{"schema_migrations", "hub_meta"} {
 		if !tableExists(t, c, ctx, table) {
 			t.Fatalf("the table %s is not in the schema", table)
 		}
 	}
-	// The registration is there exactly once.
-	res, err := c.Execute(ctx, store.Stmt{SQL: `SELECT version FROM schema_migrations`})
+	// Every embedded version is registered, in order.
+	rows, err := c.Execute(ctx, store.Stmt{SQL: `SELECT version FROM schema_migrations ORDER BY version`})
 	if err != nil {
 		t.Fatalf("list versions: %v", err)
 	}
-	if len(res.Rows) != 1 || res.Rows[0][0] != int64(1) {
-		t.Fatalf("versions = %v, want [[1]]", res.Rows)
+	if len(rows.Rows) != len(want) {
+		t.Fatalf("versions = %v, want %d rows (one per embedded migration)", rows.Rows, len(want))
+	}
+	for i, m := range want {
+		v, ok := rows.Rows[i][0].(int64)
+		if !ok || v != int64(m.Version) {
+			t.Fatalf("versions = %v, want the embedded versions in order", rows.Rows)
+		}
 	}
 	// A second apply changes nothing.
 	if err := r.Apply(ctx); err != nil {
 		t.Fatalf("Apply again: %v", err)
 	}
-	res, err = c.Execute(ctx, store.Stmt{SQL: `SELECT version FROM schema_migrations`})
+	rows, err = c.Execute(ctx, store.Stmt{SQL: `SELECT version FROM schema_migrations ORDER BY version`})
 	if err != nil {
 		t.Fatalf("list versions again: %v", err)
 	}
-	if len(res.Rows) != 1 {
-		t.Fatalf("versions = %v, want exactly one row after the second apply", res.Rows)
+	if len(rows.Rows) != len(want) {
+		t.Fatalf("versions = %v, want exactly %d rows after the second apply", rows.Rows, len(want))
 	}
 }
 
@@ -153,12 +163,58 @@ func tableExists(t *testing.T, c *Client, ctx context.Context, name string) bool
 	return len(res.Rows) == 1
 }
 
-// dropAll drops the tables of a previous run.
+// dropAll drops every table of a previous run: the list comes from the
+// schema, so a new migration that adds tables needs no edit here.
 func dropAll(t *testing.T, c *Client, ctx context.Context) {
 	t.Helper()
-	for _, name := range []string{"schema_migrations", "hub_meta"} {
-		if _, err := c.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + name}); err != nil {
+	res, err := c.Execute(ctx, store.Stmt{SQL: `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`})
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	for _, row := range res.Rows {
+		name, ok := row[0].(string)
+		if !ok {
+			t.Fatalf("table name = %v, want a string", row[0])
+		}
+		if _, err := c.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS "` + name + `"`}); err != nil {
 			t.Fatalf("drop %s: %v", name, err)
 		}
+	}
+}
+
+// TestSQLDQuotedSemicolon applies a valid migration with a semicolon
+// inside a string literal: the splitter must keep the statement whole.
+func TestSQLDQuotedSemicolon(t *testing.T) {
+	c := realClient(t)
+	ctx, cancel := ctxForTest()
+	defer cancel()
+	r := &migrate.Runner{Store: c, Now: func() time.Time { return time.Now() }, Migrations: []migrate.Migration{{
+		Version: 97,
+		Name:    "quoted_semicolon",
+		SQL:     `INSERT INTO hub_meta (key, value) VALUES ('quoted-semicolon', 'a;b');`,
+	}}}
+	if err := r.Apply(ctx); err != nil {
+		t.Fatalf("Apply: %v (the semicolon inside the string must not split the statement)", err)
+	}
+	res, err := c.Execute(ctx, store.Stmt{SQL: `SELECT value FROM hub_meta WHERE key = 'quoted-semicolon'`})
+	if err != nil {
+		t.Fatalf("read the value: %v", err)
+	}
+	if len(res.Rows) != 1 || res.Rows[0][0] != "a;b" {
+		t.Fatalf("value = %v, want a;b (the literal kept whole)", res.Rows)
+	}
+	ver, err := c.Execute(ctx, store.Stmt{SQL: `SELECT COUNT(*) FROM schema_migrations WHERE version = 97`})
+	if err != nil {
+		t.Fatalf("count the version: %v", err)
+	}
+	if n, ok := ver.Rows[0][0].(int64); !ok || n != 1 {
+		t.Fatalf("version rows = %v, want 1", ver.Rows)
+	}
+	// Leave the shared test database as found.
+	if _, err := c.Execute(ctx, store.Stmt{SQL: `DELETE FROM schema_migrations WHERE version = 97`}); err != nil {
+		t.Fatalf("clean the version: %v", err)
+	}
+	if _, err := c.Execute(ctx, store.Stmt{SQL: `DELETE FROM hub_meta WHERE key = 'quoted-semicolon'`}); err != nil {
+		t.Fatalf("clean the value: %v", err)
 	}
 }

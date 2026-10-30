@@ -1,7 +1,10 @@
 // Package sqld implements the hub storage over the Hrana protocol on
 // HTTP (sqld), with only the standard library. The token is carried in
 // the Authorization header only: it never appears in an error, a log or
-// a response.
+// a response. The same goes for the server's own diagnostics (the
+// message of an error result, the batch step errors and the body of a
+// non-200 status): they are opaque and never reach an error, a log or a
+// response.
 package sqld
 
 import (
@@ -13,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -50,7 +54,7 @@ func New(baseURL string, token string) (*Client, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("sqld: the URL must use http or https")
 	}
-	if u.Host == "" {
+	if u.Hostname() == "" {
 		return nil, fmt.Errorf("sqld: the URL must name a host")
 	}
 	pipeline := *u
@@ -141,7 +145,9 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 		return nil, fmt.Errorf("sqld: batch has %d steps, want %d", len(batch.StepResults), n+3)
 	}
 	// The first step error, if any, is the failure: everything after
-	// it was skipped and nothing was applied.
+	// it was skipped and nothing was applied. The error is opaque:
+	// only the local step index and a well-formed code are reported,
+	// never the server message.
 	for i, e := range batch.StepErrors {
 		if jsonNullOrMissing(e) {
 			continue
@@ -150,14 +156,10 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 		if err := json.Unmarshal(e, &we); err != nil {
 			return nil, fmt.Errorf("sqld: decode batch step error: %v", err)
 		}
-		msg := "server error"
-		if we.Message != "" {
-			msg = we.Message
-		}
 		if i >= 1 && i <= n {
-			return nil, fmt.Errorf("sqld: batch statement %d: %s", i, msg)
+			return nil, fmt.Errorf("sqld: batch statement %d: server error%s", i, codeSuffix(we.Code))
 		}
-		return nil, fmt.Errorf("sqld: batch step %d: %s", i, msg)
+		return nil, fmt.Errorf("sqld: batch step %d: server error%s", i, codeSuffix(we.Code))
 	}
 	out := make([]store.Result, 0, n)
 	for i := 1; i <= n; i++ {
@@ -276,9 +278,26 @@ type wireResult struct {
 	LastInsertRowID  *string       `json:"last_insert_rowid"`
 }
 
+// wireError is the error part of a Hrana item. Only the code is kept
+// (gated by hranaCodePattern); the message is an opaque server
+// diagnostic and is never read into an error.
 type wireError struct {
-	Message string `json:"message"`
-	Code    string `json:"code"`
+	Code string `json:"code"`
+}
+
+// hranaCodePattern is the shape of a Hrana error code that may be
+// echoed in a local error: an uppercase identifier of at most 64
+// characters. Anything else is omitted, so no server text of an
+// uncontrolled shape reaches the error.
+var hranaCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
+
+// codeSuffix builds the " (code ...)" part of an error from a Hrana
+// code; an empty or malformed code yields no suffix.
+func codeSuffix(code string) string {
+	if !hranaCodePattern.MatchString(code) {
+		return ""
+	}
+	return " (code " + code + ")"
 }
 
 type wireResponse struct {
@@ -339,11 +358,13 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	for i, item := range p.Results {
 		if item.Type == "error" {
-			msg := "server error"
-			if item.Error != nil && item.Error.Message != "" {
-				msg = item.Error.Message
+			// The error result is opaque: only the request index and a
+			// well-formed code are reported, never its message.
+			code := ""
+			if item.Error != nil {
+				code = item.Error.Code
 			}
-			return nil, fmt.Errorf("sqld: request %d: %s", i, msg)
+			return nil, fmt.Errorf("sqld: request %d: server error%s", i, codeSuffix(code))
 		}
 		if item.Type != "ok" || item.Response == nil {
 			return nil, fmt.Errorf("sqld: request %d: unexpected result type %q", i, item.Type)

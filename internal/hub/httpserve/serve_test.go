@@ -101,6 +101,30 @@ func TestBodyOverOneMiBIs413WithoutHandler(t *testing.T) {
 	if st.pings != 0 {
 		t.Fatalf("the handler was called %d times, want 0", st.pings)
 	}
+	// The API headers are set before the early 413 answer.
+	for name, want := range map[string]string{
+		"Content-Type":           "application/json",
+		"Cache-Control":          "no-store",
+		"X-Content-Type-Options": "nosniff",
+	} {
+		if got := resp.Header.Get(name); got != want {
+			t.Fatalf("413: %s = %q, want %q", name, got, want)
+		}
+	}
+	// A non-API path over the limit still answers 413, without the
+	// API headers.
+	resp, err = http.Post(srv.URL+"/static/file.js", "text/plain", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("static status = %d, want 413", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "" {
+		t.Fatalf("static 413: Cache-Control = %q, want none", got)
+	}
 }
 
 func TestBodyAtOneMiBPasses(t *testing.T) {

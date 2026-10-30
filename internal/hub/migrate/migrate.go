@@ -165,16 +165,85 @@ func (r *Runner) appliedVersions(ctx context.Context) (map[int]bool, error) {
 }
 
 // splitStatements splits the SQL text of a migration file on the
-// statement terminators. The embedded migrations are controlled: they
-// contain no semicolons inside literals.
+// statement terminators. A terminator is a semicolon that is not part
+// of a single-quoted string (” is the quote escape), a double-quoted
+// identifier ("" is the quote escape), a line comment (-- to the end
+// of the line) or a block comment (/* to */). The statements keep
+// their original text, comments included; empty chunks and chunks of
+// only comments are dropped.
 func splitStatements(sql string) []store.Stmt {
 	var out []store.Stmt
-	for _, part := range strings.Split(sql, ";") {
-		s := strings.TrimSpace(part)
-		if s == "" {
-			continue
+	start := 0
+	content := false
+	inSingle, inDouble, inLine, inBlock := false, false, false, false
+	for i := 0; i < len(sql); i++ {
+		c := sql[i]
+		switch {
+		case inLine:
+			if c == '\n' {
+				inLine = false
+			}
+		case inBlock:
+			if c == '*' && i+1 < len(sql) && sql[i+1] == '/' {
+				i++
+				inBlock = false
+			}
+		case inSingle:
+			if c == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++ // the escaped quote
+				} else {
+					inSingle = false
+				}
+			}
+		case inDouble:
+			if c == '"' {
+				if i+1 < len(sql) && sql[i+1] == '"' {
+					i++ // the escaped quote
+				} else {
+					inDouble = false
+				}
+			}
+		default:
+			switch {
+			case c == '\'':
+				inSingle = true
+				content = true
+			case c == '"':
+				inDouble = true
+				content = true
+			case c == '-' && i+1 < len(sql) && sql[i+1] == '-':
+				inLine = true
+				i++
+			case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+				inBlock = true
+				i++
+			case c == ';':
+				// A terminator outside quotes and comments: the chunk
+				// before it is one statement, without the terminator.
+				if content && strings.TrimSpace(sql[start:i]) != "" {
+					out = append(out, store.Stmt{SQL: strings.TrimSpace(sql[start:i])})
+				}
+				start = i + 1
+				content = false
+			default:
+				if !isSpaceByte(c) {
+					content = true
+				}
+			}
 		}
-		out = append(out, store.Stmt{SQL: s})
+	}
+	if content && strings.TrimSpace(sql[start:]) != "" {
+		out = append(out, store.Stmt{SQL: strings.TrimSpace(sql[start:])})
 	}
 	return out
+}
+
+// isSpaceByte reports whether the byte is ASCII whitespace.
+func isSpaceByte(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\v', '\f', '\r':
+		return true
+	}
+	return false
 }

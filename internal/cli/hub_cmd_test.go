@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -318,6 +320,96 @@ func TestHubServeWebDirMissingIsBadUsage(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "hub serve: --web is not a directory") {
 		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestHubServeWebSymlinkOutsideIsNotServed(t *testing.T) {
+	dir := t.TempDir()
+	web := filepath.Join(dir, "web")
+	if err := os.Mkdir(web, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "index.html"), []byte("<html>hub</html>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(web, "inside.txt"), []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside-fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(web, "link.txt")); err != nil {
+		t.Skipf("cannot create symbolic links here: %v", err)
+	}
+	if err := os.Symlink("inside.txt", filepath.Join(web, "inlink.txt")); err != nil {
+		t.Skipf("cannot create symbolic links here: %v", err)
+	}
+	listen, stop := startHubServe(t, map[string]string{
+		hubEnvDBURL: "http://127.0.0.1:1",
+	}, newHubFakeStore(), "--web", web)
+	// The link that escapes the web root is not served, even with an
+	// index available; the one that stays inside is.
+	resp := doGet(t, "http://"+listen+"/link.txt")
+	if resp.status != 404 {
+		t.Fatalf("GET /link.txt = %d %q, want 404", resp.status, resp.body)
+	}
+	if resp.body == "outside-fixture" {
+		t.Fatal("the file outside the web root was served")
+	}
+	resp = doGet(t, "http://"+listen+"/inlink.txt")
+	if resp.status != 200 || resp.body != "inside" {
+		t.Fatalf("GET /inlink.txt = %d %q, want 200 and the inside content", resp.status, resp.body)
+	}
+	if _, _, code := stop(); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+}
+
+func TestHubServeEmptyHostnameIsBadUsage(t *testing.T) {
+	for _, dbURL := range []string{"http://:0", "https://:8443"} {
+		stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
+			hubEnvDBURL: dbURL,
+		}, "hub", "serve")
+		if exit != 2 {
+			t.Fatalf("%s: exit = %d, want 2 (stdout %q)", dbURL, exit, stdout)
+		}
+		if !strings.Contains(stderr, "must be an http:// or https:// URL") {
+			t.Fatalf("%s: stderr = %q", dbURL, stderr)
+		}
+	}
+}
+
+func TestHubServeMigrationFailureDropsServerMessage(t *testing.T) {
+	// The real client against a loopback server that answers every
+	// pipeline with an error whose message echoes the Authorization
+	// header: when the migration fails, the command output must carry
+	// none of the server text (message, malformed code) nor the token.
+	secret := strings.Repeat("synthetic", 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"results":[{"type":"error","error":{"message":"Bearer %s was rejected","code":"BAD-LOW"}},{"type":"ok","response":{"type":"close"}}]}`, r.Header.Get("Authorization"))
+	}))
+	defer srv.Close()
+	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
+		hubEnvDBURL:   srv.URL,
+		hubEnvDBToken: secret,
+	}, "hub", "serve")
+	if exit != 4 {
+		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "hub serve: migrations:") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	for _, s := range []string{stdout, stderr} {
+		if strings.Contains(s, secret) {
+			t.Fatalf("the token leaked into the output: %q", s)
+		}
+		if strings.Contains(s, "was rejected") {
+			t.Fatalf("the server message leaked into the output: %q", s)
+		}
+		if strings.Contains(s, "BAD-LOW") {
+			t.Fatalf("the malformed code leaked into the output: %q", s)
+		}
 	}
 }
 

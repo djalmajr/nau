@@ -295,11 +295,61 @@ func TestExecuteServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("Execute: want an error")
 	}
-	if !strings.Contains(err.Error(), "no such table") {
+	// The error names the local request index and the well-formed
+	// code, and none of the server text (message or token).
+	if !strings.Contains(err.Error(), "request 0") {
+		t.Fatalf("error = %v, want the request index", err)
+	}
+	if !strings.Contains(err.Error(), "server error") {
 		t.Fatalf("error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "code SQLITE_UNKNOWN") {
+		t.Fatalf("error = %v, want the well-formed code", err)
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("the server message leaked into the error: %v", err)
 	}
 	if strings.Contains(err.Error(), sentinelToken) {
 		t.Fatalf("the token leaked into the error: %v", err)
+	}
+}
+
+func TestExecuteErrorDropsMalformedCode(t *testing.T) {
+	for _, code := range []string{"", "lower-case", "1CODE", "HAS-DASH", strings.Repeat("A", 65), "CODE WITH SPACE"} {
+		f := newFakeServer(t, func(req *requestWire) []itemWire {
+			return []itemWire{errItem("diagnostic "+code, code), okClose()}
+		})
+		c := f.clientFor(t, "")
+		_, err := c.Execute(context.Background(), stmtForTest("SELECT 1", nil))
+		if err == nil {
+			t.Fatal("Execute: want an error")
+		}
+		if strings.Contains(err.Error(), "(code") {
+			t.Fatalf("code %q: a malformed code reached the error: %v", code, err)
+		}
+		if strings.Contains(err.Error(), "diagnostic") {
+			t.Fatalf("code %q: the server message leaked into the error: %v", code, err)
+		}
+	}
+}
+
+func TestPingErrorDropsServerMessage(t *testing.T) {
+	f := newFakeServer(t, func(req *requestWire) []itemWire {
+		return []itemWire{errItem("Bearer "+sentinelToken+" was rejected", "SQLITE_ERROR"), okClose()}
+	})
+	c := f.clientFor(t, sentinelToken)
+	err := c.Ping(context.Background())
+	if err == nil {
+		t.Fatal("Ping: want an error")
+	}
+	if strings.Contains(err.Error(), sentinelToken) {
+		t.Fatalf("the token leaked into the ping error: %v", err)
+	}
+	if strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("the server message leaked into the ping error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "code SQLITE_ERROR") {
+		t.Fatalf("error = %v, want the well-formed code", err)
 	}
 }
 
@@ -508,8 +558,37 @@ func TestBatchFailureReportsTheFailedStatement(t *testing.T) {
 	if !strings.Contains(err.Error(), "statement 2") {
 		t.Fatalf("error = %v, want the failed statement named", err)
 	}
-	if !strings.Contains(err.Error(), "no such table") {
-		t.Fatalf("error = %v, want the server message", err)
+	if !strings.Contains(err.Error(), "code SQLITE_UNKNOWN") {
+		t.Fatalf("error = %v, want the well-formed code", err)
+	}
+	if strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("the server message leaked into the error: %v", err)
+	}
+}
+
+func TestBatchFailureAtAControlStep(t *testing.T) {
+	f := newFakeServer(t, func(req *requestWire) []itemWire {
+		return []itemWire{
+			okBatch(`{"step_results":[
+				{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":null},
+				null, null, null
+			],"step_errors":[
+				{"message":"begin failed","code":"SQLITE_BUSY"},
+				null, null, null
+			]}`),
+			okClose(),
+		}
+	})
+	c := f.clientFor(t, "")
+	_, err := c.Batch(context.Background(), []store.Stmt{{SQL: "INSERT INTO t VALUES (1)"}})
+	if err == nil {
+		t.Fatal("Batch: want an error")
+	}
+	if !strings.Contains(err.Error(), "step 0") {
+		t.Fatalf("error = %v, want the control step named", err)
+	}
+	if strings.Contains(err.Error(), "begin failed") {
+		t.Fatalf("the server message leaked into the error: %v", err)
 	}
 }
 
@@ -614,8 +693,11 @@ func TestNewURLValidation(t *testing.T) {
 		{url: "postgres://h", ok: false},
 		{url: "ftp://h", ok: false},
 		{url: "http://", ok: false},
+		{url: "http://:0", ok: false},
+		{url: "https://:8443", ok: false},
 		{url: "not a url", ok: false},
 		{url: "http://127.0.0.1:8080", ok: true, want: "http://127.0.0.1:8080/v2/pipeline"},
+		{url: "http://[::1]:8080", ok: true, want: "http://[::1]:8080/v2/pipeline"},
 		{url: "https://h.example/sqld/", ok: true, want: "https://h.example/sqld/v2/pipeline"},
 	} {
 		_, err := New(tc.url, "")
