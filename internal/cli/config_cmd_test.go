@@ -174,19 +174,6 @@ func TestConfigGetSohoBinResolved(t *testing.T) {
 	if exit != 0 || stdout != "{\"key\":\"herdr_soho_bin\",\"value\":\""+jsonText(filepath.Join(sohoDir, exeName("soho")))+"\"}\n" {
 		t.Errorf("config get after auto set = %q (exit %d), want the resolved soho", stdout, exit)
 	}
-	// Setting the legacy name is auto too (it was the old default that
-	// the old config set stored), and stores the empty form.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "herdr_soho_bin", "herdr-soho")
-	if exit != 0 {
-		t.Fatalf("config set herdr_soho_bin legacy exit = %d, stdout %q", exit, stdout)
-	}
-	data, err = os.ReadFile(filepath.Join(dir, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "herdr_soho_bin=\n") {
-		t.Errorf("the legacy auto value must store the empty form, got %q", data)
-	}
 	// An explicit selection is stored and shown unchanged.
 	stdout, _, exit = runCLI(t, dir, false, "config", "set", "herdr_soho_bin", "/opt/soho")
 	if exit != 0 {

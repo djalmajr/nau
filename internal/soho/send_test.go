@@ -306,7 +306,7 @@ func TestNotifySendEnvWithoutPaneID(t *testing.T) {
 // TestNotifySendUnavailable: a missing binary is a transient
 // unavailable, without a subprocess.
 func TestNotifySendUnavailable(t *testing.T) {
-	s := soho.NotifySender{Bin: "no-such-herdr-soho-binary", Environ: childEnv, Timeout: sendTestTimeout}
+	s := soho.NotifySender{Bin: "no-such-soho-binary", Environ: childEnv, Timeout: sendTestTimeout}
 	res := s.Send(context.Background(), "local/w1:p1", "hi")
 	want := notify.SendResult{Outcome: notify.OutcomeTransient, Exit: -1, Category: "unavailable"}
 	if res != want {

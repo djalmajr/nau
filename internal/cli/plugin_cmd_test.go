@@ -58,10 +58,10 @@ func runPluginEvent(t *testing.T, cfgDir, event, eventJSON string) (string, stri
 	return out.String(), errb.String(), exit
 }
 
-// readFakeCalls parses the fake herdr-soho call log of the install dir.
+// readFakeCalls parses the fake soho call log of the install dir.
 func readFakeCalls(t *testing.T, fakeDir string) []fakesoho.Call {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(fakeDir, "fake-herdr-soho.calls.jsonl"))
+	data, err := os.ReadFile(filepath.Join(fakeDir, "fake-soho.calls.jsonl"))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -183,7 +183,7 @@ func TestPluginHooksEvent(t *testing.T) {
 			t.Fatal("untracked close wrote state; want nothing written")
 		}
 		if calls := readFakeCalls(t, fakeDir); len(calls) != 0 {
-			t.Fatalf("untracked close ran herdr-soho %v; want no calls", calls)
+			t.Fatalf("untracked close ran soho %v; want no calls", calls)
 		}
 	})
 
@@ -199,7 +199,7 @@ func TestPluginHooksEvent(t *testing.T) {
 			t.Fatal("other label wrote state; want nothing written")
 		}
 		if calls := readFakeCalls(t, fakeDir); len(calls) != 0 {
-			t.Fatalf("other label ran herdr-soho %v; want no calls", calls)
+			t.Fatalf("other label ran soho %v; want no calls", calls)
 		}
 	})
 
@@ -242,7 +242,7 @@ func TestPluginHooksEvent(t *testing.T) {
 			t.Fatal("other event name wrote state; want nothing written")
 		}
 		if calls := readFakeCalls(t, fakeDir); len(calls) != 0 {
-			t.Fatalf("other event name ran herdr-soho %v; want no calls", calls)
+			t.Fatalf("other event name ran soho %v; want no calls", calls)
 		}
 	})
 
@@ -314,9 +314,9 @@ func TestPluginHooksStartup(t *testing.T) {
 		}
 	})
 
-	t.Run("herdr-soho missing always exit 0", func(t *testing.T) {
+	t.Run("soho missing always exit 0", func(t *testing.T) {
 		cfgDir := t.TempDir()
-		missing := filepath.Join(t.TempDir(), "no-such-herdr-soho")
+		missing := filepath.Join(t.TempDir(), "no-such-soho")
 		setSohoConfig(t, cfgDir, missing, "machine-a")
 		seedJob(t, cfgDir, "J1", "org/repo", 0, "accepted")
 		stdout, _, exit := runHermes(t, cfgDir, false, "", "plugin", "startup")

@@ -19,7 +19,7 @@ const wakeStdinCap = jobapi.StdinCapAmend
 
 // cmdWake records one job event on stdin as a job_event outbox record and
 // attempts one bounded push. It is the backend wake hook (machine key
-// job_wake_cmd) of soho, whose pre-rename releases were named herdr-soho.
+// job_wake_cmd) of soho.
 // It exits 0 as soon as the record is durable (or deduplicated),
 // whatever the push result; it exits 2 only for malformed input.
 func cmdWake(args []string, env Env) int {
@@ -45,24 +45,7 @@ func cmdWake(args []string, env Env) int {
 		fail(env, 2, "wake: reading stdin: "+err.Error())
 		return 2
 	}
-	// The backend sets the job identity in one environment family: the
-	// legacy HERDR_SOHO_JOB_* names the vendored job contract defines,
-	// or the current SOHO_JOB_* names of the renamed backend. When any
-	// of the four current variables is present and non-empty, only the
-	// current family is read (the legacy variables are ignored);
-	// otherwise only the legacy family is read. The two families are
-	// never mixed, and the error messages name the variable of the
-	// family in use.
-	current := env.Getenv(jobapi.EnvJobIDCurrent) != "" ||
-		env.Getenv(jobapi.EnvJobSeqCurrent) != "" ||
-		env.Getenv(jobapi.EnvJobEventCurrent) != "" ||
-		env.Getenv(jobapi.EnvJobIdempotencyKeyCurrent) != ""
-	var idKey, seqKey, keyKey string
-	if current {
-		idKey, seqKey, keyKey = jobapi.EnvJobIDCurrent, jobapi.EnvJobSeqCurrent, jobapi.EnvJobIdempotencyKeyCurrent
-	} else {
-		idKey, seqKey, keyKey = jobapi.EnvJobID, jobapi.EnvJobSeq, jobapi.EnvJobIdempotencyKey
-	}
+	idKey, seqKey, keyKey := jobapi.EnvJobIDCurrent, jobapi.EnvJobSeqCurrent, jobapi.EnvJobIdempotencyKeyCurrent
 	id := env.Getenv(idKey)
 	if !jobapi.ValidID(id) {
 		fail(env, 2, "wake: "+idKey+" is missing or does not match the job id pattern")

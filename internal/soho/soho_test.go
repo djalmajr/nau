@@ -19,7 +19,7 @@ import (
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
-// installFake installs the fake herdr-soho in a temp dir and returns the
+// installFake installs the fake soho in a temp dir and returns the
 // executable path and the fake dir (for the call log).
 func installFake(t *testing.T, rules ...fakesoho.Rule) (exe, dir string) {
 	t.Helper()
@@ -408,7 +408,7 @@ func TestSohoRunDeadlineExitCode(t *testing.T) {
 // TestSohoRunNotFound: a missing executable is a typed ErrUnavailable that
 // wraps the LookPath error.
 func TestSohoRunNotFound(t *testing.T) {
-	r := soho.Runner{Bin: "no-such-herdr-soho-binary", Environ: childEnv}
+	r := soho.Runner{Bin: "no-such-soho-binary", Environ: childEnv}
 	_, err := r.Run(context.Background(), []string{"job", "status", "--id", "J1"}, nil, io.Discard, io.Discard, 10*time.Second)
 	var ue *soho.ErrUnavailable
 	if !errors.As(err, &ue) {
@@ -423,7 +423,7 @@ func TestSohoRunNotFound(t *testing.T) {
 // executable is reported as ErrUnavailable.
 func TestSohoRunNotRunnable(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "herdr-soho")
+	bin := filepath.Join(dir, "soho")
 	if err := os.WriteFile(bin, []byte("not executable\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestSohoEventsNonZeroExit(t *testing.T) {
 // Runner, and the failed run does not report the previous run's
 // channel.
 func TestSohoRunDrainDoneAfterLookPathFailure(t *testing.T) {
-	r := soho.Runner{Bin: "no-such-herdr-soho-binary", Environ: childEnv}
+	r := soho.Runner{Bin: "no-such-soho-binary", Environ: childEnv}
 	_, err := r.Run(context.Background(), []string{"job", "status", "--id", "J1"}, nil, io.Discard, io.Discard, 10*time.Second)
 	var ue *soho.ErrUnavailable
 	if !errors.As(err, &ue) {
@@ -624,7 +624,7 @@ func TestSohoRunDrainDoneAfterLookPathFailure(t *testing.T) {
 	if prev == nil {
 		t.Fatalf("DrainDone after the successful run = nil, want a channel")
 	}
-	r2.Bin = "no-such-herdr-soho-binary"
+	r2.Bin = "no-such-soho-binary"
 	_, err = r2.Run(context.Background(), []string{"job", "status", "--id", "J1"}, nil, &out, io.Discard, 10*time.Second)
 	var ue2 *soho.ErrUnavailable
 	if !errors.As(err, &ue2) {

@@ -23,7 +23,7 @@ import (
 // subprocesses (also asserted on in the fake call log).
 var fakeChildEnv = []string{"PATH=/bin", "HERMES_CHILD=1"}
 
-// installFakeSoho installs the fake herdr-soho and returns (exePath, dir).
+// installFakeSoho installs the fake soho and returns (exePath, dir).
 func installFakeSoho(t *testing.T, rules ...fakesoho.Rule) (string, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -384,11 +384,11 @@ func TestJobForwardValidation(t *testing.T) {
 	}
 }
 
-// TestJobForwardMissingBinary: a missing herdr-soho exits 4 with the exact
+// TestJobForwardMissingBinary: a missing soho exits 4 with the exact
 // unavailable line.
 func TestJobForwardMissingBinary(t *testing.T) {
 	cfgDir := t.TempDir()
-	setSohoConfig(t, cfgDir, "no-such-herdr-soho-binary-xyz", "machine-a")
+	setSohoConfig(t, cfgDir, "no-such-soho-binary-xyz", "machine-a")
 	stdout, _, exit := runHermes(t, cfgDir, false, "", "job", "status", "--id", "J1")
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4", exit)
@@ -705,7 +705,7 @@ func TestJobForwardBookkeepingStartDispatchRetry(t *testing.T) {
 	}
 }
 
-// TestJobForwardNotRunnable: an existing but not runnable herdr-soho
+// TestJobForwardNotRunnable: an existing but not runnable soho
 // prints the same unavailable line as a missing binary (POSIX; on
 // Windows a non-executable file is still runnable, so skip there).
 func TestJobForwardNotRunnable(t *testing.T) {
@@ -713,7 +713,7 @@ func TestJobForwardNotRunnable(t *testing.T) {
 		t.Skip("a non-executable file is only unrunnable on POSIX")
 	}
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "herdr-soho")
+	bin := filepath.Join(dir, "soho")
 	if err := os.WriteFile(bin, []byte("not executable\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

@@ -53,7 +53,7 @@ type Subject struct {
 	// ID is the stable subject identifier (SubjectPattern). It owns the
 	// tasks it creates: another subject never sees them.
 	ID string
-	// Ref is the herdr-soho reference this subject speaks for, or "".
+	// Ref is the soho reference this subject speaks for, or "".
 	// A delivery to the same reference is never sent (loop guard).
 	Ref string
 	// Projects are the "<org>/<repo>" projects the subject may address;

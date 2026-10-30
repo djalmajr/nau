@@ -11,7 +11,7 @@ import (
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
-// configTable is the `herdr-soho config` output shape: padded
+// configTable is the `soho config` output shape: padded
 // KEY / VALUE / SOURCE columns.
 func configTable(rows ...string) string {
 	lines := []string{"KEY VALUE SOURCE"}
@@ -48,7 +48,7 @@ func runDoctor(t *testing.T, cfgDir string, nowrite bool) (doctorLine, string, i
 	return line, stdout, exit
 }
 
-// TestDoctorFound: a found herdr-soho with both capabilities, a set
+// TestDoctorFound: a found soho with both capabilities, a set
 // machine_label and dispatcher_url, the wake hook and the outbox counts.
 func TestDoctorFound(t *testing.T) {
 	exe, _ := installFakeSoho(t,
@@ -101,11 +101,11 @@ func TestDoctorFound(t *testing.T) {
 	}
 }
 
-// TestDoctorMissingBinary: a missing herdr-soho exits 43, reports found
+// TestDoctorMissingBinary: a missing soho exits 43, reports found
 // false and null capabilities, and still reports the rest.
 func TestDoctorMissingBinary(t *testing.T) {
 	cfgDir := t.TempDir()
-	setSohoConfig(t, cfgDir, "no-such-herdr-soho-binary-xyz", "")
+	setSohoConfig(t, cfgDir, "no-such-soho-binary-xyz", "")
 	line, _, exit := runDoctor(t, cfgDir, false)
 	if exit != 43 {
 		t.Fatalf("exit = %d, want 43", exit)
@@ -130,7 +130,7 @@ func TestDoctorMissingBinary(t *testing.T) {
 	}
 }
 
-// TestDoctorCapabilitiesMissing: herdr-soho found but one capability
+// TestDoctorCapabilitiesMissing: soho found but one capability
 // missing exits 43 and still reports the raw line.
 func TestDoctorCapabilitiesMissing(t *testing.T) {
 	const line1 = `{"schema":1,"ephemeral_job":1}`
@@ -150,7 +150,7 @@ func TestDoctorCapabilitiesMissing(t *testing.T) {
 }
 
 // TestDoctorWakeHook: the wake hook classification over the four input
-// shapes, and the child environment carries HERDR_SOHO_NOWRITE=1.
+// shapes, and the child environment carries SOHO_NOWRITE=1.
 func TestDoctorWakeHook(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -174,7 +174,7 @@ func TestDoctorWakeHook(t *testing.T) {
 			if line.WakeHook != tc.want {
 				t.Errorf("wake_hook = %q, want %q", line.WakeHook, tc.want)
 			}
-			// The config call ran with HERDR_SOHO_NOWRITE=1 in the child
+			// The config call ran with SOHO_NOWRITE=1 in the child
 			// environment.
 			calls, err := fakesoho.ReadCalls(fakeDir)
 			if err != nil {
@@ -192,12 +192,12 @@ func TestDoctorWakeHook(t *testing.T) {
 			}
 			found := false
 			for _, kv := range configCall.Env {
-				if kv == "HERDR_SOHO_NOWRITE=1" {
+				if kv == "SOHO_NOWRITE=1" {
 					found = true
 				}
 			}
 			if !found {
-				t.Errorf("child env lacks HERDR_SOHO_NOWRITE=1: %v", configCall.Env)
+				t.Errorf("child env lacks SOHO_NOWRITE=1: %v", configCall.Env)
 			}
 		})
 	}
@@ -315,7 +315,7 @@ func sameArgv(a, b []string) bool {
 // otherwise, which is why the plain listing is not consulted), an exit
 // 0 with an empty line gives false, and any other exit falls back to
 // the plain `config` listing, which then reads the user file. The
-// `config get` child carries both NOWRITE variables.
+// `config get` child carries SOHO_NOWRITE=1.
 func TestDoctorWakeHookConfigGet(t *testing.T) {
 	fileDir := t.TempDir()
 	file := filepath.Join(fileDir, "config")
@@ -364,7 +364,7 @@ func TestDoctorWakeHookConfigGet(t *testing.T) {
 			if line.WakeHook != tc.want {
 				t.Errorf("wake_hook = %q, want %q", line.WakeHook, tc.want)
 			}
-			// The `config get` child ran with both NOWRITE variables in
+			// The `config get` child ran with SOHO_NOWRITE=1 in
 			// the child environment, the same guarantee the test already
 			// checks for the plain `config` call.
 			calls, err := fakesoho.ReadCalls(fakeDir)
@@ -381,7 +381,7 @@ func TestDoctorWakeHookConfigGet(t *testing.T) {
 			if getCall == nil {
 				t.Fatalf("no config get call in the fake log: %v", calls)
 			}
-			for _, want := range []string{"SOHO_NOWRITE=1", "HERDR_SOHO_NOWRITE=1"} {
+			for _, want := range []string{"SOHO_NOWRITE=1"} {
 				found := false
 				for _, kv := range getCall.Env {
 					if kv == want {

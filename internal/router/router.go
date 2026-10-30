@@ -1,5 +1,5 @@
 // Package router chooses the machine a dispatcher sends a new job to. It is
-// the dispatcher-side half of DJA-195: herdr-soho never routes a job, so the
+// the dispatcher-side half of DJA-195: soho never routes a job, so the
 // choice happens here, before the node-local job contract is invoked on the
 // chosen machine through the dispatcher's own remote execution channel.
 //
@@ -34,10 +34,10 @@ const Local = "local"
 var LabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // OrchestratorNamePattern is the accepted form of the orchestrator agent
-// base name (the herdr-soho orchestrator_name).
+// base name (the soho orchestrator_name).
 var OrchestratorNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 
-// DefaultOrchestratorName is the herdr-soho default orchestrator agent name.
+// DefaultOrchestratorName is the soho default orchestrator agent name.
 const DefaultOrchestratorName = "orchestrator"
 
 // MaxProbeOutput caps the stdout read from one herdr probe; a longer output

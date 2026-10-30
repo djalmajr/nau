@@ -8,8 +8,7 @@ import (
 )
 
 // TestWakeNewFamily: the renamed backend (soho) sets the SOHO_JOB_*
-// variables; wake accepts the current family and records the event
-// exactly like the legacy family.
+// variables; wake accepts them and records the event.
 func TestWakeNewFamily(t *testing.T) {
 	dir := t.TempDir()
 	setConfig(t, dir, map[string]string{"machine_label": "m1"})
@@ -31,7 +30,7 @@ func TestWakeNewFamily(t *testing.T) {
 	if len(lines) != 1 || !strings.Contains(lines[0], `"idempotency_key":"job-31:1"`) || !strings.Contains(lines[0], `"job_id":"job-31"`) {
 		t.Fatalf("outbox lines = %v, want the job-31 event recorded", lines)
 	}
-	// A repeat of the same event deduplicates, as with the legacy family.
+	// A repeat of the same event deduplicates.
 	stdout, stderr, exit = runCLIStdin(t, dir, wakeEvent(1), vars, "wake")
 	if exit != 0 || !strings.Contains(stdout, `"duplicado":true`) {
 		t.Fatalf("wake (current family) retry: exit %d stdout %q", exit, stdout)
@@ -85,10 +84,10 @@ func TestWakeMixedFamiliesOnlyNewWins(t *testing.T) {
 		jobapi.EnvJobIdempotencyKeyCurrent: "job-31:1",
 		// ...and the legacy family carries a conflicting one that must
 		// be ignored.
-		jobapi.EnvJobID:             "job-other",
-		jobapi.EnvJobSeq:            "9",
-		jobapi.EnvJobEvent:          `{"seq":9}`,
-		jobapi.EnvJobIdempotencyKey: "job-other:9",
+		"HERDR_" + "SOHO_JOB_ID":              "job-other",
+		"HERDR_" + "SOHO_JOB_SEQ":             "9",
+		"HERDR_" + "SOHO_JOB_EVENT":           `{"seq":9}`,
+		"HERDR_" + "SOHO_JOB_IDEMPOTENCY_KEY": "job-other:9",
 	}
 	stdout, stderr, exit := runCLIStdin(t, dir, wakeEvent(1), vars, "wake")
 	if exit != 0 {
@@ -101,5 +100,22 @@ func TestWakeMixedFamiliesOnlyNewWins(t *testing.T) {
 	lines := outboxLines(t, dir)
 	if len(lines) != 1 || !strings.Contains(lines[0], `"idempotency_key":"job-31:1"`) || !strings.Contains(lines[0], `"job_id":"job-31"`) {
 		t.Fatalf("outbox lines = %v, want the current family's job-31 event, not the legacy job-other", lines)
+	}
+}
+
+// Restoring the retired-family fallback would accept this event and write a record.
+func TestWakeIgnoresRetiredVariables(t *testing.T) {
+	dir := t.TempDir()
+	setConfig(t, dir, map[string]string{"machine_label": "m1"})
+	vars := map[string]string{}
+	for key, value := range map[string]string{"ID": "job-31", "SEQ": "1", "EVENT": wakeEvent(1), "IDEMPOTENCY_KEY": "job-31:1"} {
+		vars["HERDR_"+"SOHO_JOB_"+key] = value
+	}
+	stdout, stderr, exit := runCLIStdin(t, dir, wakeEvent(1), vars, "wake")
+	if exit != 2 || !strings.Contains(stderr, "SOHO_JOB_ID") {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if len(outboxLines(t, dir)) != 0 {
+		t.Fatal("retired variables must not create an outbox record")
 	}
 }

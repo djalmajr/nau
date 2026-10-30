@@ -1,11 +1,11 @@
 # Nau
 
-Nau is a universal messaging and registry core: a neutral core — the durable outbox, the current-state registry, the notifications, the routing and the job bookkeeping — with four boundary adapters, built on the ephemeral job contract of [soho](https://github.com/djalmajr/herdr-soho).
+Nau is a universal messaging and registry core: a neutral core — the durable outbox, the current-state registry, the notifications, the routing and the job bookkeeping — with four boundary adapters, built on the ephemeral job contract of soho.
 
 The adapters and their status:
 
 - **Hermes** — the remote job dispatcher boundary: the pull of the outbox and the push client are implemented, and the dispatcher-side receiver does not exist yet — implemented in part.
-- **Herdr** — the node boundary: forwarding to the `soho` public CLI (legacy name `herdr-soho`), the optional Herdr plugin and the Herdr agent-status notification sources — implemented.
+- **Herdr** — the node boundary: forwarding to the `soho` public CLI, the optional Herdr plugin and the Herdr agent-status notification sources — implemented.
 - **Grok Bot** — planned, not implemented.
 - **OpenAI Dots** — planned, not implemented.
 
@@ -17,7 +17,7 @@ Status: under development. Nothing here is stable yet.
 
 ## Names
 
-`nau` is the command, built from `./cmd/nau`; the old `herdr-hermes` command name and its binary are retired. `nau` uses the existing state directory, the `herdr-hermes` directory under the user's configuration directory: nothing is migrated, and a `nau` state directory is never read or created. The `HERDR_HERMES_NOWRITE` variable, the `User-Agent` header value `herdr-hermes/<version>`, the notification marker `[herdr-hermes]`, the plugin manifest and the skill directory keep the `herdr-hermes` name. The backend is now named `soho` (its release `v0.3.0-rc.1` retired the `herdr-soho` name without compatibility); during the transition `nau` works with the backend installed as `soho` or as `herdr-soho`: a `herdr_soho_bin` value that is empty or stored as `herdr-soho` is the auto form and resolves to the first of `soho` and `herdr-soho` found on the `PATH`, an explicit value is used as is, `nau doctor` prints a `stderr` warning (the JSON line and the exit code are unchanged) when the stored selection still points at the legacy `herdr-soho` binary while `soho` is on the `PATH`, the wake hook reads the `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY` variables when any of them is present and otherwise the legacy `HERDR_SOHO_JOB_*` variables — never both families at once — and the `config` probe of `nau doctor` runs the backend with `SOHO_NOWRITE=1` and `HERDR_SOHO_NOWRITE=1`.
+`nau` is the command, built from `./cmd/nau`; the old `herdr-hermes` command name and its binary are retired. `nau` uses the existing state directory, the `herdr-hermes` directory under the user's configuration directory: nothing is migrated, and a `nau` state directory is never read or created. The `HERDR_HERMES_NOWRITE` variable, the `User-Agent` header value `herdr-hermes/<version>`, the notification marker `[herdr-hermes]`, the plugin manifest and the skill directory keep the `herdr-hermes` name. The backend is named `soho`. Only an empty `herdr_soho_bin` is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is. The wake hook reads `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`. The `config` probes of `nau doctor` run the backend with `SOHO_NOWRITE=1`.
 
 ## Install
 
@@ -54,7 +54,7 @@ The binary must be on your `PATH`; the optional plugin also needs it on the Herd
 `nau` replaces the retired `herdr-hermes` binary: the commands, flags, JSON output and exit codes are the same.
 
 - Install `nau` on your `PATH` (`go build -o <dir>/nau ./cmd/nau`), and on the Herdr server's `PATH` when the optional plugin is linked.
-- Change `job_wake_cmd=herdr-hermes wake` to `job_wake_cmd=nau wake` in the `soho` machine configuration (legacy name `herdr-soho`), because `nau doctor` no longer accepts the old name.
+- Change `job_wake_cmd=herdr-hermes wake` to `job_wake_cmd=nau wake` in the `soho` machine configuration, because `nau doctor` no longer accepts the old name.
 - A plugin already linked (`herdr plugin link`) now calls `nau`.
 - The state directory is the same `herdr-hermes` directory under the user's configuration directory: nothing is migrated.
 

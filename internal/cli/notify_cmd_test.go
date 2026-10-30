@@ -97,7 +97,7 @@ func runNotifyFlowNowrite(t *testing.T, dir string, clk *testClock, vars map[str
 	return out.String(), errb.String(), exit
 }
 
-// sendRule is the fake herdr-soho rule for the `send` command: Argv
+// sendRule is the fake soho rule for the `send` command: Argv
 // prefix `send`, optional Nth-call match (call == 0 matches every call).
 func sendRule(code, call int) fakesoho.Rule {
 	return fakesoho.Rule{Argv: []string{"send"}, ArgvPrefix: true, Call: call, Code: code, Stdout: "sent to ref\n"}
@@ -316,7 +316,7 @@ func readRegistry(t *testing.T, dir string) notify.Registry {
 // TestNotifyList covers the read-only list line, the disabled state on a
 // fresh dir (nothing created) and the counts after registrations and a
 // projected event, with the wake's delivery run through the fake
-// herdr-soho (a question event has no escalation, so exactly two sends:
+// soho (a question event has no escalation, so exactly two sends:
 // the owner and the orchestrator).
 func TestNotifyList(t *testing.T) {
 	clk := newTestClock()
@@ -333,7 +333,7 @@ func TestNotifyList(t *testing.T) {
 		t.Fatal("list created the state dir")
 	}
 
-	// After registrations: the herdr-soho bin points at the fake, so the
+	// After registrations: the soho bin points at the fake, so the
 	// wake's sends never resolve a real binary from the test PATH, and
 	// the job is seeded with its project before the wake.
 	exe, fakeDir := installFakeSoho(t, capsRule(capsJSON, 0), sendRule(0, 0))
@@ -366,7 +366,7 @@ func TestNotifyList(t *testing.T) {
 	}
 
 	// A projected accepted event: one notification, zero pending.
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	stdout, _, exit = runNotifyFlow(t, dir, clk, vars, wakeEvent(1), "wake")
 	if exit != 0 {
 		t.Fatalf("wake exit = %d, stdout %q", exit, stdout)
@@ -413,7 +413,7 @@ func TestNotifyListPending(t *testing.T) {
 	setSohoConfig(t, dir, exe, "machine-a")
 	mustRunNotify(t, dir, clk, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", notifyTestOwner)
 	seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir, clk, vars, wakeEvent(1), "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}
@@ -566,7 +566,7 @@ func TestNotifyDeliver(t *testing.T) {
 	setSohoConfig(t, dir2, exe, "machine-a")
 	mustRunNotify(t, dir2, clk2, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", notifyTestOwner)
 	seedJob(t, dir2, notifyTestJob, notifyTestRepo, 0, "accepted")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir2, clk2, vars, wakeEvent(1), "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}
@@ -804,7 +804,7 @@ func TestNotifyAck(t *testing.T) {
 		fakesoho.Rule{Argv: sendArgv(notifyTestOwner, msg2), Code: 17},
 	)
 	setSohoConfig(t, dir2, exe, "machine-a")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir2, clk, vars, ev1, "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}

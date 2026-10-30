@@ -58,7 +58,7 @@ func seedBusyDelivery(t *testing.T, exe, fakeDir string, dir string, clk *testCl
 	setSohoConfig(t, dir, exe, "machine-a")
 	seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
 	mustRunNotify(t, dir, clk, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", ref)
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	_, stderr, exit := runNotifyFlow(t, dir, clk, vars, flowWakeEvent(1, "terminal", ""), "wake")
 	if exit != 0 {
 		t.Fatalf("wake exit = %d, stderr %q", exit, stderr)
@@ -227,7 +227,7 @@ func TestPluginAgentStatusExpedite(t *testing.T) {
 		clk := newTestClock()
 		seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
 		mustRunNotify(t, dir, clk, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", notifyTestOwner)
-		vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+		vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 		stdout, stderr, exit := runNotifyFlow(t, dir, clk, vars, flowWakeEvent(1, "terminal", ""), "wake")
 		if exit != 0 {
 			t.Fatalf("wake exit = %d, stderr %q", exit, stderr)

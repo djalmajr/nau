@@ -110,7 +110,7 @@ func (s *cliPushServer) count() int {
 	return len(s.requests)
 }
 
-// TestWake covers criterion 5: an event on stdin plus the HERDR_SOHO_JOB_*
+// TestWake covers criterion 5: an event on stdin plus the SOHO_JOB_*
 // env vars appends one job_event record; a repeat converges to one record;
 // malformed input exits 2; a push failure or a missing key still exits 0
 // with the record pending; an unknown job is tracked.
@@ -118,10 +118,10 @@ func TestWake(t *testing.T) {
 	dir := t.TempDir()
 	setConfig(t, dir, map[string]string{"machine_label": "m1"})
 	vars := map[string]string{
-		jobapi.EnvJobID:             "job-1",
-		jobapi.EnvJobSeq:            "1",
-		jobapi.EnvJobEvent:          `{"seq":1}`,
-		jobapi.EnvJobIdempotencyKey: "job-1:1",
+		jobapi.EnvJobIDCurrent:             "job-1",
+		jobapi.EnvJobSeqCurrent:            "1",
+		jobapi.EnvJobEventCurrent:          `{"seq":1}`,
+		jobapi.EnvJobIdempotencyKeyCurrent: "job-1:1",
 	}
 	stdout, stderr, exit := runCLIStdin(t, dir, wakeEvent(1), vars, "wake")
 	if exit != 0 {
@@ -151,7 +151,7 @@ func TestWake(t *testing.T) {
 		t.Fatalf("outbox has %d lines after retry, want 1", n)
 	}
 	// An unknown job is tracked on the fly (empty projeto).
-	vars2 := map[string]string{jobapi.EnvJobID: "job-9"}
+	vars2 := map[string]string{jobapi.EnvJobIDCurrent: "job-9"}
 	stdout, stderr, exit = runCLIStdin(t, dir, wakeEvent(3), vars2, "wake")
 	if exit != 0 {
 		t.Fatalf("wake unknown job exit = %d, stderr %q", exit, stderr)
@@ -185,7 +185,7 @@ func TestWake(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	vars7 := map[string]string{jobapi.EnvJobID: "job-7"}
+	vars7 := map[string]string{jobapi.EnvJobIDCurrent: "job-7"}
 	stdout, stderr, exit = runCLIStdin(t, dir, wakeEvent(2), vars7, "wake")
 	if exit != 0 {
 		t.Fatalf("wake tracked job exit = %d, stderr %q", exit, stderr)
@@ -202,17 +202,17 @@ func TestWake(t *testing.T) {
 		stdin string
 		vars  map[string]string
 	}{
-		{"not json", `{nope`, map[string]string{jobapi.EnvJobID: "job-1"}},
-		{"empty stdin", ``, map[string]string{jobapi.EnvJobID: "job-1"}},
+		{"not json", `{nope`, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
+		{"empty stdin", ``, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
 		{"missing id", wakeEvent(1), map[string]string{}},
-		{"invalid id", wakeEvent(1), map[string]string{jobapi.EnvJobID: "bad id!"}},
-		{"seq missing", `{"tipo":"question"}`, map[string]string{jobapi.EnvJobID: "job-1"}},
-		{"seq zero", `{"seq":0}`, map[string]string{jobapi.EnvJobID: "job-1"}},
-		{"seq negative", `{"seq":-2}`, map[string]string{jobapi.EnvJobID: "job-1"}},
-		{"seq string", `{"seq":"1"}`, map[string]string{jobapi.EnvJobID: "job-1"}},
-		{"env seq mismatch", wakeEvent(1), map[string]string{jobapi.EnvJobID: "job-1", jobapi.EnvJobSeq: "2"}},
-		{"env seq not a number", wakeEvent(1), map[string]string{jobapi.EnvJobID: "job-1", jobapi.EnvJobSeq: "x"}},
-		{"idempotency mismatch", wakeEvent(1), map[string]string{jobapi.EnvJobID: "job-1", jobapi.EnvJobIdempotencyKey: "job-1:9"}},
+		{"invalid id", wakeEvent(1), map[string]string{jobapi.EnvJobIDCurrent: "bad id!"}},
+		{"seq missing", `{"tipo":"question"}`, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
+		{"seq zero", `{"seq":0}`, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
+		{"seq negative", `{"seq":-2}`, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
+		{"seq string", `{"seq":"1"}`, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}},
+		{"env seq mismatch", wakeEvent(1), map[string]string{jobapi.EnvJobIDCurrent: "job-1", jobapi.EnvJobSeqCurrent: "2"}},
+		{"env seq not a number", wakeEvent(1), map[string]string{jobapi.EnvJobIDCurrent: "job-1", jobapi.EnvJobSeqCurrent: "x"}},
+		{"idempotency mismatch", wakeEvent(1), map[string]string{jobapi.EnvJobIDCurrent: "job-1", jobapi.EnvJobIdempotencyKeyCurrent: "job-1:9"}},
 	}
 	for _, tc := range cases {
 		stdout, stderr, exit := runCLIStdin(t, dir, tc.stdin, tc.vars, "wake")
@@ -228,11 +228,11 @@ func TestWake(t *testing.T) {
 	}
 	// Stdin over the 64 KiB cap exits 2; exactly at the cap is accepted.
 	over := `{"seq":1,"pad":"` + strings.Repeat("a", jobapi.StdinCapAmend) + `"}`
-	if _, _, exit := runCLIStdin(t, dir, over, map[string]string{jobapi.EnvJobID: "job-1"}, "wake"); exit != 2 {
+	if _, _, exit := runCLIStdin(t, dir, over, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}, "wake"); exit != 2 {
 		t.Error("wake with stdin over 64 KiB must exit 2")
 	}
 	exact := eventAtCap(jobapi.StdinCapAmend)
-	stdout, stderr, exit = runCLIStdin(t, dir, exact, map[string]string{jobapi.EnvJobID: "job-1"}, "wake")
+	stdout, stderr, exit = runCLIStdin(t, dir, exact, map[string]string{jobapi.EnvJobIDCurrent: "job-1"}, "wake")
 	if exit != 0 || !strings.Contains(stdout, `"duplicado":false`) {
 		t.Errorf("wake at exactly 64 KiB: exit %d stdout %q stderr %q", exit, stdout, stderr)
 	}
@@ -242,7 +242,7 @@ func TestWake(t *testing.T) {
 	}
 	// machine_label empty exits 2 with a clear message.
 	dirEmpty := t.TempDir()
-	stdout, stderr, exit = runCLIStdin(t, dirEmpty, wakeEvent(1), map[string]string{jobapi.EnvJobID: "job-1"}, "wake")
+	stdout, stderr, exit = runCLIStdin(t, dirEmpty, wakeEvent(1), map[string]string{jobapi.EnvJobIDCurrent: "job-1"}, "wake")
 	if exit != 2 || !strings.Contains(stderr, "machine_label is empty") {
 		t.Errorf("wake with empty machine_label: exit %d stderr %q", exit, stderr)
 	}
@@ -255,10 +255,10 @@ func TestWakeEventTrailingNewline(t *testing.T) {
 	dir := t.TempDir()
 	setConfig(t, dir, map[string]string{"machine_label": "m1"})
 	vars := map[string]string{
-		jobapi.EnvJobID:             "job-5",
-		jobapi.EnvJobSeq:            "1",
-		jobapi.EnvJobEvent:          wakeEvent(1),
-		jobapi.EnvJobIdempotencyKey: "job-5:1",
+		jobapi.EnvJobIDCurrent:             "job-5",
+		jobapi.EnvJobSeqCurrent:            "1",
+		jobapi.EnvJobEventCurrent:          wakeEvent(1),
+		jobapi.EnvJobIdempotencyKeyCurrent: "job-5:1",
 	}
 	stdout, stderr, exit := runCLIStdin(t, dir, wakeEvent(1)+"\n", vars, "wake")
 	if exit != 0 {
@@ -300,7 +300,7 @@ func eventAtCap(cap int) string {
 // TestWakePushOutcome pins the exit-0-on-push-failure and missing-key
 // rules, and that wake makes exactly one push attempt (no retries).
 func TestWakePushOutcome(t *testing.T) {
-	vars := map[string]string{jobapi.EnvJobID: "job-1"}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: "job-1"}
 	// Missing key: still exit 0, record pending.
 	dir := t.TempDir()
 	setConfig(t, dir, map[string]string{"machine_label": "m1", "dispatcher_url": "http://127.0.0.1:1"})
@@ -343,7 +343,7 @@ func TestWakePushOutcome(t *testing.T) {
 // the wake hook projects one pending notification (class blocked_warning)
 // for the registered owner and orchestrator; the transient send failure
 // keeps both deliveries pending, and the rendered message the fake
-// herdr-soho receives carries event=blocked_warning, never event=?.
+// soho receives carries event=blocked_warning, never event=?.
 func TestWakeBlockedWarningNotification(t *testing.T) {
 	exe, fakeDir := installFakeSoho(t, sendRule(17, 0))
 	dir := t.TempDir()
@@ -362,9 +362,9 @@ func TestWakeBlockedWarningNotification(t *testing.T) {
 	}
 	stdin := `{"seq":4,"ts":"2026-01-01T12:00:00-03:00","tipo":"blocked_warning","resumo":"80% of the blocked ceiling used"}`
 	vars := map[string]string{
-		jobapi.EnvJobID:             "job-1",
-		jobapi.EnvJobSeq:            "4",
-		jobapi.EnvJobIdempotencyKey: "job-1:4",
+		jobapi.EnvJobIDCurrent:             "job-1",
+		jobapi.EnvJobSeqCurrent:            "4",
+		jobapi.EnvJobIdempotencyKeyCurrent: "job-1:4",
 	}
 	stdout, stderr, exit := runCLIStdin(t, dir, stdin, vars, "wake")
 	if exit != 0 {

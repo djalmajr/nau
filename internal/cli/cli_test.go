@@ -203,7 +203,7 @@ func TestNowrite(t *testing.T) {
 	}
 	assertDirEmpty(t, dir)
 
-	// Slice-4b read-only additions: doctor (fake herdr-soho, so it exits 0),
+	// Slice-4b read-only additions: doctor (fake soho, so it exits 0),
 	// auth status and plugin bridge status all work under NOWRITE and write
 	// nothing.
 	dir = t.TempDir()

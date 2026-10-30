@@ -250,7 +250,7 @@ func TestNotifyRetryCommand(t *testing.T) {
 	clk := newTestClock()
 	mustRunNotify(t, dir, clk, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", notifyTestOwner)
 	seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir, clk, vars, wakeEvent(1), "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}

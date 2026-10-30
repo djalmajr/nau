@@ -1,5 +1,5 @@
 // Package fakesoho provides a re-executed Go test binary as a deterministic
-// fake of the herdr-soho executable. It is configured without any
+// fake of the soho executable. It is configured without any
 // environment variable: Install copies the test binary next to a JSON
 // script, and the fake finds the script next to os.Executable(). Call
 // Install from a test and Main first from the package TestMain.
@@ -25,11 +25,11 @@ import (
 
 const (
 	// exeBase is the executable base name the fake is installed as.
-	exeBase = "herdr-soho"
+	exeBase = "soho"
 	// scriptName is the script file installed next to the executable.
-	scriptName = "fake-herdr-soho.json"
+	scriptName = "fake-soho.json"
 	// logName is the call log installed next to the executable.
-	logName = "fake-herdr-soho.calls.jsonl"
+	logName = "fake-soho.calls.jsonl"
 	// pipeHolderMarker is the argv marker that routes the re-exec'd copy
 	// into the pipe-holder role: it keeps the inherited stdout and
 	// stderr open for the millisecond count in the next argument.
@@ -112,8 +112,8 @@ type script struct {
 	Rules []Rule `json:"rules"`
 }
 
-// Install copies the test binary as <dir>/herdr-soho (herdr-soho.exe on
-// Windows) and writes the rule script to <dir>/fake-herdr-soho.json. It
+// Install copies the test binary as <dir>/soho (soho.exe on
+// Windows) and writes the rule script to <dir>/fake-soho.json. It
 // returns the absolute executable path; tests point the herdr_soho_bin
 // config key at it.
 func Install(t testing.TB, dir string, rules ...Rule) (exePath string) {
@@ -317,8 +317,8 @@ func ReadCalls(dir string) ([]Call, error) {
 	return calls, nil
 }
 
-// Main assumes the fake herdr-soho role when the process executable base
-// name is herdr-soho and the script is installed next to it; otherwise it
+// Main assumes the fake soho role when the process executable base
+// name is soho and the script is installed next to it; otherwise it
 // returns at once. Call it first from the package TestMain; it exits the
 // re-executed process after dispatching the rule.
 func Main() {

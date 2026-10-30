@@ -1,6 +1,6 @@
 // Process-level regression for the job forwarder: the real nau binary
 // (built once by TestMain in main_test.go) is run against the fake
-// herdr-soho while the test's stdout reader pauses 15s before draining, so
+// soho while the test's stdout reader pauses 15s before draining, so
 // the CLI's stdout pipe stays full while the command is still running.
 // The child's full output must still reach the pipe and the forwarder's
 // friction diagnostic must not be lost: a stalled consumer must never
@@ -253,7 +253,7 @@ func modeOf(t *testing.T, p string) os.FileMode {
 	return fi.Mode()
 }
 
-// TestProcessStalledReader runs the real CLI against the fake herdr-soho
+// TestProcessStalledReader runs the real CLI against the fake soho
 // with a stdout reader that pauses 15s before draining. On a stalled
 // consumer the CLI must deliver every byte the child wrote and keep the
 // forwarder's diagnostic, not exit with the pipe buffer's worth.

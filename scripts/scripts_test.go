@@ -87,23 +87,23 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 		{name: "no file", missing: true, backend: "soho"},
 		{name: "missing key", config: "# configuration\nmachine_label=node\n", backend: "soho"},
 		{name: "empty", config: "herdr_soho_bin=\n", backend: "soho"},
-		{name: "legacy auto", config: "herdr_soho_bin=herdr-soho\n", backend: "soho"},
+		{name: "retired explicit", config: "herdr_soho_bin=herdr" + "-soho\n", backend: "soho", explicit: true},
 		{name: "absolute explicit", config: "absolute", explicit: true, backend: "soho"},
 		{name: "bare explicit", config: "herdr_soho_bin=soho\n", explicit: true, backend: "soho"},
 		{name: "relative explicit", config: "herdr_soho_bin=./bin/soho\n", explicit: true, backend: "soho"},
 		{name: "idempotent", missing: true, backend: "soho", repeat: true},
-		{name: "legacy only", missing: true, backend: "herdr-soho"},
+		{name: "retired only", missing: true, backend: "herdr" + "-soho"},
 		{name: "no backend no file", missing: true},
-		{name: "no backend auto file", config: "herdr_soho_bin=herdr-soho\n"},
+		{name: "no backend auto file", config: "herdr_soho_bin=\n"},
 		{name: "go failure no file", missing: true, backend: "soho", failGo: true},
 		{name: "go failure auto file", config: "herdr_soho_bin=\n", backend: "soho", failGo: true},
 		{name: "pin write failure", missing: true, backend: "soho", failSet: true},
-		{name: "trim last auto wins", config: " # comment\r\n herdr_soho_bin = soho\r\n\t herdr_soho_bin = herdr-soho \t\r\n", backend: "soho"},
+		{name: "trim last auto wins", config: " # comment\r\n herdr_soho_bin = soho\r\n\t herdr_soho_bin = \t\r\n", backend: "soho"},
 		{name: "trim last explicit wins", config: "herdr_soho_bin=\n herdr_soho_bin = ./bin/soho \t\n", backend: "soho", explicit: true},
 		{name: "first equals only", config: "herdr_soho_bin=./bin/soho=custom\n", backend: "soho", explicit: true},
 		{name: "Unicode whitespace explicit", config: configWhitespace + "herdr_soho_bin" + configWhitespace + "=" + configWhitespace + "soho" + configWhitespace + "\n", backend: "soho", explicit: true},
-		{name: "Unicode whitespace auto", config: "herdr_soho_bin=" + configWhitespace + "herdr-soho" + configWhitespace + "\n", backend: "soho"},
-		{name: "Unicode nonspace explicit", config: "herdr_soho_bin=\u200bherdr-soho\u200b\n", backend: "soho", explicit: true},
+		{name: "Unicode whitespace auto", config: "herdr_soho_bin=" + configWhitespace + configWhitespace + "\n", backend: "soho"},
+		{name: "Unicode nonspace explicit", config: "herdr_soho_bin=\u200bsoho\u200b\n", backend: "soho", explicit: true},
 		// A file nau itself cannot load is left alone and the install still succeeds.
 		{name: "unloadable BOM key", config: "\ufeffherdr_soho_bin=soho\n", backend: "soho", unreadable: true},
 		{name: "unloadable line", config: "herdr_soho_bin\n", backend: "soho", unreadable: true},
@@ -149,15 +149,8 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			if tc.backend != "" {
 				write(backendPath, helperBytes)
 			}
-			// Both names exercise the resolver's preference for the current name.
-			if tc.backend == "soho" {
-				write(filepath.Join(backendDir, "herdr-soho"+suffix), helperBytes)
-			}
 			if tc.relativeCurrent {
-				if err := os.Remove(filepath.Join(backendDir, "herdr-soho"+suffix)); err != nil {
-					t.Fatal(err)
-				}
-				backendPath = filepath.Join(goDir, "herdr-soho"+suffix)
+				backendPath = filepath.Join(goDir, "soho"+suffix)
 				write(backendPath, helperBytes)
 			}
 			if tc.unsafeKind == "writable" {
@@ -279,7 +272,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				if code != want {
 					t.Fatalf("installer exit=%d want=%d: %s", code, want, out)
 				}
-				if !windows && tc.backend == "" && !strings.Contains(stderr.String(), "nau install: warning: soho not found on the PATH") {
+				if !windows && tc.backend != "soho" && !strings.Contains(stderr.String(), "nau install: warning: soho not found on the PATH") {
 					t.Fatal("missing backend warning on stderr")
 				}
 				entries, err := os.ReadDir(tmp)
@@ -294,7 +287,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			}
 			output := run(wantExit)
 			data, readErr := os.ReadFile(cfgFile)
-			if tc.failGo || tc.failSet || tc.backend == "" || tc.explicit || tc.unreadable || tc.noXDG || tc.unsafeKind != "" {
+			if tc.failGo || tc.failSet || tc.backend != "soho" || tc.explicit || tc.unreadable || tc.noXDG || tc.unsafeKind != "" {
 				if tc.missing {
 					if !os.IsNotExist(readErr) {
 						t.Fatal("config unexpectedly created")
@@ -313,7 +306,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				if tc.explicit && !strings.Contains(output, "herdr_soho_bin is set explicitly; keeping it") {
 					t.Fatal("missing explicit-value message")
 				}
-				if tc.backend == "" && !strings.Contains(output, "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend") {
+				if tc.backend != "soho" && !strings.Contains(output, "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend") {
 					t.Fatal("missing backend warning")
 				}
 				if tc.noXDG && !strings.Contains(output, "nau install: warning: cannot read the config file; herdr_soho_bin unchanged") {
