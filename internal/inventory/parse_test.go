@@ -170,6 +170,8 @@ var invalidFixtures = []struct {
 	{"invalid/hidden-missing.json", "hidden"},
 	{"invalid/hidden-key-missing.json", "hidden.idle"},
 	{"invalid/hidden-count-negative.json", "hidden.idle"},
+	{"invalid/hidden-unknown-missing.json", "hidden.unknown"},
+	{"invalid/hidden-unknown-negative.json", "hidden.unknown"},
 	{"invalid/agent-terminal-missing.json", "terminal"},
 	{"invalid/agent-name-missing.json", "name"},
 	{"invalid/agent-role-missing.json", "role"},
@@ -441,4 +443,17 @@ func withTruncatedTrue(t *testing.T, doc []byte) []byte {
 		t.Fatalf("marshal the generated document: %v", err)
 	}
 	return out
+}
+
+// TestParseKeepsEveryHiddenCount: the five hidden counts, unknown
+// included, come out of Parse as the document gave them.
+func TestParseKeepsEveryHiddenCount(t *testing.T) {
+	inv, err := inventory.Parse(readFixture(t, "testdata", "hidden-only.json"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := inventory.Hidden{Working: 2, NeedsYou: 1, Done: 1, Idle: 0, Unknown: 1}
+	if inv.Hidden != want {
+		t.Errorf("hidden = %+v, want %+v", inv.Hidden, want)
+	}
 }

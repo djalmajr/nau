@@ -41,7 +41,7 @@ type Project struct {
 // Session is one soho session of a project (the state directory
 // .soho/<id>): an opaque id and the agents of the session.
 type Session struct {
-	// ID is the session id (today the Herdr workspace id).
+	// ID is the session id (today the terminal server's workspace id).
 	ID string `json:"id"`
 	// Agents holds the orchestrator of the session, then its workers
 	// in roster order.

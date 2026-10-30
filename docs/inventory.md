@@ -2,7 +2,7 @@
 
 **Status: proposal, schema 1.** soho owns the command and the format; Nau proposes it. This page becomes the vendored contract once soho ships `soho inventory --json` and the owner agrees.
 
-The hub shows which agents are working, on which machines and for which developers. Its only source is `soho inventory --json`, run on each machine by the Nau agent of that machine. soho is the only place that applies the privacy of a project: Nau carries what the inventory prints and never adds to it from another source. Events from the terminal server (`hc events`) only wake the Nau agent, which then runs the inventory again. Nau never shows or forwards what it read in those events.
+The hub shows which agents are working, on which machines and for which developers. Its only source is `soho inventory --json`, run on each machine by the Nau agent of that machine. soho is the only place that applies the privacy of a project: Nau carries what the inventory prints and never adds to it from another source. Events from the terminal server only wake the Nau agent, which then runs the inventory again. Nau never shows or forwards what it read in those events.
 
 ## Command
 
@@ -11,7 +11,7 @@ soho inventory --json
 ```
 
 - **Read-only and local.** It reads the soho state of the projects that opted in and the terminal server of this machine. It writes nothing, makes no network call and works under `SOHO_NOWRITE=1`.
-- **Local terminals only.** Terminals mirrored from another machine (`hc machine add`, `herdr --machine`) are never listed. Each machine reports itself, so no terminal is counted twice.
+- **Local terminals only.** Terminals that the terminal server mirrors from another machine are never listed. Each machine reports itself, so no terminal is counted twice.
 - **Exit codes:**
   - 0: the inventory was printed, even when no project opted in;
   - 2: bad usage;
@@ -102,14 +102,14 @@ One JSON object on stdout.
 
 ### Session
 
-- `id`: the session id (today the Herdr workspace id). It is opaque and only groups an orchestrator with its workers.
+- `id`: the session id (today the terminal server's workspace id). It is opaque and only groups an orchestrator with its workers.
 - `agents`: the orchestrator of the session, then its workers in roster order.
 
 ### Agent
 
 | Field | Type | Meaning |
 |---|---|---|
-| `terminal` | string | The local terminal id, opaque, stable while the terminal lives (a Herdr pane id today, an `hc` terminal id later). Never prefixed with a machine. |
+| `terminal` | string | The local terminal id, opaque, stable while the terminal lives (today the terminal server's pane id). Never prefixed with a machine. |
 | `name` | string | The agent name (`orchestrator`, `build`, `build-2`, `review`). |
 | `role` | string | `orchestrator`, `sub-orchestrator`, or the worker's role (`implementer`, `reviewer`, …). |
 | `kind` | string | The assistant CLI, one of soho's known kinds (`soho kinds`). Nau shows it as given. |
@@ -138,7 +138,7 @@ soho already distinguishes these cases. The inventory folds them into five value
 | The brief was not received | `needs_you` | `not_received` |
 | Settled with no report | `needs_you` | `no_report` |
 | A compaction was interrupted | `needs_you` | `compact` |
-| A worker whose report is ready; an orchestrator whose turn ended unseen (Herdr `done`) | `done` | — |
+| A worker whose report is ready; an orchestrator whose turn ended unseen (the terminal server's `done`) | `done` | — |
 | Idle, or idle with no report yet | `idle` | — |
 | The state cannot be read | `unknown` | — |
 | Gone (closed terminal) | not listed | — |
