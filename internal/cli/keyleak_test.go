@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/djalmajr/nau/internal/jobapi"
-	"github.com/djalmajr/nau/internal/plugin"
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
@@ -115,9 +115,9 @@ func TestKeyNeverLeaks(t *testing.T) {
 	// slice-1 commands.
 	//
 	// The fake soho backs the slice-2 subprocess paths (job
-	// forwarding, sync, doctor) and the slice-4b plugin entry points added
-	// below; every child's argv, stdin and environment are captured in the
-	// fake's call log and swept for the key at the end.
+	// forwarding, sync, doctor) added below; every child's argv, stdin and
+	// environment are captured in the fake's call log and swept for the key
+	// at the end.
 	fakeExe, fakeDir := installFakeSoho(t,
 		capsRule(capsJSON, 0),
 		fakesoho.Rule{Argv: []string{"config"}, Code: 0},
@@ -174,8 +174,8 @@ func TestKeyNeverLeaks(t *testing.T) {
 		{"push extra args", "", nil, false, []string{"push", "extra"}, 2},
 	})
 
-	// 4b. The slice-2 subprocess paths (job forwarding, sync, doctor) and
-	// the slice-4b plugin entry points, against the fake soho; the
+	// 4b. The slice-2 subprocess paths (job forwarding, sync, doctor),
+	// against the fake soho; the
 	// call-log sweep below proves no child saw the key in its environment
 	// or stdin.
 	setConfig(t, dir, map[string]string{"dispatcher_url": srv200.URL})
@@ -188,11 +188,6 @@ func TestKeyNeverLeaks(t *testing.T) {
 		{"job close", "", nil, false, []string{"job", "close", "--id", "job-2"}, 0},
 		{"sync against the 200 dispatcher", "", nil, false, []string{"sync"}, 0},
 		{"doctor", "", nil, false, []string{"doctor"}, 0},
-		{"plugin startup", "", nil, false, []string{"plugin", "startup"}, 0},
-		{"plugin event workspace.created", "", map[string]string{plugin.EnvEvent: "workspace.created", plugin.EnvEventJSON: `{"workspace":{"label":"job-J1","workspace_id":"ws-1"}}`}, false, []string{"plugin", "event"}, 0},
-		{"plugin event workspace.closed", "", map[string]string{plugin.EnvEvent: "workspace.closed", plugin.EnvEventJSON: `{"workspace":{"label":"job-J1","workspace_id":"ws-1"}}`}, false, []string{"plugin", "event"}, 0},
-		{"plugin bridge status", "", nil, false, []string{"plugin", "bridge", "status"}, 0},
-		{"plugin bridge sync", "", nil, false, []string{"plugin", "bridge", "sync"}, 0},
 	})
 
 	// 5. auth status prints the exact configured line.
@@ -300,4 +295,28 @@ func TestKeyNeverLeaks(t *testing.T) {
 ` {
 		t.Fatalf("auth status after logout: exit %d stdout %q", exit, out)
 	}
+}
+
+// readFakeCalls parses the fake soho call log of the install dir.
+func readFakeCalls(t *testing.T, fakeDir string) []fakesoho.Call {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(fakeDir, "fake-soho.calls.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read fake call log: %v", err)
+	}
+	var calls []fakesoho.Call
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var c fakesoho.Call
+		if err := json.Unmarshal(line, &c); err != nil {
+			t.Fatalf("call log line %q: %v", line, err)
+		}
+		calls = append(calls, c)
+	}
+	return calls
 }

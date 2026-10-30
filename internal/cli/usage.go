@@ -21,22 +21,6 @@ commands:
                                     (the public subcommands) or "nau outbox ...", else refuse
                                     with exit 2 (takes no arguments; see docs/gate.md)
   route [--machine <label>]         choose the machine for a new job (dispatcher side, read-only)
-  serve [--listen <host:port>] [--db <path>] [--machines <label,...>]
-                        [--poll-interval <seconds>] [--max-jobs <n>]
-                        [--max-sessions <n>] [--ended-retention-days <n>]
-                                    run the registry service on a loopback address:
-                                    inventory push, poll and read/write HTTP API
-  jobs [--maquina <label>] [--agente <a>] [--server <url>]
-                                    print the registry inventory of every node (read-only)
-  jobs check --agente <a> [--card <c>] [--projeto <org/repo>] [--branch <b>] [--pr <n>]
-                        [--workspace <name>] [--maquina <label>] [--ttl <s>]
-                                    mandatory pre-dispatch check: refuse duplicate work or
-                                    a hold, else record a claim
-  jobs release --claim <id>         release a claim
-  jobs policy set|clear, jobs folder add|clear, jobs node set
-                                    holds and priorities, retained folders (a record, never
-                                    a permission to delete) and node facts
-                                    (every jobs form takes [--server <url>])
   wake                              read one job event on stdin, record it in the outbox and
                                     attempt one push
   sync [--job <id>] [--push-only]   sync tracked job events and push pending records
@@ -54,22 +38,19 @@ commands:
   capabilities --json               print the bridge capability line
   version                           print the version
   help                              print this usage
-  plugin startup|event|bridge       Herdr plugin entry points
 
 exit codes:
   0   success (forwarded commands: whatever soho returned)
   2   bad usage, input limit exceeded, unknown config key, internal job
-      subcommand refused, registry usage or field rejected (serve, jobs)
-  3   unknown job id in %s bookkeeping (sync --job) and unknown
-      claim, policy or folder (jobs)
+      subcommand refused
+  3   unknown job id in %s bookkeeping (sync --job)
   4   soho not found or not runnable; no eligible machine available
-      (route); registry unreachable or unavailable (serve, jobs)
+      (route)
   40  no API key configured (push required)
   41  API key rejected by the dispatcher (401/403)
   42  dispatcher unreachable or retries exhausted; records stay pending
   43  soho lacks the ephemeral_job or job_events capability
       (doctor, sync)
-  44  the pre-dispatch check refused: duplicate work or a hold (jobs check)
 `
 
 // usageText renders the usage for the program name of env.

@@ -1,10 +1,10 @@
 # Adapters
 
-Nau is a universal messaging and registry core. The core is neutral: it owns the durable outbox, the current-state registry, the routing and the job bookkeeping, and it reaches the outside world only through its boundary adapters. There are four of them, one per boundary.
+Nau is a universal messaging and registry core. The core is neutral: it owns the durable outbox, the routing and the job bookkeeping, and it reaches the outside world only through its boundary adapters. There are four of them, one per boundary.
 
 ## Core
 
-The neutral core is the `nau` CLI and its state directory: the durable outbox with its gapless `seq`, the current-state registry with the pre-dispatch check, the dispatcher-side routing and the local job bookkeeping. The core has no boundary of its own; every boundary belongs to one adapter, so adding an adapter does not change the core.
+The neutral core is the `nau` CLI and its state directory: the durable outbox with its gapless `seq`, the dispatcher-side routing and the local job bookkeeping. The core has no boundary of its own; every boundary belongs to one adapter, so adding an adapter does not change the core.
 
 ## Hermes
 
@@ -12,7 +12,7 @@ Hermes is the remote job dispatcher boundary. On the node it is the two-way brid
 
 ## Herdr
 
-Herdr is the node boundary: the forwarding of the dispatcher-facing job subcommands to the `soho` public CLI (the backend) and the optional Herdr plugin. `soho` stays an independent project; Nau uses only its public CLI. Status: implemented.
+Herdr is the node boundary: the forwarding of the dispatcher-facing job subcommands to the `soho` public CLI (the backend). `soho` stays an independent project; Nau uses only its public CLI. Status: implemented.
 
 ## Grok Bot
 

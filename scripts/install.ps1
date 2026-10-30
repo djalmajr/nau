@@ -1,42 +1,35 @@
-# Install or update the nau binary and the optional Herdr plugin on
-# Windows. Re-running the script with another -Ref updates the node to
-# that ref, binary and plugin on the same ref.
+# Install or update the nau binary on Windows, from a ref.
+# Re-running the script with another -Ref updates the node to that ref.
 # Pin an automatic backend selection to its absolute path on each install.
 #
-# Prerequisites: Go 1.26 or newer on the PATH; for the plugin step,
-# Herdr on the PATH. The script never prints environment variables or
-# configuration contents.
+# Prerequisites: Go 1.26 or newer on the PATH. The script never prints
+# environment variables or configuration contents.
 
 [CmdletBinding()]
 param(
     [string]$Ref = 'main',
     [string]$BinDir = '',
     [string]$MachineLabel = '',
-    [switch]$NoPlugin,
     [switch]$Help
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$PluginID = 'djalmajr.herdr-hermes'
-$PluginSource = 'djalmajr/nau/plugin'
 $ModulePath = 'github.com/djalmajr/nau/cmd/nau'
 
 function Show-Usage {
     @'
-Usage: powershell -File scripts\install.ps1 [-Ref <ref>] [-BinDir <dir>] [-MachineLabel <label>] [-NoPlugin] [-Help]
+Usage: powershell -File scripts\install.ps1 [-Ref <ref>] [-BinDir <dir>] [-MachineLabel <label>] [-Help]
 
-Install or update the nau binary into the bin directory and the Herdr
-plugin, both from the same ref. Updating is re-running the script with
-another -Ref.
+Install or update the nau binary into the bin directory, from the ref.
+Updating is re-running the script with another -Ref.
 An automatic backend selection is pinned to its absolute path on the PATH.
 
 Options:
   -Ref <ref>           ref to install (default: main)
   -BinDir <dir>        bin directory (default: %USERPROFILE%\.local\bin)
   -MachineLabel <lbl>  set machine_label when it is still empty
-  -NoPlugin            skip the Herdr plugin step
   -Help                show this help
 '@
 }
@@ -176,40 +169,6 @@ try {
 
     Set-BackendPin
 
-    # The Herdr plugin, unless skipped or Herdr is absent.
-    if ($NoPlugin) {
-        Write-Host 'nau install: skipping the Herdr plugin (-NoPlugin)'
-    }
-    else {
-        $herdr = Get-Command herdr -ErrorAction SilentlyContinue
-        if (-not $herdr) {
-            Write-Host 'nau install: herdr not found on the PATH; skipping the Herdr plugin'
-        }
-        else {
-            $list = Invoke-Quiet 'herdr' @('plugin', 'list', '--plugin', $PluginID, '--json')
-            if ($LASTEXITCODE -ne 0) {
-                Fail ('herdr plugin list failed (exit ' + $LASTEXITCODE + ')')
-            }
-            $listText = $list -join "`n"
-            if ($listText.Contains('"plugin_id":"djalmajr.herdr-hermes"')) {
-                # Installed: a local origin (herdr plugin link) is
-                # refused, a GitHub origin is updated in place.
-                $match = [regex]::Match($listText, '"source":\{[^}]*"kind":"([^"]*)"')
-                if (-not $match.Success) {
-                    Fail ("could not determine the source of the installed herdr plugin " + $PluginID + "; if it is linked to a local path, run 'herdr plugin unlink " + $PluginID + "' first")
-                }
-                if ($match.Groups[1].Value -ne 'github') {
-                    Fail ("the herdr plugin " + $PluginID + " is linked to a local path; run 'herdr plugin unlink " + $PluginID + "' first and re-run this script")
-                }
-            }
-            herdr plugin install $PluginSource --ref $Ref -y
-            if ($LASTEXITCODE -ne 0) {
-                Fail ('herdr plugin install failed (exit ' + $LASTEXITCODE + ')')
-            }
-            Write-Host ("nau install: herdr plugin " + $PluginID + " installed from " + $PluginSource + ' (ref ' + $Ref + ')')
-        }
-    }
-
     # Warn, without failing, when the bin dir is not on the PATH.
     $inPath = $false
     foreach ($entry in ($env:Path -split ';')) {
@@ -219,7 +178,7 @@ try {
         }
     }
     if (-not $inPath) {
-        Write-Host ('nau install: warning: ' + $BinDir + ' is not on the PATH; add it to use nau and the plugin')
+        Write-Host ('nau install: warning: ' + $BinDir + ' is not on the PATH; add it to use nau')
     }
 
     Write-Host 'nau install: installed'

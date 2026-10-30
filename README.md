@@ -1,41 +1,41 @@
 # Nau
 
-Nau is a universal messaging and registry core: a neutral core — the durable outbox, the current-state registry, the routing and the job bookkeeping — with four boundary adapters, built on the ephemeral job contract of soho.
+Nau is a universal messaging and registry core: a neutral core — the durable outbox, the routing and the job bookkeeping — with four boundary adapters, built on the ephemeral job contract of soho.
 
 The adapters and their status:
 
 - **Hermes** — the remote job dispatcher boundary: the pull of the outbox and the push client are implemented, and the dispatcher-side receiver does not exist yet — implemented in part.
-- **Herdr** — the node boundary: forwarding to the `soho` public CLI and the optional Herdr plugin — implemented.
+- **Herdr** — the node boundary: forwarding to the `soho` public CLI — implemented.
 - **Grok Bot** — planned, not implemented.
 - **OpenAI Dots** — planned, not implemented.
 
 Planned adapters have no code, commands or configuration; nothing in this documentation describes commands, keys or endpoints for them.
 
-On the node, `nau` keeps the two-way bridge to the dispatcher: it receives job dispatches and amendments and hands them to the local `soho job` commands unchanged, and it records job events, session status and decisions in a durable local outbox that the dispatcher can pull or that the node can push to a configured dispatcher URL with a per-user API key stored on the machine. Nau ships as one native Go executable per machine, an optional Herdr plugin and an agent skill. `soho` stays an independent project; Nau only uses its public CLI.
+On the node, `nau` keeps the two-way bridge to the dispatcher: it receives job dispatches and amendments and hands them to the local `soho job` commands unchanged, and it records job events, session status and decisions in a durable local outbox that the dispatcher can pull or that the node can push to a configured dispatcher URL with a per-user API key stored on the machine. Nau ships as one native Go executable per machine. `soho` stays an independent project; Nau only uses its public CLI.
 
 Status: under development. Nothing here is stable yet.
 
 ## Names
 
-`nau` is the command, built from `./cmd/nau`; the old `herdr-hermes` command name and its binary are retired. `nau` uses the existing state directory, the `herdr-hermes` directory under the user's configuration directory: nothing is migrated, and a `nau` state directory is never read or created. The `HERDR_HERMES_NOWRITE` variable, the `User-Agent` header value `herdr-hermes/<version>`, the plugin manifest and the skill directory keep the `herdr-hermes` name. The backend is named `soho`. Only an empty `herdr_soho_bin` is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is. The wake hook reads `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`. The `config` probes of `nau doctor` run the backend with `SOHO_NOWRITE=1`.
+`nau` is the command, built from `./cmd/nau`; the old `herdr-hermes` command name and its binary are retired. `nau` uses the existing state directory, the `herdr-hermes` directory under the user's configuration directory: nothing is migrated, and a `nau` state directory is never read or created. The `HERDR_HERMES_NOWRITE` variable and the `User-Agent` header value `herdr-hermes/<version>` keep the `herdr-hermes` name. The backend is named `soho`. Only an empty `herdr_soho_bin` is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is. The wake hook reads `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`. The `config` probes of `nau doctor` run the backend with `SOHO_NOWRITE=1`.
 
 ## Install
 
-The recommended path is the install script: it puts the `nau` binary in the bin directory and the optional Herdr plugin in place, both from the same ref. Prerequisites: Go 1.26 or newer on the `PATH` and, for the plugin step, Herdr on the `PATH`.
+The recommended path is the install script: it puts the `nau` binary in the bin directory from the ref. Prerequisites: Go 1.26 or newer on the `PATH`.
 
 On macOS and Linux:
 
 ```text
-sh scripts/install.sh [--ref main] [--bin-dir $HOME/.local/bin] [--machine-label <label>] [--no-plugin]
+sh scripts/install.sh [--ref main] [--bin-dir $HOME/.local/bin] [--machine-label <label>]
 ```
 
 On Windows (PowerShell):
 
 ```text
-powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.local\bin] [-MachineLabel <label>] [-NoPlugin]
+powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.local\bin] [-MachineLabel <label>]
 ```
 
-Updating is re-running the same script with another `--ref`. The script sets `machine_label` only when it is still empty, never installs over a plugin linked to a local path (run `herdr plugin unlink djalmajr.herdr-hermes` first), and finishes with `nau version` and the informational `nau doctor`.
+Updating is re-running the same script with another `--ref`. The script sets `machine_label` only when it is still empty and finishes with `nau version` and the informational `nau doctor`.
 
 On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. Go rechecks the stored selection under `config.lock`, shared by all `config set` writers, and pins only an automatic selection to a regular executable with trusted ownership and permissions along both the supplied and resolved paths. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues. The pin changes only the effective backend record and preserves other lines and their terminators; `config set` rejects CR, LF and NUL in values with exit 2.
 
@@ -45,15 +45,14 @@ For development, from a checkout of the module `github.com/djalmajr/nau`:
 go build -o <dir>/nau ./cmd/nau
 ```
 
-The binary must be on your `PATH`; the optional plugin also needs it on the Herdr server's `PATH`.
+The binary must be on your `PATH`.
 
 ### Upgrading from herdr-hermes
 
 `nau` replaces the retired `herdr-hermes` binary: the commands, flags, JSON output and exit codes are the same.
 
-- Install `nau` on your `PATH` (`go build -o <dir>/nau ./cmd/nau`), and on the Herdr server's `PATH` when the optional plugin is linked.
+- Install `nau` on your `PATH` (`go build -o <dir>/nau ./cmd/nau`).
 - Change `job_wake_cmd=herdr-hermes wake` to `job_wake_cmd=nau wake` in the `soho` machine configuration, because `nau doctor` no longer accepts the old name.
-- A plugin already linked (`herdr plugin link`) now calls `nau`.
 - The state directory is the same `herdr-hermes` directory under the user's configuration directory: nothing is migrated.
 
 ## Setup
@@ -67,7 +66,7 @@ The binary must be on your `PATH`; the optional plugin also needs it on the Herd
 
 ## Commands
 
-Every command prints exactly one JSON line on stdout and its diagnostics on stderr, with these exceptions: `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0; `outbox` prints one JSON line per record and then the trailer line; and the forwarded `job` subcommands copy the stdout of `soho job` unchanged, which for `job events` is JSON lines and a trailer line. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, `40`, `41`, `42`, `43`, `44` (`44` is the `jobs check` pre-dispatch refusal: duplicate work or a hold).
+Every command prints exactly one JSON line on stdout and its diagnostics on stderr, with these exceptions: `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0; `outbox` prints one JSON line per record and then the trailer line; and the forwarded `job` subcommands copy the stdout of `soho job` unchanged, which for `job events` is JSON lines and a trailer line. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, `40`, `41`, `42`, `43`.
 
 - `job <sub> [args]` — forward a dispatcher-facing job subcommand to `soho` (`start`, `status`, `wait`, `events`, `collect`, `amend`, `send`, `ack`, `cancel`, `close`, `list`), applying the contract input limits first.
 - `wake` — read one job event on stdin, record it in the outbox and attempt one push (configured as the `soho` wake hook).
@@ -83,19 +82,10 @@ Every command prints exactly one JSON line on stdout and its diagnostics on stde
 - `capabilities --json` — print the bridge capability line `{"schema":1,"bridge":1,"outbox":1,"push":1}`.
 - `version` — print the version.
 - `help` — print the usage as plain text (not JSON); running `nau` with no arguments does the same.
-- `plugin startup|event|bridge` — Herdr plugin entry points (see the optional plugin below).
 
 ## Pull and push
 
 The node records everything in a durable local outbox (`outbox.jsonl`, one JSON line per record with a gapless `seq`). A dispatcher that can run commands on the node reads it with `nau outbox --since <seq> --wait <ms>` — no network endpoint and no key required. When `dispatcher_url` is configured, the node also pushes pending records with the key, in `seq` order, with `Idempotency-Key` headers and a bounded retry schedule; a failed push never loses or blocks a record. The wire format, headers and exit codes are in [`docs/protocol.md`](docs/protocol.md).
-
-## Optional plugin
-
-[`plugin/herdr-plugin.toml`](plugin/herdr-plugin.toml) is an optional Herdr plugin: a startup hook that syncs the open tracked jobs and pushes pending records, event hooks that keep `job-<id>` workspaces tracked and synced (including a final sync on close), and two read-only workspace actions — `status` (tracked jobs, pending records, last push result, key configured) and `sync`. The hooks are one-shot, always exit 0 and write only to the `herdr-hermes` state directory; install it with `herdr plugin link <path-to-this-repo>/plugin`. The CLI works fully without the plugin.
-
-## Optional skill
-
-[`skills/herdr-hermes/`](skills/herdr-hermes/) is an optional agent skill, embedded in the binary with `go:embed`. It tells a local orchestrator inside Herdr when to run `session start`, `session update` (branch pushed, draft PR opened, blocked), `decision`, `session end` and `sync`, and how to treat dispatcher amendments as information. Copy `skills/herdr-hermes/` into your agent's skill directory to use it; a project without the skill keeps using `soho` unchanged.
 
 ## Development
 
@@ -113,4 +103,4 @@ The project is Go only; well-established, maintained community libraries are use
 
 ## Status
 
-Phase 1 — the neutral core, the Hermes and Herdr adapters and the optional plugin and skill — is under development and not yet stable. The dispatcher-side receiver of the Hermes adapter does not exist yet; until it does, the node works standalone through the pull channel. The wire format may still change.
+Phase 1 — the neutral core and the Hermes and Herdr adapters — is under development and not yet stable. The dispatcher-side receiver of the Hermes adapter does not exist yet; until it does, the node works standalone through the pull channel. The wire format may still change.

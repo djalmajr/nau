@@ -1,3 +1,0 @@
-# Keep embedded skill resources identical across native checkouts.
-/skills/herdr-hermes/*.md text eol=lf
-/skills/herdr-hermes/references/*.md text eol=lf

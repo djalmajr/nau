@@ -1,11 +1,11 @@
 # Pre-merge validation
 
-This document is the pre-merge validation checklist and evidence contract for Nau. Before a change is merged, someone must run the real `nau` CLI end to end on a real development node, for the exact reviewed commit, and paste the actual evidence on the linked tracking card. Nau is the messaging and registry core (the durable outbox, the current-state registry, the routing), so the outbox and routing checks are the core of the validation; the backend job checks apply only to a candidate that changes the job forwarding or the job outbox, which are moving out of Nau to a separate dispatcher project. This checklist holds no results: it only says what to run and what to record.
+This document is the pre-merge validation checklist and evidence contract for Nau. Before a change is merged, someone must run the real `nau` CLI end to end on a real development node, for the exact reviewed commit, and paste the actual evidence on the linked tracking card. Nau is the messaging core (the durable outbox, the routing), so the outbox and routing checks are the core of the validation; the backend job checks apply only to a candidate that changes the job forwarding or the job outbox, which are moving out of Nau to a separate dispatcher project. This checklist holds no results: it only says what to run and what to record.
 
 ## 1. Purpose and scope
 
 - This is an actual end-to-end CLI validation on a real development node, for the exact reviewed commit SHA. It is in addition to code review and CI, never a replacement for either: green unit tests, a green CI run or a clean review do not satisfy it, and it does not satisfy them.
-- In scope: the candidate `nau` binary as the messaging core (the durable outbox, the registry, the routing), and, only when the candidate changes them, a real backend job through `nau job …` and the durable outbox of that same job through `nau wake`, `nau sync` and `nau outbox`.
+- In scope: the candidate `nau` binary as the messaging core (the durable outbox, the routing), and, only when the candidate changes them, a real backend job through `nau job …` and the durable outbox of that same job through `nau wake`, `nau sync` and `nau outbox`.
 - Out of scope: production deployment or install, creating, rotating, reading or logging secrets or API keys, and any production service.
 - The public repository holds only this checklist. The real evidence (command outputs, job, workspace and pane ids, screenshots) is posted on the linked tracking card before merge. A path, a link, a count or a report assertion alone is not evidence.
 - The validation fails closed: anything that is missing, unreadable or not proved is `FAIL`, `NOT RUN` or `BLOCKED` with its reason, never `PASS`.

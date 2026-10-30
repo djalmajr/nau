@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/djalmajr/nau/internal/outbox"
-	"github.com/djalmajr/nau/internal/plugin"
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
@@ -62,7 +61,7 @@ func assertDirEmpty(t *testing.T, dir string) {
 
 var allCommandNames = []string{
 	"job", "wake", "sync", "push", "outbox", "session", "decision", "auth",
-	"config", "doctor", "capabilities", "version", "help", "plugin",
+	"config", "doctor", "capabilities", "version", "help",
 }
 
 var allExitCodes = []string{"0", "2", "3", "4", "40", "41", "42", "43"}
@@ -203,9 +202,8 @@ func TestNowrite(t *testing.T) {
 	}
 	assertDirEmpty(t, dir)
 
-	// Slice-4b read-only additions: doctor (fake soho, so it exits 0),
-	// auth status and plugin bridge status all work under NOWRITE and write
-	// nothing.
+	// Slice-4b read-only additions: doctor (fake soho, so it exits 0) and
+	// auth status work under NOWRITE and write nothing.
 	dir = t.TempDir()
 	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0), fakesoho.Rule{Argv: []string{"config"}, Code: 0})
 	setSohoConfig(t, dir, exe, "machine-a")
@@ -224,15 +222,6 @@ func TestNowrite(t *testing.T) {
 	stdout, _, exit = runCLI(t, dir, true, "auth", "status")
 	if exit != 0 || stdout != `{"configured":false,"store":"file"}`+"\n" {
 		t.Fatalf("auth status under NOWRITE: exit %d, stdout %q", exit, stdout)
-	}
-	assertDirEmpty(t, dir)
-	dir = t.TempDir()
-	stdout, _, exit = runCLI(t, dir, true, "plugin", "bridge", "status")
-	if exit != 0 {
-		t.Fatalf("plugin bridge status under NOWRITE: exit %d, want 0", exit)
-	}
-	if stdout != `{"jobs_abertos":0,"pendentes":0,"ultimo_push":null,"key_configured":false}`+"\n" {
-		t.Errorf("plugin bridge status under NOWRITE stdout = %q", stdout)
 	}
 	assertDirEmpty(t, dir)
 
@@ -254,7 +243,6 @@ func TestNowrite(t *testing.T) {
 		{"decision", "--projeto", "org/repo", "--motivo", "m", "--escopo", "global"},
 		{"auth", "login", "--key", "-"},
 		{"auth", "logout"},
-		{"plugin", "bridge", "sync"},
 	} {
 		dir = t.TempDir()
 		stdout, _, exit = runCLI(t, dir, true, args...)
@@ -283,35 +271,6 @@ func dirEntries(t *testing.T, dir string) string {
 	return strings.Join(names, ",")
 }
 
-// runPluginEventNowrite runs `plugin event` under NOWRITE with the two Herdr
-// event variables set.
-func runPluginEventNowrite(t *testing.T, cfgDir, event, eventJSON string) (string, string, int) {
-	t.Helper()
-	var out, errb bytes.Buffer
-	env := Env{
-		Stdin:  strings.NewReader(""),
-		Stdout: &out,
-		Stderr: &errb,
-		Getenv: func(k string) string {
-			switch k {
-			case nowriteVar:
-				return "1"
-			case plugin.EnvEvent:
-				return event
-			case plugin.EnvEventJSON:
-				return eventJSON
-			}
-			return ""
-		},
-		Environ:   func() []string { return fakeChildEnv },
-		ConfigDir: cfgDir,
-		Now:       pluginTestNow,
-		Sleep:     sleepCtx,
-	}
-	exit := Run([]string{"plugin", "event"}, env)
-	return out.String(), errb.String(), exit
-}
-
 // TestNowriteExistingStateCreatesNoFiles: with the state directory already
 // existing, the read-only commands under NOWRITE create no file anywhere
 // under the config dir. The fresh-dir cases cannot catch this: the
@@ -324,13 +283,6 @@ func TestNowriteExistingStateCreatesNoFiles(t *testing.T) {
 		run   func(t *testing.T, dir string) int
 	}{
 		{
-			name: "plugin bridge status",
-			run: func(t *testing.T, dir string) int {
-				_, _, exit := runCLI(t, dir, true, "plugin", "bridge", "status")
-				return exit
-			},
-		},
-		{
 			name:  "doctor",
 			setup: func(t *testing.T, dir string) { setSohoConfig(t, dir, exe, "machine-a") },
 			run:   func(t *testing.T, dir string) int { _, _, exit := runCLI(t, dir, true, "doctor"); return exit },
@@ -342,13 +294,6 @@ func TestNowriteExistingStateCreatesNoFiles(t *testing.T) {
 		{
 			name: "auth status",
 			run:  func(t *testing.T, dir string) int { _, _, exit := runCLI(t, dir, true, "auth", "status"); return exit },
-		},
-		{
-			name: "plugin event untracked workspace.closed",
-			run: func(t *testing.T, dir string) int {
-				_, _, exit := runPluginEventNowrite(t, dir, "workspace.closed", `{"workspace":{"label":"job-J9","workspace_id":"ws-9"}}`)
-				return exit
-			},
 		},
 	}
 	for _, tc := range cases {
