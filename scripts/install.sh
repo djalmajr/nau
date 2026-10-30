@@ -1,37 +1,30 @@
 #!/bin/sh
-# Install or update the nau binary and the optional Herdr plugin on
-# macOS and Linux. Re-running the script with another --ref updates
-# the node to that ref, binary and plugin on the same ref.
+# Install or update the nau binary on macOS and Linux, from a ref.
+# Re-running the script with another --ref updates the node to that ref.
 # Pin an automatic backend selection to its absolute path on each install.
 #
-# Prerequisites: Go 1.26 or newer on the PATH; for the plugin step,
-# Herdr on the PATH. The script never prints environment variables or
-# configuration contents.
+# Prerequisites: Go 1.26 or newer on the PATH. The script never prints
+# environment variables or configuration contents.
 
 set -eu
 
 REF="main"
 BIN_DIR="$HOME/.local/bin"
 MACHINE_LABEL=""
-NO_PLUGIN=0
-PLUGIN_ID="djalmajr.herdr-hermes"
-PLUGIN_SOURCE="djalmajr/nau/plugin"
 MODULE_PATH="github.com/djalmajr/nau/cmd/nau"
 
 usage() {
     cat <<'EOF'
 Usage: sh scripts/install.sh [options]
 
-Install or update the nau binary into the bin directory and the Herdr
-plugin, both from the same ref. Updating is re-running the script with
-another --ref.
+Install or update the nau binary into the bin directory, from the ref.
+Updating is re-running the script with another --ref.
 An automatic backend selection is pinned to its absolute path on the PATH.
 
 Options:
   --ref <ref>            ref to install (default: main)
   --bin-dir <dir>        bin directory (default: $HOME/.local/bin)
   --machine-label <lbl>  set machine_label when it is still empty
-  --no-plugin            skip the Herdr plugin step
   -h, --help             show this help
 EOF
 }
@@ -80,10 +73,6 @@ while [ "$#" -gt 0 ]; do
         fi
         MACHINE_LABEL="$2"
         shift 2
-        ;;
-    --no-plugin)
-        NO_PLUGIN=1
-        shift
         ;;
     -h | --help)
         usage
@@ -141,39 +130,11 @@ fi
 
 pin_backend
 
-# The Herdr plugin, unless skipped or Herdr is absent.
-if [ "$NO_PLUGIN" -eq 1 ]; then
-    echo "nau install: skipping the Herdr plugin (--no-plugin)" >&2
-else
-    if ! command -v herdr >/dev/null 2>&1; then
-        echo "nau install: herdr not found on the PATH; skipping the Herdr plugin" >&2
-    else
-        LIST="$(herdr plugin list --plugin "$PLUGIN_ID" --json)"
-        case "$LIST" in
-        *'"plugin_id":"djalmajr.herdr-hermes"'*)
-            # Installed: a local origin (herdr plugin link) is refused,
-            # a GitHub origin is updated in place.
-            KIND="$(printf '%s\n' "$LIST" | sed -n 's/.*"source":{[^}]*"kind":"\([^"]*\)".*/\1/p')"
-            if [ -z "$KIND" ]; then
-                echo "nau install: could not determine the source of the installed herdr plugin $PLUGIN_ID; if it is linked to a local path, run 'herdr plugin unlink $PLUGIN_ID' first" >&2
-                exit 1
-            fi
-            if [ "$KIND" != "github" ]; then
-                echo "nau install: the herdr plugin $PLUGIN_ID is linked to a local path; run 'herdr plugin unlink $PLUGIN_ID' first and re-run this script" >&2
-                exit 1
-            fi
-            ;;
-        esac
-        herdr plugin install "$PLUGIN_SOURCE" --ref "$REF" -y
-        echo "nau install: herdr plugin $PLUGIN_ID installed from $PLUGIN_SOURCE (ref $REF)" >&2
-    fi
-fi
-
 # Warn, without failing, when the bin dir is not on the PATH.
 case ":$PATH:" in
 *":$BIN_DIR:"*) ;;
 *)
-    echo "nau install: warning: $BIN_DIR is not on the PATH; add it to use nau and the plugin" >&2
+    echo "nau install: warning: $BIN_DIR is not on the PATH; add it to use nau" >&2
     ;;
 esac
 

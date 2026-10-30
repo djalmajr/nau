@@ -129,9 +129,6 @@ func TestLoadWordingDocs(t *testing.T) {
 		label string
 	}{
 		{"../../docs/routing.md", "routing.md"},
-		{"../../skills/herdr-hermes/SKILL.md", "SKILL.md"},
-		{"../../skills/herdr-hermes/references/protocol.md", "protocol.md"},
-		{"../../skills/herdr-hermes/references/setup.md", "setup.md"},
 	}
 	texts := map[string]string{}
 	for _, f := range files {
@@ -177,19 +174,7 @@ func TestLoadWordingDocs(t *testing.T) {
 			t.Errorf("routing.md section Orchestrator load missing %q", want)
 		}
 	}
-	for _, label := range []string{"routing.md", "SKILL.md", "setup.md"} {
-		if !strings.Contains(texts[label], "`<base>-<n>`") {
-			t.Errorf("%s does not describe the custom base suffix `<base>-<n>`", label)
-		}
-	}
-	if !strings.Contains(texts["protocol.md"], "`idle`, `working`, `blocked`, `done` and `unknown` all count the same") {
-		t.Errorf("protocol.md missing the any-status load phrase")
-	}
-	for _, label := range []string{"SKILL.md", "setup.md"} {
-		for _, want := range []string{"`herdr machine list --json`", "`orchestrator-<n>`"} {
-			if !strings.Contains(texts[label], want) {
-				t.Errorf("%s missing %s", label, want)
-			}
-		}
+	if !strings.Contains(texts["routing.md"], "`<base>-<n>`") {
+		t.Errorf("routing.md does not describe the custom base suffix `<base>-<n>`")
 	}
 }

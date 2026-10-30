@@ -10,8 +10,7 @@ import (
 )
 
 // pushOutcome is the result of the push step shared by the commands that
-// talk to the dispatcher (slice 2's sync and plugin path use the same
-// variable).
+// talk to the dispatcher (push, sync and wake use the same variable).
 type pushOutcome struct {
 	Sent    int
 	Pending int

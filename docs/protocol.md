@@ -56,7 +56,7 @@ The URL must be HTTPS unless the host is a loopback address (tests); redirects a
 {"delivered_seq":N,"last_push":{"ts":"2026-01-02T03:04:05-03:00","status":"ok","code":200}}
 ```
 
-`status` is one of `ok`, `auth_rejected`, `unreachable`, `rejected`. Recording a new push result preserves `delivered_seq`; advancing the cursor preserves the last result. The `plugin bridge status` action and `doctor` read it.
+`status` is one of `ok`, `auth_rejected`, `unreachable`, `rejected`. Recording a new push result preserves `delivered_seq`; advancing the cursor preserves the last result.
 
 ## Wake hook
 
@@ -104,16 +104,6 @@ with exit 0, 40, 41 or 42 according to the push outcome; on a non-zero outcome t
 
 `nau config set [--if-automatic] <key> <value>` rejects CR, LF or NUL in ordinary values with exit 2 before accessing the configuration. The flag is valid only for `herdr_soho_bin` (another key exits 2); it rechecks the stored automatic value and validates the candidate under the same exclusive `config.lock` used by every `config set`, before atomic replacement. Explicit selections and unsafe candidates are skipped with exit 0 and a stderr explanation, retaining the configuration bytes. Candidate paths must be absolute regular executable files without CR, LF or NUL and without leading or trailing spaces (`Load` trims them); supplied paths, resolved paths and intermediate symlink destinations are checked. On POSIX their file and ancestors must be owned by the current user or root and not writable by group or others, except a sticky directory whose next entry has a trusted owner; on Windows a write, modify, full-control, WRITE_DAC or WRITE_OWNER allow ACE for Everyone, Users, Authenticated Users or Interactive is refused on the executable and the directory that holds it; on the ancestors above, only the rights that can replace an entry of the chain (full control, WRITE_DAC, WRITE_OWNER, DELETE and delete-child) are refused, so the default volume-root grant to create a folder does not block the pin. A null DACL is refused; ordinary, object and callback allow ACEs are checked, including inherited grants that apply to the object. Checks describe permissions at pin time, not protection from later changes by trusted owners. The directory and lock file may be created before refusal, but the configuration file is untouched. Successful writes retain comments, blank lines, order and each existing LF or CRLF terminator, replacing only the last duplicate record (the record `Load` uses); missing keys append using the first existing line terminator, or LF for an empty file. Replacement is atomic with mode 0600, and new configuration directories use mode 0700. Stdout remains exactly one JSON line.
 
-## Plugin
-
-The optional plugin (`plugin/herdr-plugin.toml`) runs the CLI as one-shot entry points; it keeps no second copy of the outbox or push logic, and the CLI works fully without the plugin. Every `command` in the manifest is an argv array whose first element is `nau`.
-
-- `nau plugin startup` (the `[[startup]]` hook) runs the `sync` logic for every tracked job and then the push step. It always exits 0 and never fails the Herdr server: a config, capability or machine-label failure writes one friction line and prints `{"status":"skipped","motivo":…}`; otherwise it prints the sync counts line (a push failure is a normal sync outcome, with its `status` field).
-- `nau plugin event` (the `workspace.created` and `workspace.closed` hooks) reads `HERDR_PLUGIN_EVENT` and `HERDR_PLUGIN_EVENT_JSON` from the environment. A `workspace.created` for a workspace labeled `job-<id>` (id matching the contract id rule) tracks the job in the local bookkeeping when it is unknown (empty `projeto`) and then runs the `sync --job <id>` logic; a `workspace.closed` runs a final `sync --job <id>` for a tracked `job-<id>`, so terminal and cleanup events reach the outbox; a close event whose workspace carries no `job-<id>` label writes nothing for the bookkeeping. The plugin hook payload shape is not documented by Herdr and has not been verified live (no plugin was installed to observe it), so the parsers accept the socket subscription line (`{"event":"workspace_created","data":{…}}`), the event-stream forms of the bundled API schema and the flat or nested payloads; the event name comes from the envelope, else the data type, else the hook name, and any other name is refused. Other event names are ignored with nothing written; an unknown or empty `HERDR_PLUGIN_EVENT_JSON` shape writes one friction line. It always exits 0; failures go to friction.
-- `nau plugin bridge status` (read-only action, exit 0) prints exactly one JSON line and nothing else: `{"jobs_abertos":N,"pendentes":N,"ultimo_push":…,"key_configured":bool}`, where `ultimo_push` is the `last_push` entry of `cursor.json` or `null`. It is read-only: it works under `HERDR_HERMES_NOWRITE=1` and creates no files.
-- `nau plugin bridge sync` (action) prints to stderr what it will do — the number of open tracked jobs and of pending outbox records — then runs the `sync` logic and prints its JSON line; its exit code is the sync exit code (0, 2, 40, 41, 42, 43). It is a writing command and is refused under `HERDR_HERMES_NOWRITE=1` with exit 2.
-
-
 ## Routing
 
 `nau route [--machine <label>]` is the dispatcher-side machine choice: it runs on the host the dispatcher uses to reach the fleet, probes the configured fleet read-only, picks one machine and prints it as one JSON line. The choice is advisory — `route` never starts, moves or replays a job — and the dispatcher then runs `job start` on the chosen machine through its own remote execution channel, never re-sending the dispatch to another machine after a transport loss or timeout. It is read-only (it works under `HERDR_HERMES_NOWRITE=1` and writes nothing), exits 2 for bad usage, an invalid configuration, `route_machines` not configured, or a requested machine that is not configured, and 4 when no machine is available. The configuration keys, the probe, the selection and tie-break, the outputs and exit codes, and the safety rules are in [`routing.md`](routing.md).
@@ -130,13 +120,12 @@ The optional plugin (`plugin/herdr-plugin.toml`) runs the CLI as one-shot entry 
 | 41 | API key rejected by the dispatcher (401/403) |
 | 42 | dispatcher unreachable or retries exhausted; records stay pending |
 | 43 | `soho` lacks the `ephemeral_job` or `job_events` capability (`doctor`, `sync`) |
-| 44 | the pre-dispatch check refused the request: duplicate work or a hold (`jobs check`) |
 
-Forwarded `job` subcommands return the `soho` exit code unchanged; codes 40–44 are never produced by a forwarded command.
+Forwarded `job` subcommands return the `soho` exit code unchanged; codes 40–43 are never produced by a forwarded command.
 
 ## NOWRITE
 
-`HERDR_HERMES_NOWRITE=1` makes the CLI read-only. The read-only commands work normally and write nothing: `outbox`, `route`, `doctor`, `auth status`, `config get` and `config list`, `capabilities`, `version`, `help`, `plugin bridge status`, and the read-only `job` subcommands (`status`, `wait`, `events`, `collect`, `list`, which also skip bookkeeping). Every writing command (`job start|amend|send|ack|cancel|close`, `wake`, `sync`, `push`, `session`, `decision`, `auth login`, `auth logout`, `config set` and `plugin bridge sync`) refuses with exit 2 and `{"status":"nowrite","motivo":"HERDR_HERMES_NOWRITE=1"}` before any side effect. Exception: the plugin entrypoints `plugin startup` and `plugin event` exit 0 under NOWRITE, print `{"status":"skipped","motivo":"HERDR_HERMES_NOWRITE=1"}` and write nothing.
+`HERDR_HERMES_NOWRITE=1` makes the CLI read-only. The read-only commands work normally and write nothing: `outbox`, `route`, `doctor`, `auth status`, `config get` and `config list`, `capabilities`, `version`, `help`, and the read-only `job` subcommands (`status`, `wait`, `events`, `collect`, `list`, which also skip bookkeeping). Every writing command (`job start|amend|send|ack|cancel|close`, `wake`, `sync`, `push`, `session`, `decision`, `auth login`, `auth logout` and `config set`) refuses with exit 2 and `{"status":"nowrite","motivo":"HERDR_HERMES_NOWRITE=1"}` before any side effect.
 
 ## Key security
 

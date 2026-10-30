@@ -50,12 +50,8 @@ var commands = []command{
 	{"capabilities", false, false, cmdCapabilities},
 	{"version", false, false, cmdVersion},
 	{"help", false, false, cmdHelp},
-	{"plugin", false, true, cmdPlugin},
 	// DJA-195: route
 	{"route", false, true, cmdRoute},
-	// DJA-229: registry service and its client
-	{"serve", true, true, cmdServe},
-	{"jobs", false, false, cmdJobs},
 	// DJA-430: the forced command of the dispatch ssh key
 	// (no config dir needed: the gate refuses without one, and an accepted
 	// job or outbox applies its own requirement)
@@ -115,10 +111,6 @@ type errorLine struct {
 }
 
 const nowriteErrorJSON = `{"status":"nowrite","motivo":"HERDR_HERMES_NOWRITE=1"}`
-
-// nowriteMotivo is the motivo of the NOWRITE refusal and of the plugin
-// skipped line.
-const nowriteMotivo = "HERDR_HERMES_NOWRITE=1"
 
 const noConfigDirErrorJSON = `{"status":"no_config_dir","motivo":"user config directory unavailable"}`
 

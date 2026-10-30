@@ -238,14 +238,14 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				t.Helper()
 				ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
 				defer cancel()
-				args := []string{"install.sh", "--no-plugin", "--bin-dir", bin}
+				args := []string{"install.sh", "--bin-dir", bin}
 				if windows {
 					quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 					script, err := filepath.Abs("install.ps1")
 					if err != nil {
 						t.Fatal(err)
 					}
-					args = []string{"-NoProfile", "-NonInteractive", "-Command", "& " + quote(script) + " -NoPlugin -BinDir " + quote(bin)}
+					args = []string{"-NoProfile", "-NonInteractive", "-Command", "& " + quote(script) + " -BinDir " + quote(bin)}
 				}
 				cmd := exec.CommandContext(ctx, shell, args...)
 				cmd.WaitDelay = time.Second
@@ -402,7 +402,7 @@ func TestInstallShHelp(t *testing.T) {
 		t.Fatalf("sh install.sh --help: %v\n%s", sh, out)
 	}
 	text := string(out)
-	for _, opt := range []string{"--ref", "--bin-dir", "--machine-label", "--no-plugin", "--help"} {
+	for _, opt := range []string{"--ref", "--bin-dir", "--machine-label", "--help"} {
 		if !strings.Contains(text, opt) {
 			t.Errorf("install.sh --help does not list %q:\n%s", opt, text)
 		}
@@ -434,7 +434,7 @@ func TestInstallPs1Help(t *testing.T) {
 		t.Fatalf("%s install.ps1 -Help: %v\n%s", powershell, err, out)
 	}
 	text := string(out)
-	for _, opt := range []string{"-Ref", "-BinDir", "-MachineLabel", "-NoPlugin", "-Help"} {
+	for _, opt := range []string{"-Ref", "-BinDir", "-MachineLabel", "-Help"} {
 		if !strings.Contains(text, opt) {
 			t.Errorf("install.ps1 -Help does not list %q:\n%s", opt, text)
 		}
