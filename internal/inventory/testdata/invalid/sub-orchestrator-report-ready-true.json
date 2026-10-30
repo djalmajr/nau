@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "soho_version": "v0.3.1",
+  "generated_ms": 1793376000000,
+  "projects": [
+    {
+      "name": "acme/web",
+      "sessions": [
+        {
+          "id": "w1",
+          "agents": [
+            {
+              "terminal": "w1:p1",
+              "name": "sub",
+              "role": "sub-orchestrator",
+              "kind": "cli-a",
+              "state": "working",
+              "report_ready": true,
+              "started_ms": 1793372400000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hidden": { "working": 1, "needs_you": 0, "done": 0, "idle": 0, "unknown": 0 }
+}

@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "soho_version": "v0.3.1",
+  "generated_ms": 1793376000000,
+  "projects": [
+    {
+      "name": "acme/web",
+      "sessions": [
+        {
+          "id": "w1",
+          "agents": [
+            {
+              "terminal": "w1:p1",
+              "name": "build",
+              "role": "implementer",
+              "kind": "cli-b",
+              "state": "working",
+              "reason": "quota",
+              "report_ready": false,
+              "started_ms": 1793372400000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hidden": { "working": 1, "needs_you": 0, "done": 0, "idle": 0, "unknown": 0 }
+}
