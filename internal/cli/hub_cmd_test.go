@@ -135,17 +135,29 @@ func startHubServe(t *testing.T, vars map[string]string, st *hubFakeStore, args 
 		cancel = c
 		return ctx, c
 	}
+	done := make(chan int, 1)
+	finished := make(chan struct{})
 	t.Cleanup(func() {
-		hubServeListen = oldListen
-		newHubStore = oldStore
-		hubServeContext = oldCtx
 		if cancel != nil {
 			cancel()
 		}
 		_ = ln.Close()
+		// Wait for the serve to return, so the web root it opened is
+		// closed before the temporary directory is removed (Windows
+		// cannot remove an open directory).
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("the serve did not return after the cleanup cancel")
+		}
+		hubServeListen = oldListen
+		newHubStore = oldStore
+		hubServeContext = oldCtx
 	})
-	done := make(chan int, 1)
-	go func() { done <- cmdHubServe(args, env) }()
+	go func() {
+		done <- cmdHubServe(args, env)
+		close(finished)
+	}()
 	// Wait for the serving line.
 	deadline := time.Now().Add(2 * time.Second)
 	for !strings.Contains(out.String(), `"status":"serving"`) {

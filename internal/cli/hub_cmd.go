@@ -118,6 +118,9 @@ func cmdHubServe(args []string, env Env) int {
 			fail(env, 2, "hub serve: --web is not a directory")
 			return 2
 		}
+		// The root keeps a handle on the directory: it is closed when the
+		// server stops (Windows cannot remove an open directory).
+		defer root.Close()
 		static = root.FS()
 	}
 	dbURL := env.Getenv(hubEnvDBURL)

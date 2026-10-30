@@ -330,6 +330,7 @@ func TestStaticSymlinkContainment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { root.Close() })
 	s := newTestServer(t, &fakeStore{}, root.FS())
 	// A link that escapes the root answers 404, even with an index
 	// available: it is a refusal, not a missing SPA route.
