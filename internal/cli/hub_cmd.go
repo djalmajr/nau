@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"runtime/debug"
+	"syscall"
 	"time"
 
 	"github.com/djalmajr/nau/internal/hub"
@@ -68,6 +70,12 @@ func parseHubFlags(args []string) (hubFlags, bool) {
 		}
 	}
 	return f, true
+}
+
+// hubServeContext is the signal-bound context of the hub server; the
+// tests replace it with a context they cancel.
+var hubServeContext = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 // cmdHub runs the hub commands; serve is the hub server.
@@ -162,7 +170,7 @@ func cmdHubServe(args []string, env Env) int {
 	}, static)))
 	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
 
-	ctx, cancel := serveContext()
+	ctx, cancel := hubServeContext()
 	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {

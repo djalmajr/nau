@@ -129,8 +129,8 @@ func startHubServe(t *testing.T, vars map[string]string, st *hubFakeStore, args 
 	oldStore := newHubStore
 	newHubStore = func(baseURL, token string) (store.Store, error) { return st, nil }
 	var cancel context.CancelFunc
-	oldCtx := serveContext
-	serveContext = func() (context.Context, context.CancelFunc) {
+	oldCtx := hubServeContext
+	hubServeContext = func() (context.Context, context.CancelFunc) {
 		ctx, c := context.WithCancel(context.Background())
 		cancel = c
 		return ctx, c
@@ -138,7 +138,7 @@ func startHubServe(t *testing.T, vars map[string]string, st *hubFakeStore, args 
 	t.Cleanup(func() {
 		hubServeListen = oldListen
 		newHubStore = oldStore
-		serveContext = oldCtx
+		hubServeContext = oldCtx
 		if cancel != nil {
 			cancel()
 		}
@@ -499,4 +499,23 @@ func TestHubCommandNeedsNoConfigDir(t *testing.T) {
 	if strings.Contains(stdout, "no_config_dir") {
 		t.Fatalf("the hub refused for the config dir: %q", stdout)
 	}
+}
+
+// runCLIVars is runCLI with an explicit environment map, so a test sets
+// exactly the variables the command reads.
+func runCLIVars(t *testing.T, dir string, vars map[string]string, args ...string) (string, string, int) {
+	t.Helper()
+	var out, errb bytes.Buffer
+	env := Env{
+		Stdin:     strings.NewReader(""),
+		Stdout:    &out,
+		Stderr:    &errb,
+		Getenv:    func(k string) string { return vars[k] },
+		Environ:   func() []string { return fakeChildEnv },
+		ConfigDir: dir,
+		Now:       func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Sleep:     sleepCtx,
+	}
+	exit := Run(args, env)
+	return out.String(), errb.String(), exit
 }
