@@ -42,14 +42,13 @@ const (
 	// the statement stay at most this number, far below the variable
 	// limit of the database.
 	maxStatementArgs = 500
-	// guardWriteIndex and guardCheckIndex are the statement numbers,
-	// one-based in the apply batch, of the guarded snapshot write and
-	// of the guard statement: the failures of the two mark the
-	// conflict window (a newer inventory committed while the batch
-	// ran). The write failing on its own means another writer landed
-	// first on a new machine; the check failing means the write
-	// changed no row.
-	guardWriteIndex = 1
+	// guardCheckIndex is the statement number, one-based in the apply
+	// batch, of the guard statement: its failure marks the conflict
+	// window (a newer or equal inventory committed while the batch
+	// ran). The guarded snapshot write fails no statement on a
+	// collision: the UPDATE changes no row on a moved version and the
+	// INSERT changes no row on a collided machine; only the guard, which
+	// sees the changed rows, fails.
 	guardCheckIndex = 2
 )
 
@@ -203,8 +202,9 @@ const (
 	// version is still the one the call read.
 	sqlUpdateSnapshot = "UPDATE inventory_snapshots SET generated_ms = ?, received_ms = ?, soho_version = ? WHERE machine_id = ? AND generated_ms = ?"
 	// sqlInsertSnapshot is the guarded write of the snapshot of a
-	// machine without a row.
-	sqlInsertSnapshot = "INSERT INTO inventory_snapshots (machine_id, generated_ms, received_ms, soho_version) VALUES (?, ?, ?, ?)"
+	// machine without a row: on a collision with another first ingest
+	// it changes no row, and the guard fails on the changed rows.
+	sqlInsertSnapshot = "INSERT INTO inventory_snapshots (machine_id, generated_ms, received_ms, soho_version) VALUES (?, ?, ?, ?) ON CONFLICT(machine_id) DO NOTHING"
 	// sqlGuardCheck fails the batch when the guarded step changed no
 	// row: the CHECK of the table rejects anything but 1.
 	sqlGuardCheck = "INSERT INTO ingest_guard VALUES (changes())"
@@ -249,15 +249,16 @@ const (
 //
 // The order is guarded inside the batch: the snapshot write changes
 // exactly one row only when the generated_ms the call read is still
-// the current one, and the guard statement fails the batch when the
-// guarded step changed no row. The check and the writes therefore
-// count together, and an older inventory never lands on top of a
-// newer one even when two applies race between the read and the
-// write. When the guarded write or the guard fails because a newer
-// inventory committed in that window, Apply re-reads and retries, up
-// to maxApplyAttempts attempts; after the last one it returns
-// ErrConflict. A failure of any other statement is a store error and
-// comes back as is on the first attempt, with no retry and no
+// the current one and no other first ingest landed in the window, and
+// the guard statement fails the batch when the guarded step changed no
+// row. The check and the writes therefore count together, and an
+// older inventory never lands on top of a newer one even when two
+// applies race between the read and the write. When the guard fails
+// because a newer or equal inventory committed in that window, Apply
+// re-reads and retries, up to maxApplyAttempts attempts; after the
+// last one it returns ErrConflict. A failure of any other statement,
+// the failure of the guarded write itself included, is a store error
+// and comes back as is on the first attempt, with no retry and no
 // ErrConflict. An inventory not greater than the last applied one of
 // the machine changes nothing and returns Applied: false, which makes
 // the repeat idempotent and ignores the out-of-order ones.
@@ -341,12 +342,12 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 			store.Stmt{SQL: sqlUpsertHourly, Args: []store.Value{machineID, hourOf(inv.GeneratedMS), working}},
 		)
 		if _, err := st.Batch(ctx, stmts); err != nil {
-			// The batch failed. Only the guarded write or the guard
-			// failing is the conflict signature: a newer inventory
-			// committed in the window, and the conflict re-reads and
-			// retries. Any other failure is a store error, returned as
-			// is on the first attempt, with no retry and no
-			// ErrConflict.
+			// The batch failed. Only the guard failing is the conflict
+			// signature: a newer or equal inventory committed in the
+			// window, and the conflict re-reads and retries. Any other
+			// failure, the failure of the guarded write itself included,
+			// is a store error, returned as is on the first attempt, with
+			// no retry and no ErrConflict.
 			if !isGuardFailure(err) {
 				return Result{}, fmt.Errorf("ingest: apply the inventory: %w", err)
 			}
@@ -378,15 +379,15 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 }
 
 // isGuardFailure reports whether the batch failure came from the
-// guarded write or from the guard statement: the only failures that
-// mean a newer inventory committed while the batch ran. Any other
-// failure is a store error, never a conflict.
+// guard statement: the only failure that means a newer or equal
+// inventory committed while the batch ran. A failure of the guarded
+// write itself is a common store error, never a conflict.
 func isGuardFailure(err error) bool {
 	var se *store.StatementError
 	if !errors.As(err, &se) {
 		return false
 	}
-	return se.Index == guardWriteIndex || se.Index == guardCheckIndex
+	return se.Index == guardCheckIndex
 }
 
 // existingAgent is the diff entry of one current agent.

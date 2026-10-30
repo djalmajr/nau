@@ -501,3 +501,190 @@ func TestSQLDKeepsTheOriginalErrorWhenTheGuardIsIntact(t *testing.T) {
 		t.Fatalf("ingest_guard rows = %v, want 0; err=%v", res3.Rows, err)
 	}
 }
+
+// TestSQLDConcurrentFirstIngestOfANewMachine: against the real sqld,
+// two applies race on the first ingest of a new machine: the insert
+// of the loser changes no row on the collision and the guard fails;
+// the loser retries, applies when it carries the newer version and
+// returns Applied: false when it carries the equal one.
+func TestSQLDConcurrentFirstIngestOfANewMachine(t *testing.T) {
+	st := realIngestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const g int64 = 1793376000000
+	type outcome struct {
+		applied bool
+		err     error
+	}
+	row := func(sql string, args ...store.Value) store.Row {
+		t.Helper()
+		res, err := st.Execute(ctx, store.Stmt{SQL: sql, Args: args})
+		if err != nil {
+			t.Fatalf("Execute %s: %v", sql, err)
+		}
+		if len(res.Rows) != 1 {
+			t.Fatalf("%s: rows = %v, want 1", sql, res.Rows)
+		}
+		return res.Rows[0]
+	}
+	// The equal inventory: the loser retries and returns Applied:
+	// false, with no error.
+	holdEq := &pauseRealBatch{Store: st, ready: make(chan struct{}), release: make(chan struct{})}
+	doneEq := make(chan outcome, 1)
+	go func() {
+		r, err := Apply(ctx, holdEq, "m9", mkInv(g, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10)
+		doneEq <- outcome{r.Applied, err}
+	}()
+	select {
+	case <-holdEq.ready:
+	case <-ctx.Done():
+		t.Fatal("the held apply did not reach its batch")
+	}
+	if r, err := Apply(ctx, st, "m9", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+20); err != nil || !r.Applied {
+		t.Fatalf("the first apply: applied=%v err=%v", r.Applied, err)
+	}
+	close(holdEq.release)
+	out := <-doneEq
+	if out.err != nil || out.applied {
+		t.Fatalf("the equal apply after the collision: applied=%v err=%v, want false and no error", out.applied, out.err)
+	}
+	// The newer inventory: the loser retries and applies.
+	holdNew := &pauseRealBatch{Store: st, ready: make(chan struct{}), release: make(chan struct{})}
+	doneNew := make(chan outcome, 1)
+	go func() {
+		r, err := Apply(ctx, holdNew, "m10", mkInv(g+1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil))), g+1010)
+		doneNew <- outcome{r.Applied, err}
+	}()
+	select {
+	case <-holdNew.ready:
+	case <-ctx.Done():
+		t.Fatal("the held apply did not reach its batch")
+	}
+	if r, err := Apply(ctx, st, "m10", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+20); err != nil || !r.Applied {
+		t.Fatalf("the older apply: applied=%v err=%v", r.Applied, err)
+	}
+	close(holdNew.release)
+	out = <-doneNew
+	if out.err != nil || !out.applied {
+		t.Fatalf("the newer apply after the collision: applied=%v err=%v, want applied", out.applied, out.err)
+	}
+	// The final states: the applied inventory of each machine.
+	if s := row("SELECT generated_ms FROM inventory_snapshots WHERE machine_id = ?", "m9"); s[0] != g {
+		t.Fatalf("snapshot of m9 = %v, want %d", s[0], g)
+	}
+	if s := row("SELECT generated_ms FROM inventory_snapshots WHERE machine_id = ?", "m10"); s[0] != g+1000 {
+		t.Fatalf("snapshot of m10 = %v, want %d (the newer one wins)", s[0], g+1000)
+	}
+	if a := row("SELECT state FROM agents_current WHERE machine_id = ? AND terminal = ?", "m10", "w1:p1"); a[0] != "idle" {
+		t.Fatalf("agent state = %v, want idle (the newer one wins)", a[0])
+	}
+	// The guard table is empty.
+	if n := row("SELECT COUNT(*) FROM ingest_guard"); n[0] != int64(0) {
+		t.Fatalf("ingest_guard rows = %v, want 0", n[0])
+	}
+}
+
+// failingSnapshotWrite commits a newer version of the machine after
+// every failed batch the wrapped apply runs, so a common failure of
+// the guarded write keeps its original shape, against the real sqld.
+type failingSnapshotWrite struct {
+	store.Store
+	machine string
+	base    int64
+	calls   int
+}
+
+func (w *failingSnapshotWrite) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
+	w.calls++
+	res, err := w.Store.Batch(ctx, stmts)
+	if err != nil {
+		other := mkInv(w.base+int64(w.calls)*1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil)))
+		if r, aerr := Apply(ctx, w.Store, w.machine, other, other.GeneratedMS+10); aerr != nil || !r.Applied {
+			return nil, fmt.Errorf("the other writer must commit in the window: applied=%v err=%v", r.Applied, aerr)
+		}
+	}
+	return res, err
+}
+
+// TestSQLDKeepsTheOriginalErrorOnTheSnapshotWrite: the classification
+// of a common failure of the guarded write against the real sqld. A
+// trigger on the disposable database fails the ordinary write of the
+// snapshot, the statement 1 of the apply batch, and after each
+// rollback another apply commits a newer version of the machine: the
+// error comes back as the original one, one attempt, no ErrConflict,
+// and the version the other writer committed is intact. The trigger
+// is a failure injection of the fixture, not a claim about production
+// triggers.
+func TestSQLDKeepsTheOriginalErrorOnTheSnapshotWrite(t *testing.T) {
+	st := realIngestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const g int64 = 1793376000000
+	const m = "m11"
+	const version = "v0.3.9"
+	if r, err := Apply(ctx, st, m, mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed %s: applied=%v err=%v", m, r.Applied, err)
+	}
+	// The fixture fault trigger: the common failure of the ordinary
+	// write, only for the target version.
+	triggerSQL := fmt.Sprintf(
+		"CREATE TRIGGER ingest_write_failure BEFORE UPDATE ON inventory_snapshots "+
+			"WHEN NEW.machine_id = '%s' AND NEW.soho_version = '%s' "+
+			"BEGIN SELECT RAISE(ABORT, 'fixture ordinary write failure'); END", m, version)
+	if _, err := st.Execute(ctx, store.Stmt{SQL: triggerSQL}); err != nil {
+		t.Fatalf("the fixture fault trigger: %v", err)
+	}
+	w := &failingSnapshotWrite{Store: st, machine: m, base: g}
+	bigger := mkInv(g+100000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil)))
+	bigger.SohoVersion = version
+	res, err := Apply(ctx, w, m, bigger, g+100010)
+	if res.Applied {
+		t.Fatal("the failed batch applied")
+	}
+	if err == nil {
+		t.Fatal("the store error must come back")
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("a common failure of the snapshot write must not become a conflict: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("batch calls = %d, want 1 (no retry for a common failure)", w.calls)
+	}
+	var se *store.StatementError
+	if !errors.As(err, &se) {
+		t.Fatalf("the original typed error is not preserved: %v", err)
+	}
+	if se.Index != 1 || se.Code != "SQLITE_CONSTRAINT" {
+		t.Fatalf("statement = index %d code %q, want index 1 code SQLITE_CONSTRAINT", se.Index, se.Code)
+	}
+	// The other writer's version is intact: the failed batch rolled
+	// back.
+	row := func(sql string, args ...store.Value) store.Row {
+		t.Helper()
+		r, e := st.Execute(ctx, store.Stmt{SQL: sql, Args: args})
+		if e != nil {
+			t.Fatalf("Execute %s: %v", sql, e)
+		}
+		if len(r.Rows) != 1 {
+			t.Fatalf("%s: rows = %v, want 1", sql, r.Rows)
+		}
+		return r.Rows[0]
+	}
+	if s := row("SELECT generated_ms, soho_version FROM inventory_snapshots WHERE machine_id = ?", m); s[0] != g+1000 || s[1] != "v0.3.1" {
+		t.Fatalf("snapshot = %v, want %d v0.3.1 (the other writer)", s, g+1000)
+	}
+	if a := row("SELECT state FROM agents_current WHERE machine_id = ? AND terminal = ?", m, "w1:p1"); a[0] != "idle" {
+		t.Fatalf("agent state = %v, want idle (the other writer)", a[0])
+	}
+	// The guard table is empty.
+	if n := row("SELECT COUNT(*) FROM ingest_guard"); n[0] != int64(0) {
+		t.Fatalf("ingest_guard rows = %v, want 0", n[0])
+	}
+}
