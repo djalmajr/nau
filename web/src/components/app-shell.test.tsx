@@ -19,10 +19,11 @@ import { ThemeProvider } from "@/lib/theme";
 
 const USER = { id: "u1", name: "Ana Exemplo", email: "ana@example.com", role: "owner" as const };
 
-type FakeSessionState = { calls: Array<{ method: string; url: string }>; loggedIn: boolean };
+type FakeSessionState = { calls: Array<{ method: string; url: string }>; fail?: number; loggedIn: boolean };
 
-/** fetch falso da API de sessão com estado em memória: GET 200 enquanto
- *  `loggedIn`, 401 depois (DELETE revoga). */
+/** fetch falso da API de sessão com estado em memória: GET responde com
+ *  `fail` quando definido (ex.: 500), senão 200 enquanto `loggedIn` e 401
+ *  depois (DELETE revoga). */
 function fakeSessionFetch(state: FakeSessionState) {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -32,6 +33,12 @@ function fakeSessionFetch(state: FakeSessionState) {
       return new Response(JSON.stringify({ error: "not_found" }), { status: 404 });
     }
     if (method === "GET") {
+      if (state.fail !== undefined) {
+        return new Response(JSON.stringify({ error: "internal_error" }), {
+          status: state.fail,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       return state.loggedIn
         ? new Response(JSON.stringify({ user: USER }), {
             status: 200,
@@ -213,5 +220,35 @@ describe("AppShell user menu", () => {
     expect(screen.queryByTestId("agents-content")).not.toBeInTheDocument();
     expect(screen.getByTestId("login-screen")).toBeInTheDocument();
     expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
+  });
+});
+
+describe("AppShell session failure", () => {
+  it("hides the shell on a non-401 failure and restores it when the retry succeeds", async () => {
+    const session: FakeSessionState = { calls: [], loggedIn: true };
+    vi.stubGlobal("fetch", fakeSessionFetch(session));
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const { queryClient } = renderShell("/agents");
+
+    // Sessão verificada (200): a casca aparece em /agents.
+    expect(await screen.findByRole("button", { name: "Conta" })).toBeInTheDocument();
+
+    // O refetch responde 500: sem casca e sem conteúdo antigo — a tela de
+    // erro mostra a mensagem e o botão "Tentar de novo" (sem redirecionar
+    // para o login).
+    session.fail = 500;
+    await queryClient.refetchQueries({ queryKey: SESSION_QUERY_KEY });
+
+    const message = await screen.findByRole("alert");
+    expect(message).toHaveTextContent("Não foi possível verificar a sua sessão");
+    expect(screen.queryByRole("button", { name: "Conta" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("agents-content")).not.toBeInTheDocument();
+
+    // A sessão volta (200): o botão refaz a query e a casca reaparece.
+    session.fail = undefined;
+    await user.click(screen.getByRole("button", { name: "Tentar de novo" }));
+
+    expect(await screen.findByRole("button", { name: "Conta" })).toBeInTheDocument();
+    expect(screen.getByTestId("agents-content")).toBeInTheDocument();
   });
 });

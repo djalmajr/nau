@@ -163,6 +163,54 @@ describe("session guard", () => {
     expect(screen.queryByText("Ana Exemplo")).not.toBeInTheDocument();
     expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
   });
+
+  it("redirects to /login with the full destination (query and fragment) in next", async () => {
+    const apiState: SessionApi = { calls: [], loggedIn: false };
+    vi.stubGlobal(
+      "fetch",
+      fakeSessionFetch(apiState, () => jsonResponse(401, { error: "unauthenticated" })),
+    );
+
+    const { router } = renderApp("/agents?view=one#section");
+
+    expect(await screen.findByLabelText("E-mail")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/login");
+    // `next` preserva caminho + query + fragmento do destino original.
+    expect(router.state.location.search.next).toBe("/agents?view=one#section");
+  });
+
+  it("restores the full destination (query and fragment) after a 401 and login", async () => {
+    const apiState: SessionApi = { calls: [], loggedIn: true };
+    vi.stubGlobal(
+      "fetch",
+      fakeSessionFetch(apiState, () => {
+        apiState.loggedIn = true;
+        return jsonResponse(200, { user: USER });
+      }),
+    );
+
+    const { router, queryClient } = renderApp("/agents?view=one#section");
+
+    // 200: a rota protegida aparece.
+    expect(await screen.findByText("agents")).toBeInTheDocument();
+
+    // A sessão expira: o refetch responde 401 e o handler central navega
+    // para o login com o destino completo em `next`.
+    apiState.loggedIn = false;
+    await queryClient.refetchQueries({ queryKey: SESSION_QUERY_KEY });
+
+    expect(await screen.findByLabelText("E-mail")).toBeInTheDocument();
+    expect(router.state.location.pathname).toBe("/login");
+    expect(router.state.location.search.next).toBe("/agents?view=one#section");
+
+    // De volta ao login, o usuário retorna exatamente ao mesmo destino.
+    const user = userEvent.setup();
+    await submitLogin(user, "ana@example.com", "senha-123");
+
+    expect(await screen.findByText("agents")).toBeInTheDocument();
+    // O destino completo voltou: caminho + query + fragmento.
+    expect(router.state.location.href).toBe("/agents?view=one#section");
+  });
 });
 
 describe("login", () => {
@@ -312,6 +360,10 @@ describe("safeNext", () => {
     expect(safeNext("https://outro.example")).toBe("/");
     expect(safeNext("")).toBe("/");
     expect(safeNext(undefined)).toBe("/");
+  });
+
+  it("keeps a full internal destination (path, query and fragment)", () => {
+    expect(safeNext("/agents?view=one#section")).toBe("/agents?view=one#section");
   });
 
   it("rejects backslashes and control characters", () => {
