@@ -12,6 +12,12 @@ Every endpoint below needs a session (`GET /api/session`), and it answers 401 `{
   - 401 `{"error":"invalid_credentials"}`;
   - 429 `{"error":"rate_limited"}`.
 - **`DELETE /api/session`:** 204.
+- **`POST /api/session/password`:** body `{"current":"...","new":"..."}`. Answers:
+  - 204 with a new session cookie; every other session of the user ends;
+  - 401 when `current` is wrong;
+  - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes.
+
+Every `POST`, `PUT` and `DELETE` under `/api/` needs `Content-Type: application/json`, and answers 415 `{"error":"unsupported_media_type"}` without it.
 
 ## Shared shapes
 
@@ -90,3 +96,41 @@ Every endpoint below needs a session (`GET /api/session`), and it answers 401 `{
 - **`per_machine`:** every visible machine, offline ones included.
 - **`working_24h`:** exactly 24 entries, oldest first. Each is the start of an hour and the most agents seen working in it.
 - **`top_projects`:** at most 5, from the shown projects only, ordered by `working` and then `agents`.
+
+## Machines and pairing
+
+- **`GET /api/machines`:** 200 `{"machines":[{"id","name","developer":Developer,"created_ms","revoked":false,"last_seen_ms":n|null,"online":true,"shared_with":[Developer]}]}`.
+  - `machines`: the user's own machines, plus the ones shared with them.
+  - `shared_with`: filled in only for the user's own machines.
+- **`DELETE /api/machines/{id}`:** 204 revokes the key, and the machine stops delivering at once. Only the machine's developer may do it; anyone else gets 404.
+- **`POST /api/pairings/confirm`:** body `{"code":"XXXX-XXXX"}`, with or without the hyphen and in any case. Answers:
+  - 204 binds the pending pairing to the signed-in user;
+  - 400 `{"error":"invalid_code"}` for an unknown, expired or already used code;
+  - 429 after 10 wrong codes in 15 minutes.
+
+  The machine side (`POST /api/pairings`, `POST /api/pairings/poll`, `POST /api/ingest`) is for `nau connect` and the Nau agent, not for the UI.
+
+## Sharing
+
+- **`POST /api/machines/{id}/shares`:** body `{"email":"..."}`. Answers:
+  - 201 `{"developer":Developer}` shares the machine, read-only, with that developer;
+  - 404 when the machine is not the user's own, or when no account has that e-mail. The two cases look the same.
+- **`DELETE /api/machines/{id}/shares/{developerId}`:** 204 ends the share.
+- **What a share shows:** the machine's agents in projects in `show` mode, plus the counts of its hidden projects. A share never grants a write.
+
+## Developers
+
+- **`GET /api/developers`:** 200 `{"developers":[{"id","name","email","machines":n,"shares_with_me":n,"shared_by_me":n}]}`.
+  - The list holds the user, the developers who share a machine with the user, and the developers the user shares with.
+  - The hub owner (`role: owner`) sees every account, but no machine data beyond what is shared with them.
+
+## Invites (hub owner only)
+
+- **`POST /api/invites`:** body `{"email":"...","role":"member"}`. Answers 201 `{"id","email","expires_ms","token"}`. The token appears only here; the invite link is `<hub>/invite#<token>`.
+- **`GET /api/invites`:** 200 `{"invites":[{"id","email","expires_ms"}]}`, the pending ones only.
+- **`DELETE /api/invites/{id}`:** 204.
+- **`POST /api/invites/accept`:** body `{"token","name","password"}`, without a session. Answers:
+  - 201 with the `GET /api/session` body and the cookie;
+  - 400 `{"error":"invalid_invite"}`;
+  - 409 `{"error":"email_taken"}`.
+- **A member** calling the first three gets 403 `{"error":"forbidden"}`.
