@@ -3,7 +3,7 @@
 // routes them to explicitly registered recipients (the project owner, the
 // job orchestrator and the machine coordinator), keeps a durable
 // per-source/per-recipient ledger and delivers them through the existing
-// herdr-soho peer message command. The outbox schema is not changed: the
+// soho peer message command. The outbox schema is not changed: the
 // ledger lives in its own files next to the outbox, and a notification
 // carries only allowlisted identifiers, never a raw event, output, prompt,
 // path or environment value.
@@ -80,14 +80,14 @@ const (
 	// StateInFlight: claimed by a delivery run until LeaseUntil; an
 	// expired lease is due again (the run crashed or was killed).
 	StateInFlight = "in_flight"
-	// StateAccepted: the endpoint accepted the message (herdr-soho send
+	// StateAccepted: the endpoint accepted the message (soho send
 	// exit 0). Final.
 	StateAccepted = "accepted"
-	// StateUncertain: herdr-soho send exit 15 or a send killed in flight
+	// StateUncertain: soho send exit 15 or a send killed in flight
 	// at its deadline, receipt not proved. Final:
 	// never resent automatically, so a message is never injected twice.
 	StateUncertain = "uncertain"
-	// StateRejected: herdr-soho send refused for good (exit 2, 3 or 18).
+	// StateRejected: soho send refused for good (exit 2, 3 or 18).
 	// Final.
 	StateRejected = "rejected"
 	// StateExhausted: MaxAttempts transient failures. Final.
@@ -107,7 +107,7 @@ const (
 	OutcomeUncertain = "uncertain"
 	// OutcomeRejected: exit 2, 3 or 18.
 	OutcomeRejected = "rejected"
-	// OutcomeTransient: any other exit, or herdr-soho unavailable
+	// OutcomeTransient: any other exit, or soho unavailable
 	// (nothing was sent); retried with backoff.
 	OutcomeTransient = "transient"
 )
@@ -130,9 +130,9 @@ const LeaseDuration = 60 * time.Second
 // Identifier patterns. Every value rendered into a message must match its
 // pattern; a value that does not is rendered as "?".
 var (
-	// RefPattern is a herdr-soho send reference "<machine>/<ws>:<pane>".
+	// RefPattern is a soho send reference "<machine>/<ws>:<pane>".
 	RefPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,64}:[A-Za-z0-9._-]{1,64}$`)
-	// AgentNamePattern is a herdr-soho agent name on the local server.
+	// AgentNamePattern is a soho agent name on the local server.
 	AgentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
 	// PanePattern is a Herdr pane id "<ws>:<pane>".
 	PanePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}:[A-Za-z0-9._-]{1,64}$`)
@@ -142,7 +142,7 @@ var (
 	RaiseIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 )
 
-// ValidRef reports whether ref is a herdr-soho send reference or a local
+// ValidRef reports whether ref is a soho send reference or a local
 // agent name.
 func ValidRef(ref string) bool {
 	return RefPattern.MatchString(ref) || AgentNamePattern.MatchString(ref)
@@ -290,7 +290,7 @@ type Delivery struct {
 	FirstAttemptAt string   `json:"first_attempt_at,omitempty"`
 	LastAttemptAt  string   `json:"last_attempt_at,omitempty"`
 	AcceptedAt     string   `json:"accepted_at,omitempty"`
-	// AcceptStatus is the herdr-soho send result word: sent, queued or
+	// AcceptStatus is the soho send result word: sent, queued or
 	// accepted (exit 0 with another wording).
 	AcceptStatus string `json:"accept_status,omitempty"`
 	LastExit     *int   `json:"last_exit,omitempty"`
@@ -306,7 +306,7 @@ type SendResult struct {
 	Outcome string // Outcome* constant
 	// Status is sent, queued or accepted on OutcomeAccepted.
 	Status string
-	// Exit is the herdr-soho exit code, or -1 when it did not run to an
+	// Exit is the soho exit code, or -1 when it did not run to an
 	// exit (unavailable, deadline).
 	Exit int
 	// Category is a fixed error category on failure: "unavailable",

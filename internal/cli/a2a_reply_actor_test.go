@@ -5,7 +5,7 @@ package cli
 // pane that is not a recipient of the task; outside Herdr the behaviour
 // is unchanged (actor "local", no recipient check). The tests run
 // cmdA2A directly over a pre-seeded registry database with an injected
-// Getenv; no real herdr-soho and no serve are involved.
+// Getenv; no real soho and no serve are involved.
 
 import (
 	"bytes"

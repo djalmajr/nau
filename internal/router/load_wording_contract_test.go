@@ -155,7 +155,7 @@ func TestLoadWordingDocs(t *testing.T) {
 		"whatever their `agent_status`",
 		"`idle`, `working`, `blocked`, `done` and `unknown` all count the same",
 		"Each recognized agent counts exactly once",
-		"`herdr-soho init`",
+		"`soho init`",
 		"`herdr agent rename <target> <name>`",
 		"`herdr machine list --json`",
 		"`unknown_machine`",

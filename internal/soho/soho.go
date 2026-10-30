@@ -1,4 +1,4 @@
-// Package soho runs the soho backend CLI (legacy name herdr-soho) as an
+// Package soho runs the soho backend CLI as an
 // argv subprocess: the bounded
 // runner, the capabilities client and the job events reader. No shell is
 // ever involved; every subprocess gets a context deadline and a WaitDelay.

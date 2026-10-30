@@ -249,18 +249,6 @@ func containsDotDot(s string) bool {
 	return false
 }
 
-// Legacy wake hook environment variable names, set by the backend releases
-// before the rename (herdr-soho); the vendored job contract now names the
-// current SOHO_JOB_* family below. wake reads one family at a time: when
-// any current variable is present, only the current family is read; the
-// two families are never mixed.
-const (
-	EnvJobID             = "HERDR_SOHO_JOB_ID"
-	EnvJobSeq            = "HERDR_SOHO_JOB_SEQ"
-	EnvJobEvent          = "HERDR_SOHO_JOB_EVENT"
-	EnvJobIdempotencyKey = "HERDR_SOHO_JOB_IDEMPOTENCY_KEY"
-)
-
 // The current wake hook environment family, the names the "Waking"
 // paragraph of the vendored job contract defines: the same four variables
 // with the SOHO_JOB_* prefix.

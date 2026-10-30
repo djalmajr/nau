@@ -37,7 +37,7 @@ var (
 	nauBin string
 )
 
-// TestMain lets the re-executed test binary act as the fake herdr-soho
+// TestMain lets the re-executed test binary act as the fake soho
 // of the forwarder test, then builds the binary once (into a temp dir
 // removed after m.Run) and runs the package.
 func TestMain(m *testing.M) {

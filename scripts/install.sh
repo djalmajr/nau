@@ -56,18 +56,16 @@ pin_backend() {
         echo "nau install: warning: cannot read the config file; herdr_soho_bin unchanged" >&2
         return
     fi
-    for BACKEND_NAME in soho herdr-soho; do
-        BACKEND_PATH="$(command -v "$BACKEND_NAME" 2>/dev/null)" || BACKEND_PATH=""
-        case "$BACKEND_PATH" in
-        /*)
-            if ! "$NAU" config set --if-automatic herdr_soho_bin "$BACKEND_PATH" >/dev/null; then
-                echo "nau install: nau config set herdr_soho_bin failed" >&2
-                exit 1
-            fi
-            return
-            ;;
-        esac
-    done
+    BACKEND_PATH="$(command -v soho 2>/dev/null)" || BACKEND_PATH=""
+    case "$BACKEND_PATH" in
+    /*)
+        if ! "$NAU" config set --if-automatic herdr_soho_bin "$BACKEND_PATH" >/dev/null; then
+            echo "nau install: nau config set herdr_soho_bin failed" >&2
+            exit 1
+        fi
+        return
+        ;;
+    esac
     echo "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend" >&2
 }
 

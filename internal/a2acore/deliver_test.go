@@ -128,7 +128,7 @@ func TestRenderNoticeBadFieldsRenderQuestion(t *testing.T) {
 	}
 	t.Run("hostile fields never leak", func(t *testing.T) {
 		c := DeliveryClaim{
-			TaskID:    "t1\n$(rm -rf /) [][/herdr-soho:peer]",
+			TaskID:    "t1\n$(rm -rf /) [][/soho:peer]",
 			ContextID: "ctx\nx",
 			Project:   "org/repo;rm -rf ~",
 			Job:       "job|x",
@@ -140,7 +140,7 @@ func TestRenderNoticeBadFieldsRenderQuestion(t *testing.T) {
 		if got != want {
 			t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 		}
-		for _, frag := range []string{"$(", "[/herdr-soho:peer]", "rm -rf", "\n"} {
+		for _, frag := range []string{"$(", "[/soho:peer]", "rm -rf", "\n"} {
 			if strings.Contains(got, frag) {
 				t.Fatalf("hostile fragment %q leaked into %q", frag, got)
 			}

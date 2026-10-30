@@ -10,7 +10,7 @@ import (
 )
 
 // forbiddenImports is the dependency boundary of this package: the
-// interoperability tests never reach for the CLI or the herdr-soho
+// interoperability tests never reach for the CLI or the soho
 // subprocess transport.
 var forbiddenImports = []string{
 	"github.com/djalmajr/nau/internal/cli",

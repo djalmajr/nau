@@ -1,7 +1,7 @@
 package cli
 
 // The notify end-to-end flows across wake/sync/plugin, with the fake
-// herdr-soho answering `send` and logging every call: the wake delivery,
+// soho answering `send` and logging every call: the wake delivery,
 // the replay convergence, the missing-owner escalation, the agent status
 // routine coalescing, the self loop guard, the retry/uncertain/rejected
 // outcomes, the lease restart, the concurrent wakes, the canary sweep,
@@ -55,7 +55,7 @@ func expectedSendMessage(t *testing.T, dir string, clk *testClock, seq int, ev s
 	return notify.Render(n, n.Deliveries[0])
 }
 
-// sendArgv is the exact argv of one herdr-soho send of message msg to ref
+// sendArgv is the exact argv of one soho send of message msg to ref
 // (the per-send timeout is the 5 s default within every flow bound).
 func sendArgv(ref, msg string) []string {
 	return []string{"send", ref, msg, "--now", "--timeout", "5000"}
@@ -102,7 +102,7 @@ func TestNotifyFlowWakeDelivers(t *testing.T) {
 	mustRunNotify(t, dir, clk, "notify", "register", "orchestrator", "--job", notifyTestJob, "--to", notifyTestOrch)
 	mustRunNotify(t, dir, clk, "notify", "register", "coordinator", "--to", notifyTestCoord)
 
-	stdout, stderr, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobID: notifyTestJob},
+	stdout, stderr, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob},
 		flowWakeEvent(1, "blocked", "ship it?"), "wake")
 	if exit != 0 {
 		t.Fatalf("wake exit = %d, stderr %q", exit, stderr)
@@ -152,7 +152,7 @@ func TestNotifyFlowReplayConverges(t *testing.T) {
 	mustRunNotify(t, dir, clk, "notify", "register", "owner", "--projeto", notifyTestRepo, "--to", notifyTestOwner)
 	mustRunNotify(t, dir, clk, "notify", "register", "orchestrator", "--job", notifyTestJob, "--to", notifyTestOrch)
 	mustRunNotify(t, dir, clk, "notify", "register", "coordinator", "--to", notifyTestCoord)
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 
 	stdout, _, exit := runNotifyFlow(t, dir, clk, vars, ev, "wake")
 	if exit != 0 {
@@ -195,7 +195,7 @@ func TestNotifyFlowMissingOwnerEscalates(t *testing.T) {
 	seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
 	mustRunNotify(t, dir, clk, "notify", "register", "coordinator", "--to", notifyTestCoord)
 
-	_, _, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobID: notifyTestJob},
+	_, _, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob},
 		flowWakeEvent(1, "question", "ship it?"), "wake")
 	if exit != 0 {
 		t.Fatalf("wake exit = %d", exit)
@@ -368,7 +368,7 @@ func TestNotifyFlowRetry(t *testing.T) {
 		fakesoho.Rule{Argv: sendArgv(notifyTestOwner, msg3), Code: 18},                                  // event 3: rejected
 	)
 	setSohoConfig(t, dir, exe, "machine-a")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 
 	// Event 1: the first attempt is busy (17) and goes back to pending.
 	if _, _, exit := runNotifyFlow(t, dir, clk, vars, ev1, "wake"); exit != 0 {
@@ -444,7 +444,7 @@ func TestNotifyFlowLeaseRestart(t *testing.T) {
 		fakesoho.Rule{Argv: sendArgv(notifyTestOwner, msg1), Code: 17}, // the wake's attempt: busy
 	)
 	setSohoConfig(t, dir, exe, "machine-a")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir, clk, vars, ev1, "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}
@@ -513,7 +513,7 @@ func TestNotifyFlowConcurrentWake(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			seq := 1 + i%4 // seqs 1..4, each twice
-			env, out, _ := newNotifyFlowEnv(dir, clk, map[string]string{jobapi.EnvJobID: notifyTestJob},
+			env, out, _ := newNotifyFlowEnv(dir, clk, map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob},
 				flowWakeEvent(seq, "terminal", ""))
 			exitCodes[i] = Run([]string{"wake"}, env)
 			stdouts[i] = out.String()
@@ -620,7 +620,7 @@ func TestNotifyFlowCanary(t *testing.T) {
 	// environment (the run environment) forwards it, so the sweep proves
 	// the argv carries none of it.
 	env, out, errb := newNotifyFlowEnv(dir, clk,
-		map[string]string{jobapi.EnvJobID: notifyTestJob, "HERDR_TEST_CANARY": canarySecret}, ev)
+		map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob, "HERDR_TEST_CANARY": canarySecret}, ev)
 	env.Environ = func() []string {
 		return append(append([]string{}, fakeChildEnv...), "HERDR_TEST_CANARY="+canarySecret)
 	}
@@ -666,7 +666,7 @@ func TestNotifyFlowCanary(t *testing.T) {
 		// The API key is never in the send child environment.
 		for _, e := range c.Env {
 			if strings.Contains(e, sentinelKey) {
-				t.Fatalf("a herdr-soho child environment carried the key: %q", e)
+				t.Fatalf("a soho child environment carried the key: %q", e)
 			}
 		}
 	}
@@ -717,7 +717,7 @@ func TestNotifyFlowTiming(t *testing.T) {
 	seedJob(t, dir, notifyTestJob, notifyTestRepo, 0, "accepted")
 
 	ev := flowWakeEvent(1, "blocked", "ship it?")
-	if _, _, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobID: notifyTestJob}, ev, "wake"); exit != 0 {
+	if _, _, exit := runNotifyFlow(t, dir, clk, map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}, ev, "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}
 	// The agent status notification, accepted at the same clock.
@@ -826,7 +826,7 @@ func TestNotifyFlowTiming(t *testing.T) {
 	}
 }
 
-// TestNotifyFlowPluginStartup43: the plugin startup on a herdr-soho that
+// TestNotifyFlowPluginStartup43: the plugin startup on a soho that
 // lacks the job capabilities (the exit 43 path, which never reached the
 // notify step) still delivers the pending notification.
 func TestNotifyFlowPluginStartup43(t *testing.T) {
@@ -845,7 +845,7 @@ func TestNotifyFlowPluginStartup43(t *testing.T) {
 		fakesoho.Rule{Argv: sendArgv(notifyTestOwner, msg1), Code: 17},
 	)
 	setSohoConfig(t, dir, exe, "machine-a")
-	vars := map[string]string{jobapi.EnvJobID: notifyTestJob}
+	vars := map[string]string{jobapi.EnvJobIDCurrent: notifyTestJob}
 	if _, _, exit := runNotifyFlow(t, dir, clk, vars, ev, "wake"); exit != 0 {
 		t.Fatal("wake exit != 0")
 	}

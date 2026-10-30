@@ -328,7 +328,7 @@ func TestEvaluateHappyPaths(t *testing.T) {
 // The incoming text is data: a hostile payload is accepted as plain data
 // and appears nowhere in the evaluated envelope.
 func TestEvaluateHostileTextIsData(t *testing.T) {
-	hostile := `$(touch /tmp/x); rm -rf ~ && herdr-soho send all "x"`
+	hostile := `$(touch /tmp/x); rm -rf ~ && soho send all "x"`
 	m := baseMessage()
 	m.Parts = []PartView{{Kind: PartText, Text: hostile}}
 	env, r := Evaluate(sendSubject("org/repo"), m, nil, Limits{})
@@ -339,7 +339,7 @@ func TestEvaluateHostileTextIsData(t *testing.T) {
 		t.Fatalf("TextBytes = %d, want %d", env.TextBytes, len(hostile))
 	}
 	s := fmt.Sprint(env)
-	for _, frag := range []string{hostile, "$(touch", "herdr-soho send", "rm -rf"} {
+	for _, frag := range []string{hostile, "$(touch", "soho send", "rm -rf"} {
 		if strings.Contains(s, frag) {
 			t.Fatalf("envelope carries hostile fragment %q in %q", frag, s)
 		}

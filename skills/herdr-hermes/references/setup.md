@@ -38,13 +38,13 @@ Until the URL is set, push is disabled and the outbox still works for a dispatch
 
 ## Register the wake hook
 
-In the `soho` machine configuration (legacy name `herdr-soho` on nodes that still run the pre-rename release), set the key:
+In the `soho` machine configuration, set the key:
 
 ```text
 job_wake_cmd=nau wake
 ```
 
-With this set, every job event that wakes the dispatcher is also recorded in the outbox as soon as it happens. The backend passes the event on one family of environment variables: the renamed release sets `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`, and the pre-rename releases set the legacy `HERDR_SOHO_JOB_*` variables; `nau wake` reads the current family when any of its variables is present and otherwise the legacy family, so the same hook works for both.
+With this set, every job event that wakes the dispatcher is also recorded in the outbox as soon as it happens. The backend passes `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`; `nau wake` reads only these variables.
 
 ## Register notification recipients (optional)
 
@@ -91,4 +91,4 @@ A dispatcher that reaches this node over ssh can bind its key to the forced comm
 nau doctor
 ```
 
-It reports, in one JSON line: whether the backend is found and has the `ephemeral_job` and `job_events` capabilities (the backend is now `soho`; the pre-rename name `herdr-soho` is still accepted while the nodes upgrade, and `herdr_soho_bin` empty or set to `herdr-soho` resolves to the first of `soho` and `herdr-soho` on the `PATH`), whether the machine label and the dispatcher URL are set, whether the key is configured (boolean only), whether the wake hook is configured (`true`, `false` or `unknown`) and the outbox counts. It exits 43 when a capability is missing and 0 otherwise, and writes nothing; when the stored `herdr_soho_bin` still points at the legacy `herdr-soho` binary and a `soho` is on the `PATH`, it prints a `stderr` warning with the config command that switches to `soho`, leaving the JSON line and the exit code unchanged.
+It reports, in one JSON line: whether the backend is found and has the `ephemeral_job` and `job_events` capabilities (an empty `herdr_soho_bin` resolves to `soho` on the `PATH`; non-empty values are explicit), whether the machine label and the dispatcher URL are set, whether the key is configured (boolean only), whether the wake hook is configured (`true`, `false` or `unknown`) and the outbox counts. It exits 43 when a capability is missing and 0 otherwise. The backend configuration probes run with `SOHO_NOWRITE=1`.

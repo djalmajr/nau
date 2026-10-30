@@ -91,7 +91,7 @@ const (
 
 // Job origins.
 const (
-	// OrigemJob: a herdr-soho contract job, keyed by its job id.
+	// OrigemJob: a soho contract job, keyed by its job id.
 	OrigemJob = "job"
 	// OrigemWorkspace: an hm-<agent>-<type>-<ref> Herdr workspace seen by
 	// the poll, keyed by "ws:" + its workspace id.

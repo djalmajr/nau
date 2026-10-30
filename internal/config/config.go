@@ -69,20 +69,14 @@ func Keys() []string {
 	return []string{"machine_label", "dispatcher_url", "herdr_soho_bin", "push_timeout_s", "herdr_bin", "route_machines", "route_disabled", "route_orchestrator_name", "route_probe_timeout_s"}
 }
 
-// IsAutoBin reports whether a stored herdr_soho_bin value is the auto
-// value: the empty value or exactly herdr-soho. The legacy name counts
-// as auto because the old `config set` wrote every key's default into
-// the file, so that stored value is never a user selection; a missing
-// key stores the empty value and is auto too. Any other value (a path
-// or another name) is an explicit selection and passes through
-// unchanged.
+// IsAutoBin reports whether the stored backend selection is automatic (empty).
 func IsAutoBin(stored string) bool {
-	return stored == "" || stored == "herdr-soho"
+	return stored == ""
 }
 
 // ResolveBin resolves a stored herdr_soho_bin value to the effective
-// executable: the auto value resolves to the first of soho and
-// herdr-soho found on the machine's PATH, else to the bare name soho
+// executable: the auto value resolves to soho found on the PATH,
+// else to the bare name soho
 // (the not-found reporting is left to the caller, which looks the value
 // up again); an explicit value (a bare name, a relative or an absolute
 // path) passes through unchanged.
@@ -91,9 +85,6 @@ func ResolveBin(stored string) string {
 		return stored
 	}
 	if p, err := exec.LookPath("soho"); err == nil {
-		return p
-	}
-	if p, err := exec.LookPath("herdr-soho"); err == nil {
 		return p
 	}
 	return "soho"
@@ -180,7 +171,7 @@ func decodeConfig(data []byte) (Config, error) {
 // invalid values are refused with an error before anything is read or
 // written. The stored form is normalized: herdr_bin is trimmed, the
 // route lists are joined with "," without spaces, and the auto value of
-// herdr_soho_bin (the empty value or a legacy name) is stored as the
+// herdr_soho_bin (the empty value) is stored as the
 // empty value.
 func Set(dir, key, value string) error {
 	stored, err := storedValue(key, value)
@@ -309,7 +300,7 @@ func storedValue(key, value string) (string, error) {
 	case "machine_label", "dispatcher_url":
 		return value, nil
 	case "herdr_soho_bin":
-		// The auto form (the empty value or a legacy name) stores empty;
+		// The auto form (the empty value) stores empty;
 		// an explicit selection stores unchanged.
 		if IsAutoBin(value) {
 			return "", nil

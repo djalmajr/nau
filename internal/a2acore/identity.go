@@ -30,7 +30,7 @@ const (
 
 // Identity is what the existing identity source asserts for one bearer
 // token: the stable subject id (SubjectPattern, never LocalSubjectID)
-// and the herdr-soho reference the subject speaks for ("" when none).
+// and the soho reference the subject speaks for ("" when none).
 type Identity struct {
 	Subject string
 	Ref     string

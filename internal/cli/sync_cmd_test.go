@@ -58,7 +58,7 @@ func trailer(ultimo int, estado string) string {
 }
 
 // runHermesVars is runHermes with the CLI-visible environment variables
-// (the wake hook's HERDR_SOHO_JOB_* variables) set.
+// (the wake hook's SOHO_JOB_* variables) set.
 func runHermesVars(t *testing.T, cfgDir string, vars map[string]string, stdin string, args ...string) (string, string, int) {
 	t.Helper()
 	var out, errb bytes.Buffer
@@ -596,7 +596,7 @@ func TestSyncCapabilitiesMissing(t *testing.T) {
 	}
 	// A missing executable is also a capability failure.
 	cfgDir = t.TempDir()
-	setSohoConfig(t, cfgDir, "no-such-herdr-soho-binary-xyz", "machine-a")
+	setSohoConfig(t, cfgDir, "no-such-soho-binary-xyz", "machine-a")
 	_, _, exit = runHermes(t, cfgDir, false, "", "sync")
 	if exit != 43 {
 		t.Fatalf("missing binary: exit = %d, want 43", exit)
@@ -792,10 +792,10 @@ func TestSyncSparseTerminalWakeThenSync(t *testing.T) {
 	seedJob(t, cfgDir, "J1", "org/repo", 0, "done")
 	wakeStdin := eventLine(9, "terminal", "")
 	stdout, stderr, exit := runHermesVars(t, cfgDir, map[string]string{
-		jobapi.EnvJobID:             "J1",
-		jobapi.EnvJobSeq:            "9",
-		jobapi.EnvJobEvent:          wakeStdin,
-		jobapi.EnvJobIdempotencyKey: "J1:9",
+		jobapi.EnvJobIDCurrent:             "J1",
+		jobapi.EnvJobSeqCurrent:            "9",
+		jobapi.EnvJobEventCurrent:          wakeStdin,
+		jobapi.EnvJobIdempotencyKeyCurrent: "J1:9",
 	}, wakeStdin, "wake")
 	if exit != 0 {
 		t.Fatalf("wake: exit = %d, stdout %q stderr %q", exit, stdout, stderr)
@@ -875,10 +875,10 @@ func TestSyncClosedJobWithGapStillSynced(t *testing.T) {
 	seedJob(t, cfgDir, "J1", "org/repo", 0, "running")
 	wakeStdin := eventLine(9, "terminal", "")
 	stdout, stderr, exit := runHermesVars(t, cfgDir, map[string]string{
-		jobapi.EnvJobID:             "J1",
-		jobapi.EnvJobSeq:            "9",
-		jobapi.EnvJobEvent:          wakeStdin,
-		jobapi.EnvJobIdempotencyKey: "J1:9",
+		jobapi.EnvJobIDCurrent:             "J1",
+		jobapi.EnvJobSeqCurrent:            "9",
+		jobapi.EnvJobEventCurrent:          wakeStdin,
+		jobapi.EnvJobIdempotencyKeyCurrent: "J1:9",
 	}, wakeStdin, "wake")
 	if exit != 0 {
 		t.Fatalf("wake: exit = %d, stdout %q stderr %q", exit, stdout, stderr)

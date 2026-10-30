@@ -41,10 +41,7 @@ type doctorSoho struct {
 // prerequisites. It works under HERDR_HERMES_NOWRITE=1 without creating a
 // database, migrating schemas or writing data; SQLite may create WAL/SHM
 // control files beside an existing database. It exits 43 when the backend is missing or lacks either
-// capability, else 0. When the selected backend binary still carries
-// the legacy herdr-soho name while the renamed soho binary is on the
-// machine's PATH, it adds one documented warning to stderr; the JSON
-// line and the exit code are unchanged by the warning.
+// capability, else 0.
 func cmdDoctor(args []string, env Env) int {
 	if len(args) != 0 {
 		badUsage(env, "usage: doctor")
@@ -102,10 +99,6 @@ func cmdDoctor(args []string, env Env) int {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin is automatic and resolved from the PATH; an ssh forced command (nau gate) may run with a minimal PATH that omits the backend; '%s config set herdr_soho_bin <absolute path>' pins it\n",
 			env.program(), env.program())
 	}
-	if _, lerr := exec.LookPath("soho"); legacyBackendSelected(cfg.HerdrSohoBin) && lerr == nil {
-		_, _ = fmt.Fprintf(env.Stderr, "%s: doctor: herdr_soho_bin points to the legacy herdr-soho binary while soho is on the PATH; '%s config set herdr_soho_bin soho' switches to soho\n",
-			env.program(), env.program())
-	}
 	if !so.EphemeralJob || !so.JobEvents {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: soho capabilities missing\n", env.program())
 		return 43
@@ -113,57 +106,22 @@ func cmdDoctor(args []string, env Env) int {
 	return 0
 }
 
-// legacyBackendSelected reports whether the effective backend binary
-// carries the legacy herdr-soho name: the base name herdr-soho without
-// the windows extension, case-insensitively on Windows and exactly on
-// the unix operating systems. For a stored value that is not auto the
-// effective value is the stored one (the resolution passes explicit
-// selections through), and an auto stored value never resolves to a
-// herdr-soho base while soho is on the PATH, so deciding on the
-// effective value is the same as deciding on the stored one.
-func legacyBackendSelected(bin string) bool {
-	return isLegacyBackendName(bin, runtime.GOOS == "windows")
-}
-
-// isLegacyBackendName is legacyBackendSelected for a given platform: on
-// Windows the .exe extension and the name are both compared without
-// case (HERDR-SOHO.EXE is the legacy binary there); on the unix
-// operating systems both are exact.
-func isLegacyBackendName(bin string, windows bool) bool {
-	base := filepath.Base(bin)
-	if windows {
-		if n := len(base) - len(".exe"); n > 0 && strings.EqualFold(base[n:], ".exe") {
-			base = base[:n]
-		}
-		return strings.EqualFold(base, "herdr-soho")
-	}
-	return strings.TrimSuffix(base, ".exe") == "herdr-soho"
-}
-
-// backendNowriteEnviron is the child environment of the doctor's
-// `config` call: the parent environment minus the inherited values of
-// the two backend read-only flags (SOHO_NOWRITE and
-// HERDR_SOHO_NOWRITE, whatever their values), plus exactly one
-// SOHO_NOWRITE=1 and one HERDR_SOHO_NOWRITE=1: the renamed backend
-// reads the new flag and the legacy binary still running on the nodes
-// reads the old one, so the read-only guarantee holds on both. The key
-// comparison is exact on the unix operating systems and
-// case-insensitive on Windows, the same pattern as keyIsPaneID in
-// internal/soho.
+// backendNowriteEnviron removes inherited SOHO_NOWRITE entries and adds
+// exactly one SOHO_NOWRITE=1 for the doctor's backend config probes.
 func backendNowriteEnviron(env Env) []string {
 	environ := childEnviron(env)
-	kept := make([]string, 0, len(environ)+2)
+	kept := make([]string, 0, len(environ)+1)
 	for _, kv := range environ {
 		if keyIsNowrite(kv) {
 			continue
 		}
 		kept = append(kept, kv)
 	}
-	return append(kept, "SOHO_NOWRITE=1", "HERDR_SOHO_NOWRITE=1")
+	return append(kept, "SOHO_NOWRITE=1")
 }
 
 // keyIsNowrite reports whether the environment entry kv has the key
-// SOHO_NOWRITE or HERDR_SOHO_NOWRITE: exact on the unix operating
+// SOHO_NOWRITE: exact on the unix operating
 // systems, case-insensitive on Windows.
 func keyIsNowrite(kv string) bool {
 	key := kv
@@ -171,9 +129,9 @@ func keyIsNowrite(kv string) bool {
 		key = kv[:i]
 	}
 	if runtime.GOOS == "windows" {
-		return strings.EqualFold(key, "SOHO_NOWRITE") || strings.EqualFold(key, "HERDR_SOHO_NOWRITE")
+		return strings.EqualFold(key, "SOHO_NOWRITE")
 	}
-	return key == "SOHO_NOWRITE" || key == "HERDR_SOHO_NOWRITE"
+	return key == "SOHO_NOWRITE"
 }
 
 // doctorOutboxCounts reads the outbox counts without creating any file.

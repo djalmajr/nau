@@ -366,13 +366,6 @@ func TestContractLimits(t *testing.T) {
 			t.Errorf("ValidBase(%q) = %v, want %v", base, got, ok)
 		}
 	}
-	// The legacy family is no longer in the vendored document (the
-	// current family is checked against it by TestContractWakeEnv); it
-	// stays fixed here for backends released before the rename.
-	if EnvJobID != "HERDR_SOHO_JOB_ID" || EnvJobSeq != "HERDR_SOHO_JOB_SEQ" ||
-		EnvJobEvent != "HERDR_SOHO_JOB_EVENT" || EnvJobIdempotencyKey != "HERDR_SOHO_JOB_IDEMPOTENCY_KEY" {
-		t.Error("legacy wake hook environment names drifted")
-	}
 	if CapEphemeralJob != "ephemeral_job" || CapJobEvents != "job_events" {
 		t.Error("capability keys drifted")
 	}

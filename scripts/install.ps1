@@ -72,20 +72,18 @@ function Set-BackendPin {
         Write-Host 'nau install: warning: cannot read the config file; herdr_soho_bin unchanged'
         return
     }
-    foreach ($name in @('soho', 'herdr-soho')) {
-        $backend = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($backend) {
-            # Native stderr warnings must pass through even in Windows PowerShell 5.1.
-            $pinPreference = $ErrorActionPreference
-            try {
-                $ErrorActionPreference = 'Continue'
-                $null = & $NauTarget config set --if-automatic herdr_soho_bin $backend.Source
-                $pinExit = $LASTEXITCODE
-            }
-            finally { $ErrorActionPreference = $pinPreference }
-            if ($pinExit -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
-            return
+    $backend = Get-Command soho -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($backend) {
+        # Native stderr warnings must pass through even in Windows PowerShell 5.1.
+        $pinPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $null = & $NauTarget config set --if-automatic herdr_soho_bin $backend.Source
+            $pinExit = $LASTEXITCODE
         }
+        finally { $ErrorActionPreference = $pinPreference }
+        if ($pinExit -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
+        return
     }
     Write-Host 'nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend'
 }

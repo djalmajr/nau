@@ -18,7 +18,7 @@ import (
 )
 
 // jobPublicSubs are the dispatcher-facing subcommands forwarded to
-// soho job with the same arguments. The backend is now soho (legacy name herdr-soho).
+// soho job with the same arguments. The backend is now soho.
 var jobPublicSubs = map[string]bool{
 	"start": true, "status": true, "wait": true, "events": true,
 	"collect": true, "amend": true, "send": true, "ack": true,
@@ -54,7 +54,7 @@ var (
 )
 
 // cmdJob implements `job <sub> [args]`: it validates the contract input
-// limits, forwards the subcommand to the backend (soho, legacy name herdr-soho) as an argv subprocess and
+// limits, forwards the subcommand to the backend (soho) as an argv subprocess and
 // does the local bookkeeping after a successful forward. The forwarded
 // exit code and stdout are never changed by the bookkeeping.
 //

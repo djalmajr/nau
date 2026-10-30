@@ -3,5 +3,5 @@
 // (internal/a2aserver) on the loopback, over a real store
 // (internal/a2astore) in a temp directory. Every subtest is hermetic:
 // generated fixtures only, a bounded deadline on every wait, no real
-// herdr-soho (the delivery sender is an in-memory fake).
+// soho (the delivery sender is an in-memory fake).
 package a2ainterop

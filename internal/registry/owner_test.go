@@ -16,7 +16,7 @@ func TestParseWorkspaceName(t *testing.T) {
 		wantOK bool
 	}{
 		{label: "hm-herdr-hermes-impl-dja229", want: WorkspaceName{Agente: "herdr-hermes", Trabalho: "impl", Ref: "dja229"}, wantOK: true},
-		{label: "hm-herdr-soho-fix-pr64-2", want: WorkspaceName{Agente: "herdr-soho", Trabalho: "fix", Ref: "pr64-2"}, wantOK: true},
+		{label: "hm-soho-fix-pr64-2", want: WorkspaceName{Agente: "soho", Trabalho: "fix", Ref: "pr64-2"}, wantOK: true},
 		{label: "hm-herdr-hermes-impl-dja238-241", want: WorkspaceName{Agente: "herdr-hermes", Trabalho: "impl", Ref: "dja238-241"}, wantOK: true},
 		{label: "hm-a-review-impl-x"},
 		{label: "hm-pinar"},

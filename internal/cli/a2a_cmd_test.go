@@ -9,7 +9,7 @@ package cli
 // running serve applies, and the delivery loop sends one
 // identifiers-only notice. The tests run cmdA2A directly: the command
 // table line is added by the orchestrator at integration. No real
-// herdr-soho is involved: the notice sender is an in-memory fake.
+// soho is involved: the notice sender is an in-memory fake.
 
 import (
 	"bytes"

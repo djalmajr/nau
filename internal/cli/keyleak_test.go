@@ -68,9 +68,9 @@ func TestKeyNeverLeaks(t *testing.T) {
 		return out, errb, exit
 	}
 	jobVars := map[string]string{
-		jobapi.EnvJobID:             "job-1",
-		jobapi.EnvJobSeq:            "1",
-		jobapi.EnvJobIdempotencyKey: "job-1:1",
+		jobapi.EnvJobIDCurrent:             "job-1",
+		jobapi.EnvJobSeqCurrent:            "1",
+		jobapi.EnvJobIdempotencyKeyCurrent: "job-1:1",
 	}
 
 	// A command case of the table.
@@ -114,7 +114,7 @@ func TestKeyNeverLeaks(t *testing.T) {
 	// 3. Every owned command on the success path (dispatcher 200), and the
 	// slice-1 commands.
 	//
-	// The fake herdr-soho backs the slice-2 subprocess paths (job
+	// The fake soho backs the slice-2 subprocess paths (job
 	// forwarding, sync, doctor) and the slice-4b plugin entry points added
 	// below; every child's argv, stdin and environment are captured in the
 	// fake's call log and swept for the key at the end.
@@ -134,7 +134,7 @@ func TestKeyNeverLeaks(t *testing.T) {
 	setSohoConfig(t, dir, fakeExe, "")
 	runTable([]leakCase{
 		{"wake first event", wakeEvent(1), jobVars, false, []string{"wake"}, 0},
-		{"wake second event", wakeEvent(2), map[string]string{jobapi.EnvJobID: "job-1"}, false, []string{"wake"}, 0},
+		{"wake second event", wakeEvent(2), map[string]string{jobapi.EnvJobIDCurrent: "job-1"}, false, []string{"wake"}, 0},
 		{"session start", "", nil, false, []string{"session", "start", "--projeto", "org/repo", "--branch", "b1"}, 0},
 		{"session update", "", nil, false, []string{"session", "update", "--projeto", "org/repo", "--branch", "b1", "--estado", "working"}, 0},
 		{"session end", "", nil, false, []string{"session", "end", "--projeto", "org/repo", "--estado", "done"}, 0},
@@ -154,7 +154,7 @@ func TestKeyNeverLeaks(t *testing.T) {
 	// a new pending record (wake appends and still exits 0).
 	setConfig(t, dir, map[string]string{"dispatcher_url": srv401.URL})
 	runTable([]leakCase{
-		{"wake against the 401 dispatcher", wakeEvent(3), map[string]string{jobapi.EnvJobID: "job-1"}, false, []string{"wake"}, 0},
+		{"wake against the 401 dispatcher", wakeEvent(3), map[string]string{jobapi.EnvJobIDCurrent: "job-1"}, false, []string{"wake"}, 0},
 		{"push 401 auth_rejected", "", nil, false, []string{"push"}, 41},
 	})
 	setConfig(t, dir, map[string]string{"dispatcher_url": srv500.URL})
@@ -175,7 +175,7 @@ func TestKeyNeverLeaks(t *testing.T) {
 	})
 
 	// 4b. The slice-2 subprocess paths (job forwarding, sync, doctor) and
-	// the slice-4b plugin entry points, against the fake herdr-soho; the
+	// the slice-4b plugin entry points, against the fake soho; the
 	// call-log sweep below proves no child saw the key in its environment
 	// or stdin.
 	setConfig(t, dir, map[string]string{"dispatcher_url": srv200.URL})
@@ -257,18 +257,18 @@ func TestKeyNeverLeaks(t *testing.T) {
 			t.Fatalf("%s leaked the key: %.300q", f, data)
 		}
 	}
-	// The subprocess audit: the fake call log captures every herdr-soho
+	// The subprocess audit: the fake call log captures every soho
 	// child's argv, stdin and full environment; the key must be in none of
 	// them.
 	if calls := readFakeCalls(t, fakeDir); len(calls) == 0 {
-		t.Fatal("the fake herdr-soho was never called; the subprocess sweep is vacuous")
+		t.Fatal("the fake soho was never called; the subprocess sweep is vacuous")
 	}
-	callLog, err := os.ReadFile(filepath.Join(fakeDir, "fake-herdr-soho.calls.jsonl"))
+	callLog, err := os.ReadFile(filepath.Join(fakeDir, "fake-soho.calls.jsonl"))
 	if err != nil {
 		t.Fatalf("read fake call log: %v", err)
 	}
 	if strings.Contains(string(callLog), sentinelKey) {
-		t.Fatalf("a herdr-soho child environment or stdin carried the key: %.300q", callLog)
+		t.Fatalf("a soho child environment or stdin carried the key: %.300q", callLog)
 	}
 	// On the wire the key exists only as the Authorization header.
 	for name, s := range map[string]*cliPushServer{"200": srv200, "401": srv401, "500": srv500} {

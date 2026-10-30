@@ -8,18 +8,18 @@ import (
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
-// TestMain lets the re-executed test binary act as the fake herdr-soho
+// TestMain lets the re-executed test binary act as the fake soho
 // or as the pty helper of the terminal echo tests.
 func TestMain(m *testing.M) {
 	fakesoho.Main()
 	if testMainHook != nil {
 		testMainHook()
 	}
-	// Fail closed against a real herdr-soho: after the re-executed roles
+	// Fail closed against a real soho: after the re-executed roles
 	// above (which exit before this point and are unaffected), the test
 	// process PATH points at an empty directory, so the default
-	// herdr-soho name never resolves to a binary on the machine — every
-	// test that needs herdr-soho passes an absolute fake path — and
+	// soho name never resolves to a binary on the machine — every
+	// test that needs soho passes an absolute fake path — and
 	// local runs behave like CI. The directory is removed after the run.
 	emptyPath, err := os.MkdirTemp("", "herdr-hermes-test-path-")
 	if err != nil {
