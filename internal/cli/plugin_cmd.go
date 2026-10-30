@@ -8,25 +8,32 @@ package cli
 // sync run, and bridge status reads the state read-only.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"time"
+	"regexp"
 
-	"github.com/djalmajr/nau/internal/config"
-	"github.com/djalmajr/nau/internal/notify"
 	"github.com/djalmajr/nau/internal/outbox"
 	"github.com/djalmajr/nau/internal/plugin"
 )
-
-// pluginEventAgentStatus is the Herdr event name of the pane agent
-// status change hook.
-const pluginEventAgentStatus = "pane.agent_status_changed"
 
 // The Herdr event names of the workspace hooks.
 const (
 	pluginEventWorkspaceCreated = "workspace.created"
 	pluginEventWorkspaceClosed  = "workspace.closed"
 )
+
+// The underscored event-stream names of the Herdr workspace events (the
+// dotted names are the pluginEventWorkspace* constants above).
+const (
+	workspaceCreatedUnderscored = "workspace_created"
+	workspaceClosedUnderscored  = "workspace_closed"
+)
+
+// pluginWorkspaceIDPattern is the id of a Herdr workspace.
+var pluginWorkspaceIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // cmdPlugin dispatches the plugin subcommands.
 func cmdPlugin(args []string, env Env) int {
@@ -89,12 +96,6 @@ func pluginStartup(env Env) int {
 	res, code := runSync(context.Background(), env, "", false)
 	if code == 2 || code == 43 {
 		pluginFriction(env, "startup: "+res.ErrMotivo)
-		// runSync did not reach the notify step (capability or state
-		// failure): deliver the pending notifications anyway (30 s
-		// bound); the output line and exit code are unchanged.
-		if cfg, cerr := config.Load(env.ConfigDir); cerr == nil {
-			runNotify(context.Background(), env, cfg, 30*time.Second)
-		}
 		printPluginSkipped(env, res.ErrMotivo)
 		return 0
 	}
@@ -125,8 +126,6 @@ func pluginEvent(env Env) int {
 	}
 	eventName := env.Getenv(plugin.EnvEvent)
 	switch eventName {
-	case pluginEventAgentStatus:
-		pluginAgentStatusEvent(env)
 	case pluginEventWorkspaceCreated, pluginEventWorkspaceClosed:
 		pluginWorkspaceEvent(env, eventName)
 	default:
@@ -142,205 +141,162 @@ func pluginEvent(env Env) int {
 // pluginWorkspaceEvent handles workspace.created and workspace.closed. A
 // job workspace (label job-<id>, the job contract's label) keeps today's
 // bookkeeping: created tracks the job (empty projeto) when unknown, and a
-// tracked job is synced (on close, a final sync). When notifications are
-// enabled, the event is also recorded as a workspace notification when
-// the workspace is registered (notify register workspace), is a job
-// workspace, or, for a closed event without workspace info, was seen
-// opening; it is delivered by the sync's notify step, or within the hook bound when
-// the sync does not reach it. Any other workspace writes nothing; an
-// unreadable payload writes one friction line.
+// tracked job is synced (on close, a final sync). Any other workspace
+// writes nothing; an unreadable payload writes one friction line.
 func pluginWorkspaceEvent(env Env, eventName string) {
-	ev, err := notify.ParseWorkspaceEvent([]byte(env.Getenv(plugin.EnvEventJSON)), eventName)
+	ev, err := parseWorkspaceEventPayload([]byte(env.Getenv(plugin.EnvEventJSON)), eventName)
 	if err != nil {
 		pluginFriction(env, "event: unknown event JSON shape")
 		return
 	}
 	labelJob := workspaceLabelJob(ev)
 	syncJob := labelJob
-	if syncJob == "" && ev.Event == notify.WorkspaceClosed {
-		syncJob = openedWorkspaceJob(env, ev.Workspace)
-	}
 	tracked := syncJob != "" && isJobTracked(env, syncJob)
-	if ev.Event == notify.WorkspaceCreated && labelJob != "" && !tracked {
+	if ev.created && labelJob != "" && !tracked {
 		if err := trackPluginJob(env, labelJob); err != nil {
 			pluginFriction(env, "event: track "+labelJob+": "+err.Error())
 			return
 		}
 		tracked = true
 	}
-	recorded := recordWorkspaceNotification(env, ev, labelJob)
 	if tracked {
 		res, code := runSync(context.Background(), env, syncJob, false)
 		if code != 0 {
 			pluginFriction(env, "event: sync "+syncJob+": "+res.ErrMotivo)
 		}
-		if code != 2 && code != 43 {
-			// The sync reached its notify step and delivered.
-			return
+	}
+}
+
+// parsedWorkspaceEvent is the parsed Herdr workspace event of the plugin
+// event hook: the kind, the workspace id and the label.
+type parsedWorkspaceEvent struct {
+	created bool
+	id      string
+	label   string
+}
+
+// parseWorkspaceEventPayload parses a Herdr workspace event. It accepts
+// the socket subscription line {"event":"workspace.created"|"workspace_created"
+// |"workspace.closed"|"workspace_closed","data":{…}} where data is the
+// event-stream form, the event-stream form
+// {"type":"workspace_created","workspace":{…}} and
+// {"type":"workspace_closed","workspace_id":…,"workspace":null|{…}} (the
+// bundled API schema), and the existing plugin payload shapes — nested
+// {"workspace":{"label":…,"workspace_id":…}} or flat
+// {"label":…,"workspace_id":…} — whose event name comes from the hook
+// ("workspace.created" or "workspace.closed") when the JSON carries no
+// name of its own. The event name is the envelope event, else the data
+// type, else the hook; any other name is refused and a missing name is
+// refused. The workspace id is workspace.workspace_id, else the
+// top-level (or data-level) workspace_id, and must match the workspace
+// id rule. The label is workspace.label, else the top-level label; it may
+// be empty only for a closed event (a created event without a label is
+// refused). Unknown fields (agent kinds, titles, tokens, worktree,
+// counts) are discarded at parse time.
+func parseWorkspaceEventPayload(raw []byte, hook string) (parsedWorkspaceEvent, error) {
+	if !isWorkspaceJSONObject(raw) {
+		return parsedWorkspaceEvent{}, errors.New("workspace event is not a JSON object")
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return parsedWorkspaceEvent{}, fmt.Errorf("decode workspace event: %w", err)
+	}
+	var data map[string]any
+	var envelope string
+	if ev, present := m["event"]; present {
+		name, isStr := ev.(string)
+		if !isStr {
+			return parsedWorkspaceEvent{}, errors.New("workspace event name is not a string")
+		}
+		envelope = name
+		d, ok := m["data"].(map[string]any)
+		if !ok {
+			return parsedWorkspaceEvent{}, errors.New("workspace event has no data object")
+		}
+		data = d
+	} else {
+		// No envelope: the event-stream form or a plugin payload; the
+		// data fields sit at the top level.
+		data = m
+	}
+	name := envelope
+	if name == "" {
+		switch t, present := data["type"]; {
+		case present:
+			ts, isStr := t.(string)
+			if !isStr {
+				return parsedWorkspaceEvent{}, errors.New("workspace event type is not a string")
+			}
+			name = ts
+		case hook != "":
+			name = hook
+		default:
+			return parsedWorkspaceEvent{}, errors.New("workspace event name is missing")
 		}
 	}
-	if recorded {
-		if cfg, err := config.Load(env.ConfigDir); err == nil {
-			runNotify(context.Background(), env, cfg, notifyHookBound)
+	var created bool
+	switch name {
+	case pluginEventWorkspaceCreated, workspaceCreatedUnderscored:
+		created = true
+	case pluginEventWorkspaceClosed, workspaceClosedUnderscored:
+	default:
+		return parsedWorkspaceEvent{}, errors.New("workspace event is not a workspace created or closed event")
+	}
+	var ws map[string]any
+	if w, present := data["workspace"]; present {
+		ws, _ = w.(map[string]any) // null or non-object: no workspace object
+	}
+	wsID, _, err := workspaceStringField([]map[string]any{ws, data, m}, "workspace_id")
+	if err != nil {
+		return parsedWorkspaceEvent{}, err
+	}
+	if !pluginWorkspaceIDPattern.MatchString(wsID) {
+		return parsedWorkspaceEvent{}, errors.New("workspace id is missing or invalid")
+	}
+	label, _, err := workspaceStringField([]map[string]any{ws, data, m}, "label")
+	if err != nil {
+		return parsedWorkspaceEvent{}, err
+	}
+	if created && label == "" {
+		return parsedWorkspaceEvent{}, errors.New("workspace created event has no label")
+	}
+	return parsedWorkspaceEvent{created: created, id: wsID, label: label}, nil
+}
+
+// isWorkspaceJSONObject reports whether b is a JSON object: non-empty
+// after trimming, starting with '{' and valid JSON.
+func isWorkspaceJSONObject(b []byte) bool {
+	t := bytes.TrimSpace(b)
+	return len(t) > 0 && t[0] == '{' && json.Valid(t)
+}
+
+// workspaceStringField returns the value of key from the first map (in
+// order) that carries the key. It errors when the first present value is
+// not a string; "" with no error when no map carries the key.
+func workspaceStringField(maps []map[string]any, key string) (string, bool, error) {
+	for _, m := range maps {
+		if m == nil {
+			continue
 		}
+		v, present := m[key]
+		if !present {
+			continue
+		}
+		s, isStr := v.(string)
+		if !isStr {
+			return "", false, fmt.Errorf("workspace field %q is not a string", key)
+		}
+		return s, true, nil
 	}
+	return "", false, nil
 }
 
-// openedWorkspaceJob returns the job recorded in the notification ledger
-// when the workspace opened, or "" (read-only).
-func openedWorkspaceJob(env Env, workspace string) string {
-	ro, err := outbox.Open(outbox.StateDir(env.ConfigDir), outbox.Options{Now: env.Now, ReadOnly: true})
-	if err != nil {
-		return ""
-	}
-	job, _ := notify.Open(ro, env.Now).WorkspaceJob(workspace)
-	return job
-}
-
-// recordWorkspaceNotification records the workspace event as a
-// notification when notifications are enabled (nothing is written
-// otherwise) and reports whether a new notification was created.
-func recordWorkspaceNotification(env Env, ev notify.WorkspaceEvent, labelJob string) bool {
-	ro, err := outbox.Open(outbox.StateDir(env.ConfigDir), outbox.Options{Now: env.Now, ReadOnly: true})
-	if err != nil || !notify.Open(ro, env.Now).Enabled() {
-		return false
-	}
-	nstore, err := openNotifyWrite(env)
-	if err != nil {
-		pluginFriction(env, "event: workspace notification state dir unavailable")
-		return false
-	}
-	sum, err := nstore.IngestWorkspace(ev, labelJob, jobProjeto(env, labelJob), notify.ProjectWorkspace)
-	if err != nil {
-		pluginFriction(env, "event: workspace notification failed")
-		return false
-	}
-	return sum.Created
-}
-
-// jobProjeto returns the projeto of a tracked job, or "" (read-only).
-func jobProjeto(env Env, jobID string) string {
-	if jobID == "" {
-		return ""
-	}
-	store, err := outbox.Open(outbox.StateDir(env.ConfigDir), outbox.Options{Now: env.Now, ReadOnly: true})
-	if err != nil {
-		return ""
-	}
-	jobs, err := store.LoadJobs()
-	if err != nil {
-		return ""
-	}
-	if j, ok := jobs.Jobs[jobID]; ok {
-		return j.Projeto
+// workspaceLabelJob returns the job of a job-<id> workspace label, or "".
+func workspaceLabelJob(ev parsedWorkspaceEvent) string {
+	if job, ok := plugin.JobIDFromLabel(ev.label); ok {
+		return job
 	}
 	return ""
-}
-
-// pluginAgentStatusEvent ingests the Herdr pane.agent_status_changed
-// event, pulls the next attempt to now for the pending deliveries of
-// the pane when the status is a responsive idle or done (so a recipient
-// pane that came back is delivered in the same hook), and delivers the
-// pending notifications within the hook bound. It always exits 0,
-// prints nothing on stdout, and writes nothing (not even the state dir)
-// when the pane is not watched or notifications are disabled: an
-// over-cap, malformed or non-agent-status JSON is one friction line
-// with a fixed text.
-func pluginAgentStatusEvent(env Env) {
-	raw := env.Getenv(plugin.EnvEventJSON)
-	if len(raw) > notifyStdinCap {
-		pluginFriction(env, "event: agent status JSON is over the 64 KiB cap")
-		return
-	}
-	ev, err := notify.ParseAgentStatusEvent([]byte(raw))
-	if err != nil {
-		pluginFriction(env, "event: agent status JSON is not a valid agent status event")
-		return
-	}
-	// Disabled (no registry): nothing is written at all (not even the
-	// state dir), so the enabled check runs against the read-only store.
-	dir := outbox.StateDir(env.ConfigDir)
-	ro, err := outbox.Open(dir, outbox.Options{Now: env.Now, ReadOnly: true})
-	if err != nil {
-		pluginFriction(env, "event: agent status state dir unavailable")
-		return
-	}
-	if !notify.Open(ro, env.Now).Enabled() {
-		return
-	}
-	cfg, err := config.Load(env.ConfigDir)
-	if err != nil {
-		pluginFriction(env, "event: agent status config unreadable")
-		return
-	}
-	nstore, err := openNotifyWrite(env)
-	if err != nil {
-		pluginFriction(env, "event: agent status state dir unavailable")
-		return
-	}
-	if _, err := nstore.IngestAgentStatus(ev, notify.ProjectAgentStatus); err != nil {
-		pluginFriction(env, "event: agent status ingest failed")
-		return
-	}
-	pluginAgentStatusExpedite(env, nstore, ev)
-	runNotify(context.Background(), env, cfg, notifyHookBound)
-}
-
-// pluginAgentStatusExpedite pulls the next attempt to now for the
-// pending deliveries of the event's pane, before the hook's delivery
-// run, so a recipient pane that just became idle or done receives its
-// due delivery in the same hook instead of after the backoff. The pane
-// matches a ref as "local/<pane>"; the agent name of the pane (the same
-// Env.PaneAgentName field the reply resolves with) is resolved only when
-// the ref alone does not match and some pending ref carries the
-// agent-name pattern, so the common case — no pending delivery of the
-// pane — writes nothing and never calls herdr. A failed resolution
-// expedites nothing and writes the fixed friction line; the hook's
-// delivery run follows unchanged. A working, blocked or unknown status
-// expedites nothing.
-func pluginAgentStatusExpedite(env Env, nstore *notify.Store, ev notify.AgentStatusEvent) {
-	if ev.Status != "idle" && ev.Status != "done" {
-		return
-	}
-	refs, err := nstore.PendingRefs()
-	if err != nil {
-		pluginFriction(env, "event: agent status state dir unavailable")
-		return
-	}
-	localRef := "local/" + ev.Pane
-	byRef, byName := false, false
-	for _, ref := range refs {
-		if ref == localRef {
-			byRef = true
-		} else if notify.AgentNamePattern.MatchString(ref) {
-			byName = true
-		}
-	}
-	if !byRef && !byName {
-		return
-	}
-	match := func(ref string) bool { return ref == localRef }
-	if !byRef {
-		resolve := env.PaneAgentName
-		if resolve == nil {
-			environ := childEnviron(env)
-			resolve = func(ctx context.Context, pane string) (string, error) {
-				return paneAgentName(ctx, environ, pane)
-			}
-		}
-		name, err := resolve(context.Background(), ev.Pane)
-		if err != nil {
-			pluginFriction(env, "event: recipient name unavailable")
-			return
-		}
-		if name == "" {
-			return // the pane has no agent: nothing matches by name
-		}
-		match = func(ref string) bool { return ref == localRef || ref == name }
-	}
-	if _, err := nstore.ExpeditePending(match); err != nil {
-		pluginFriction(env, "event: agent status state dir unavailable")
-	}
 }
 
 // pluginBridgeStatus is the read-only popup action: exactly one JSON line

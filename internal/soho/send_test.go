@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/djalmajr/nau/internal/notify"
 	"github.com/djalmajr/nau/internal/soho"
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
@@ -71,36 +70,36 @@ func childEnvExact(t *testing.T, env, want []string) {
 	}
 }
 
-// TestNotifySendExitMapping covers every row of the outcome mapping and
+// TestSendExitMapping covers every row of the outcome mapping and
 // checks the exact argv and the exact child environment the fake
 // logged.
-func TestNotifySendExitMapping(t *testing.T) {
+func TestSendExitMapping(t *testing.T) {
 	rows := []struct {
 		ref    string
 		msg    string
 		stdout string
 		code   int
-		want   notify.SendResult
+		want   soho.SendResult
 	}{
-		{"local/w1:p1", "hi one", "sent to x\n", 0, notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}},
-		{"local/w1:p2", "hi two", "queued for x\n", 0, notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "queued", Exit: 0}},
-		{"local/w1:p3", "hi three", "some other wording\n", 0, notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "accepted", Exit: 0}},
-		{"local/w1:p4", "hi four", "", 0, notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "accepted", Exit: 0}},
-		{"local/w1:p5", "hi five", "", 15, notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "uncertain"}},
-		{"local/w1:p6", "hi six", "", 2, notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 2, Category: "usage"}},
-		{"local/w1:p7", "hi seven", "", 3, notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 3, Category: "unknown_agent"}},
-		{"local/w1:p8", "hi eight", "", 18, notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 18, Category: "refused"}},
-		{"local/w1:p9", "hi nine", "", 17, notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 17, Category: "busy"}},
-		{"local/w1:p10", "hi ten", "", 7, notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 7, Category: "exit"}},
-		{"local/w1:p11", "hi eleven", "", 42, notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 42, Category: "exit"}},
-		{"owner-agent", "hi owner", "SENT to owner\n", 0, notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}},
+		{"local/w1:p1", "hi one", "sent to x\n", 0, soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}},
+		{"local/w1:p2", "hi two", "queued for x\n", 0, soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "queued", Exit: 0}},
+		{"local/w1:p3", "hi three", "some other wording\n", 0, soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "accepted", Exit: 0}},
+		{"local/w1:p4", "hi four", "", 0, soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "accepted", Exit: 0}},
+		{"local/w1:p5", "hi five", "", 15, soho.SendResult{Outcome: soho.OutcomeUncertain, Exit: 15, Category: "uncertain"}},
+		{"local/w1:p6", "hi six", "", 2, soho.SendResult{Outcome: soho.OutcomeRejected, Exit: 2, Category: "usage"}},
+		{"local/w1:p7", "hi seven", "", 3, soho.SendResult{Outcome: soho.OutcomeRejected, Exit: 3, Category: "unknown_agent"}},
+		{"local/w1:p8", "hi eight", "", 18, soho.SendResult{Outcome: soho.OutcomeRejected, Exit: 18, Category: "refused"}},
+		{"local/w1:p9", "hi nine", "", 17, soho.SendResult{Outcome: soho.OutcomeTransient, Exit: 17, Category: "busy"}},
+		{"local/w1:p10", "hi ten", "", 7, soho.SendResult{Outcome: soho.OutcomeTransient, Exit: 7, Category: "exit"}},
+		{"local/w1:p11", "hi eleven", "", 42, soho.SendResult{Outcome: soho.OutcomeTransient, Exit: 42, Category: "exit"}},
+		{"owner-agent", "hi owner", "SENT to owner\n", 0, soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}},
 	}
 	var rules []fakesoho.Rule
 	for _, row := range rows {
 		rules = append(rules, fakesoho.Rule{Argv: sendArgv(row.ref, row.msg, sendTestTimeout), Stdout: row.stdout, Code: row.code})
 	}
 	exe, dir := installFake(t, rules...)
-	s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+	s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
 	ctx := context.Background()
 	for i, row := range rows {
 		res := s.Send(ctx, row.ref, row.msg)
@@ -124,9 +123,9 @@ func TestNotifySendExitMapping(t *testing.T) {
 	}
 }
 
-// TestNotifySendValidation: every invalid ref or message is refused with
+// TestSendValidation: every invalid ref or message is refused with
 // a usage rejection and no fake call at all.
-func TestNotifySendValidation(t *testing.T) {
+func TestSendValidation(t *testing.T) {
 	const msg = "hello"
 	cases := []struct {
 		name, ref, m string
@@ -151,9 +150,9 @@ func TestNotifySendValidation(t *testing.T) {
 			// A rule that would match if the invalid input were run:
 			// any call shows up in the log.
 			exe, dir := installFake(t, fakesoho.Rule{Argv: sendArgv(tc.ref, tc.m, sendTestTimeout), Stdout: "sent to x\n", Code: 0})
-			s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+			s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
 			res := s.Send(context.Background(), tc.ref, tc.m)
-			want := notify.SendResult{Outcome: notify.OutcomeRejected, Exit: -1, Category: "usage"}
+			want := soho.SendResult{Outcome: soho.OutcomeRejected, Exit: -1, Category: "usage"}
 			if res != want {
 				t.Errorf("res = %+v, want %+v", res, want)
 			}
@@ -165,19 +164,19 @@ func TestNotifySendValidation(t *testing.T) {
 	}
 }
 
-// TestNotifySendBoundaries: exactly 2048 bytes and a message with an
+// TestSendBoundaries: exactly 2048 bytes and a message with an
 // ordinary space are valid inputs and run the fake.
-func TestNotifySendBoundaries(t *testing.T) {
+func TestSendBoundaries(t *testing.T) {
 	msg := strings.Repeat("a", 2048)
 	exe, dir := installFake(t,
 		fakesoho.Rule{Argv: sendArgv("local/w1:p3", msg, sendTestTimeout), Stdout: "sent to x\n", Code: 0},
 		fakesoho.Rule{Argv: sendArgv("local/w1:p4", "a b", sendTestTimeout), Stdout: "queued for x\n", Code: 0},
 	)
-	s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
-	if res := s.Send(context.Background(), "local/w1:p3", msg); res != (notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}) {
+	s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+	if res := s.Send(context.Background(), "local/w1:p3", msg); res != (soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}) {
 		t.Errorf("2048-byte message: res = %+v", res)
 	}
-	if res := s.Send(context.Background(), "local/w1:p4", "a b"); res != (notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "queued", Exit: 0}) {
+	if res := s.Send(context.Background(), "local/w1:p4", "a b"); res != (soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "queued", Exit: 0}) {
 		t.Errorf("message with a space: res = %+v", res)
 	}
 	calls, err := fakesoho.ReadCalls(dir)
@@ -189,13 +188,13 @@ func TestNotifySendBoundaries(t *testing.T) {
 	}
 }
 
-// TestNotifySendDefaultTimeout: a zero Timeout passes --timeout 5000.
-func TestNotifySendDefaultTimeout(t *testing.T) {
+// TestSendDefaultTimeout: a zero Timeout passes --timeout 5000.
+func TestSendDefaultTimeout(t *testing.T) {
 	wantArgv := []string{"send", "local/w1:p1", "hi", "--now", "--timeout", "5000"}
 	exe, dir := installFake(t, fakesoho.Rule{Argv: wantArgv, Stdout: "sent to x\n", Code: 0})
-	s := soho.NotifySender{Bin: exe, Environ: childEnv}
+	s := soho.Sender{Bin: exe, Environ: childEnv}
 	res := s.Send(context.Background(), "local/w1:p1", "hi")
-	if res != (notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}) {
+	if res != (soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}) {
 		t.Fatalf("res = %+v, want accepted/sent", res)
 	}
 	calls, err := fakesoho.ReadCalls(dir)
@@ -207,12 +206,12 @@ func TestNotifySendDefaultTimeout(t *testing.T) {
 	}
 }
 
-// TestNotifySendDeadline: a fake that outlives the process bound
+// TestSendDeadline: a fake that outlives the process bound
 // (Timeout + 3s) is reported as an uncertain deadline (killed in flight: receipt not
 // proved, never resent) within the bound, the runner's WaitDelay grace and
 // a small margin; a caller context cancelled while the child runs is the
 // same.
-func TestNotifySendDeadline(t *testing.T) {
+func TestSendDeadline(t *testing.T) {
 	// bound = Timeout + 3s; the runner adds its own 5s WaitDelay grace
 	// on top; the margin absorbs a slow fake start.
 	limit := sendShortTimeout + 3*time.Second + 5*time.Second + 2*time.Second
@@ -227,12 +226,12 @@ func TestNotifySendDeadline(t *testing.T) {
 			ExitOnTerm: 1,
 			Code:       0,
 		})
-		s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
+		s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
 		start := time.Now()
 		res := s.Send(context.Background(), "local/wd:p1", "hold")
 		elapsed := time.Since(start)
 		t.Logf("past bound: elapsed=%s bound=%s", elapsed, sendShortTimeout+3*time.Second)
-		want := notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: -1, Category: "deadline"}
+		want := soho.SendResult{Outcome: soho.OutcomeUncertain, Exit: -1, Category: "deadline"}
 		if res != want {
 			t.Fatalf("res = %+v, want %+v", res, want)
 		}
@@ -250,7 +249,7 @@ func TestNotifySendDeadline(t *testing.T) {
 			Delay: 100,
 			Code:  0,
 		})
-		s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
+		s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
 			time.Sleep(50 * time.Millisecond)
@@ -260,7 +259,7 @@ func TestNotifySendDeadline(t *testing.T) {
 		res := s.Send(ctx, "local/wd:p2", "hold")
 		elapsed := time.Since(start)
 		t.Logf("ctx cancelled mid-run: elapsed=%s", elapsed)
-		want := notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: -1, Category: "deadline"}
+		want := soho.SendResult{Outcome: soho.OutcomeUncertain, Exit: -1, Category: "deadline"}
 		if res != want {
 			t.Fatalf("res = %+v, want %+v", res, want)
 		}
@@ -273,12 +272,12 @@ func TestNotifySendDeadline(t *testing.T) {
 	})
 }
 
-// TestNotifySendEnvWithoutPaneID: the send child never receives the
-// caller's HERDR_PANE_ID — the notification is sent by Nau, not by a
+// TestSendEnvWithoutPaneID: the send child never receives the
+// caller's HERDR_PANE_ID — the message is sent by Nau, not by a
 // pane — while every other variable is forwarded, including a longer
 // key that only starts with HERDR_PANE_ID, and the original Environ
 // slice keeps its four entries.
-func TestNotifySendEnvWithoutPaneID(t *testing.T) {
+func TestSendEnvWithoutPaneID(t *testing.T) {
 	env := []string{
 		"HERDR_PANE_ID=w1:p2",
 		"HERDR_ENV=1",
@@ -286,8 +285,8 @@ func TestNotifySendEnvWithoutPaneID(t *testing.T) {
 		"HERDR_PANE_ID_EXTRA=x",
 	}
 	exe, dir := installFake(t, fakesoho.Rule{Argv: sendArgv("local/w1:p1", "hi", sendTestTimeout), Stdout: "sent to x\n", Code: 0})
-	s := soho.NotifySender{Bin: exe, Environ: env, Timeout: sendTestTimeout}
-	if res := s.Send(context.Background(), "local/w1:p1", "hi"); res != (notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}) {
+	s := soho.Sender{Bin: exe, Environ: env, Timeout: sendTestTimeout}
+	if res := s.Send(context.Background(), "local/w1:p1", "hi"); res != (soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}) {
 		t.Fatalf("res = %+v, want accepted/sent", res)
 	}
 	calls, err := fakesoho.ReadCalls(dir)
@@ -303,33 +302,33 @@ func TestNotifySendEnvWithoutPaneID(t *testing.T) {
 	}
 }
 
-// TestNotifySendUnavailable: a missing binary is a transient
+// TestSendUnavailable: a missing binary is a transient
 // unavailable, without a subprocess.
-func TestNotifySendUnavailable(t *testing.T) {
-	s := soho.NotifySender{Bin: "no-such-soho-binary", Environ: childEnv, Timeout: sendTestTimeout}
+func TestSendUnavailable(t *testing.T) {
+	s := soho.Sender{Bin: "no-such-soho-binary", Environ: childEnv, Timeout: sendTestTimeout}
 	res := s.Send(context.Background(), "local/w1:p1", "hi")
-	want := notify.SendResult{Outcome: notify.OutcomeTransient, Exit: -1, Category: "unavailable"}
+	want := soho.SendResult{Outcome: soho.OutcomeTransient, Exit: -1, Category: "unavailable"}
 	if res != want {
 		t.Errorf("res = %+v, want %+v", res, want)
 	}
 }
 
-// TestNotifySendLargeStdout: 1 MiB of stdout on exit 0 is still
+// TestSendLargeStdout: 1 MiB of stdout on exit 0 is still
 // accepted and classified from the first line; the adapter keeps at
 // most 4096 bytes of the output internally (the rest is dropped), so
 // the run stays fast and memory-flat regardless of volume.
-func TestNotifySendLargeStdout(t *testing.T) {
+func TestSendLargeStdout(t *testing.T) {
 	exe, _ := installFake(t, fakesoho.Rule{
 		Argv:   sendArgv("local/big:p1", "big", sendTestTimeout),
 		Stdout: "sent to x\n" + strings.Repeat("y", 1024*1024),
 		Code:   0,
 	})
-	s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+	s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
 	start := time.Now()
 	res := s.Send(context.Background(), "local/big:p1", "big")
 	elapsed := time.Since(start)
 	t.Logf("1 MiB stdout: elapsed=%s", elapsed)
-	want := notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}
+	want := soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}
 	if res != want {
 		t.Errorf("res = %+v, want %+v", res, want)
 	}
@@ -338,19 +337,19 @@ func TestNotifySendLargeStdout(t *testing.T) {
 	}
 }
 
-// TestNotifySendConcurrent: concurrent Sends against the fake stay
+// TestSendConcurrent: concurrent Sends against the fake stay
 // correct under -race; each Send must use its own runner, because the
 // runner is not safe for concurrent use.
-func TestNotifySendConcurrent(t *testing.T) {
+func TestSendConcurrent(t *testing.T) {
 	const n = 8
 	exe, dir := installFake(t, fakesoho.Rule{
 		Argv:   sendArgv("local/c:p1", "hello all", sendTestTimeout),
 		Stdout: "sent to all\n",
 		Code:   0,
 	})
-	s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+	s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
 	var wg sync.WaitGroup
-	results := make([]notify.SendResult, n)
+	results := make([]soho.SendResult, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -359,7 +358,7 @@ func TestNotifySendConcurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	want := notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}
+	want := soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}
 	for i, res := range results {
 		if res != want {
 			t.Errorf("goroutine %d: res = %+v, want %+v", i, res, want)
@@ -374,9 +373,9 @@ func TestNotifySendConcurrent(t *testing.T) {
 	}
 }
 
-// TestNotifySendCanary: a secret in the message and in the child's
+// TestSendCanary: a secret in the message and in the child's
 // stdout never reaches the returned SendResult.
-func TestNotifySendCanary(t *testing.T) {
+func TestSendCanary(t *testing.T) {
 	const canary = "CANARY-SECRET-1"
 	msg := "note " + canary + " ok"
 	exe, _ := installFake(t, fakesoho.Rule{
@@ -384,9 +383,9 @@ func TestNotifySendCanary(t *testing.T) {
 		Stdout: "sent " + canary + "\n",
 		Code:   0,
 	})
-	s := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
+	s := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendTestTimeout}
 	res := s.Send(context.Background(), "local/secret:p1", msg)
-	want := notify.SendResult{Outcome: notify.OutcomeAccepted, Status: "sent", Exit: 0}
+	want := soho.SendResult{Outcome: soho.OutcomeAccepted, Status: "sent", Exit: 0}
 	if res != want {
 		t.Fatalf("res = %+v, want %+v", res, want)
 	}
@@ -396,18 +395,18 @@ func TestNotifySendCanary(t *testing.T) {
 	}
 }
 
-// TestNotifySendBound: a send slower than Timeout + 3s is killed in flight
+// TestSendBound: a send slower than Timeout + 3s is killed in flight
 // (uncertain) under the default bound, and accepted when the caller passes
 // a larger process Bound.
-func TestNotifySendBound(t *testing.T) {
+func TestSendBound(t *testing.T) {
 	rule := fakesoho.Rule{Argv: sendArgv("local/wb:p1", "slow", sendShortTimeout), Stdout: "sent to x\n", Code: 0, Delay: 4500}
 	exe, _ := installFake(t, rule)
-	short := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
-	if res := short.Send(context.Background(), "local/wb:p1", "slow"); res.Outcome != notify.OutcomeUncertain || res.Category != "deadline" {
+	short := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout}
+	if res := short.Send(context.Background(), "local/wb:p1", "slow"); res.Outcome != soho.OutcomeUncertain || res.Category != "deadline" {
 		t.Fatalf("default bound: %+v, want uncertain deadline", res)
 	}
-	long := soho.NotifySender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout, Bound: 20 * time.Second}
-	if res := long.Send(context.Background(), "local/wb:p1", "slow"); res.Outcome != notify.OutcomeAccepted || res.Status != "sent" {
+	long := soho.Sender{Bin: exe, Environ: childEnv, Timeout: sendShortTimeout, Bound: 20 * time.Second}
+	if res := long.Send(context.Background(), "local/wb:p1", "slow"); res.Outcome != soho.OutcomeAccepted || res.Status != "sent" {
 		t.Fatalf("larger bound: %+v, want accepted sent", res)
 	}
 }

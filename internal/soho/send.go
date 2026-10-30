@@ -3,19 +3,18 @@ package soho
 import (
 	"context"
 	"errors"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/djalmajr/nau/internal/notify"
 )
 
 // sendGrace is added to the caller's timeout to form the process bound
 // handed to Runner.Run; the runner adds its own WaitDelay grace on top.
 const sendGrace = 3 * time.Second
 
-// sendDefaultTimeout is used when NotifySender.Timeout is 0.
+// sendDefaultTimeout is used when Sender.Timeout is 0.
 const sendDefaultTimeout = 5 * time.Second
 
 // sendMaxMessage is the largest message accepted, in bytes.
@@ -63,16 +62,59 @@ func ctxSleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// NotifySender delivers notification messages with `soho send`.
-// The child never receives the process's HERDR_PANE_ID: the
-// notification is sent by Nau itself, not by a pane, so soho
+// Send outcomes reported by a Sender.
+const (
+	// OutcomeAccepted: exit 0.
+	OutcomeAccepted = "accepted"
+	// OutcomeUncertain: exit 15, or a send killed in flight at its
+	// deadline: receipt not proved, never resent automatically.
+	OutcomeUncertain = "uncertain"
+	// OutcomeRejected: exit 2, 3 or 18.
+	OutcomeRejected = "rejected"
+	// OutcomeTransient: any other exit, or soho unavailable
+	// (nothing was sent).
+	OutcomeTransient = "transient"
+)
+
+// SendResult is what a Sender reports for one attempt.
+type SendResult struct {
+	Outcome string // Outcome* constant
+	// Status is sent, queued or accepted on OutcomeAccepted.
+	Status string
+	// Exit is the soho exit code, or -1 when it did not run to an
+	// exit (unavailable, deadline).
+	Exit int
+	// Category is a fixed error category on failure: "unavailable",
+	// "deadline", "busy", "uncertain", "refused", "usage", "unknown_agent",
+	// "not_ready", "exit".
+	Category string
+}
+
+// Identifier patterns. Every reference a send runs for must match its
+// pattern; a reference that does not is refused before anything runs.
+var (
+	// RefPattern is a soho send reference "<machine>/<ws>:<pane>".
+	RefPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}/[A-Za-z0-9._-]{1,64}:[A-Za-z0-9._-]{1,64}$`)
+	// AgentNamePattern is a soho agent name on the local server.
+	AgentNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+)
+
+// ValidRef reports whether ref is a soho send reference or a local
+// agent name.
+func ValidRef(ref string) bool {
+	return RefPattern.MatchString(ref) || AgentNamePattern.MatchString(ref)
+}
+
+// Sender delivers messages with `soho send`.
+// The child never receives the process's HERDR_PANE_ID: the message is
+// sent by Nau itself, not by a pane, so soho
 // must not attribute the message to the pane that fired the hook or
 // that runs the serve, and must not refuse it as a worker report when
 // that pane is a worker. Every other variable of Environ is forwarded
 // as is. A send refused with agent_not_ready (the recipient still
 // starting) is retried inside the call, after pauses of 1s, 2s and
 // 4s, within the caller's deadline; no other exit is retried.
-type NotifySender struct {
+type Sender struct {
 	Bin     string        // argv0, as soho.Runner.Bin
 	Environ []string      // exact child environment, as soho.Runner.Environ
 	Timeout time.Duration // passed as --timeout <ms>; 0 means 5s
@@ -84,13 +126,13 @@ type NotifySender struct {
 	Bound time.Duration
 }
 
-// Send implements notify.Sender. It refuses to run the command for an
-// invalid ref or message; otherwise it runs `soho send <ref>
+// Send delivers one message to one reference. It refuses to run the
+// command for an invalid ref or message; otherwise it runs `soho send <ref>
 // <message> --now --timeout <ms>` as an argv subprocess on a fresh
 // Runner (the runner is not safe for concurrent use, and Send is)
 // with a copy of Environ without the HERDR_PANE_ID entry — the child
 // does not inherit the pane identity of the calling process, because
-// the notification is sent by Nau, not by a pane — bounds the process
+// the message is sent by Nau, not by a pane — bounds the process
 // at Timeout plus sendGrace, and maps the child
 // outcome to a fixed SendResult. The child's stdout is kept bounded
 // only to classify the status word: it is never returned, logged or
@@ -101,9 +143,9 @@ type NotifySender struct {
 // deadline leaves less than the pause plus 2s; every other outcome
 // (accepted, uncertain, deadline, unavailable, any other exit) is
 // returned at once, never retried.
-func (s NotifySender) Send(ctx context.Context, ref, message string) notify.SendResult {
-	if !notify.ValidRef(ref) || !validMessage(message) {
-		return notify.SendResult{Outcome: notify.OutcomeRejected, Exit: -1, Category: "usage"}
+func (s Sender) Send(ctx context.Context, ref, message string) SendResult {
+	if !ValidRef(ref) || !validMessage(message) {
+		return SendResult{Outcome: OutcomeRejected, Exit: -1, Category: "usage"}
 	}
 	timeout := s.Timeout
 	if timeout <= 0 {
@@ -137,7 +179,7 @@ func (s NotifySender) Send(ctx context.Context, ref, message string) notify.Send
 	if err != nil {
 		var ue *ErrUnavailable
 		if errors.As(err, &ue) {
-			return notify.SendResult{Outcome: notify.OutcomeTransient, Exit: -1, Category: "unavailable"}
+			return SendResult{Outcome: OutcomeTransient, Exit: -1, Category: "unavailable"}
 		}
 		// Every other error from Run is a deadline (ErrDeadline,
 		// including a done caller context): the child was started and
@@ -145,30 +187,30 @@ func (s NotifySender) Send(ctx context.Context, ref, message string) notify.Send
 		// target. Receipt is not proved, exactly like exit 15: the
 		// delivery is uncertain and never resent automatically, so a
 		// message is never injected twice.
-		return notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: -1, Category: "deadline"}
+		return SendResult{Outcome: OutcomeUncertain, Exit: -1, Category: "deadline"}
 	}
 	switch exit {
 	case 0:
-		return notify.SendResult{Outcome: notify.OutcomeAccepted, Status: statusWord(out.data), Exit: 0, Category: ""}
+		return SendResult{Outcome: OutcomeAccepted, Status: statusWord(out.data), Exit: 0, Category: ""}
 	case 15:
-		return notify.SendResult{Outcome: notify.OutcomeUncertain, Exit: 15, Category: "uncertain"}
+		return SendResult{Outcome: OutcomeUncertain, Exit: 15, Category: "uncertain"}
 	case 2:
-		return notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 2, Category: "usage"}
+		return SendResult{Outcome: OutcomeRejected, Exit: 2, Category: "usage"}
 	case 3:
-		return notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 3, Category: "unknown_agent"}
+		return SendResult{Outcome: OutcomeRejected, Exit: 3, Category: "unknown_agent"}
 	case 18:
-		return notify.SendResult{Outcome: notify.OutcomeRejected, Exit: 18, Category: "refused"}
+		return SendResult{Outcome: OutcomeRejected, Exit: 18, Category: "refused"}
 	case 17:
-		return notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 17, Category: "busy"}
+		return SendResult{Outcome: OutcomeTransient, Exit: 17, Category: "busy"}
 	case 4:
 		// Exit 4 after its in-Send retries: only a not-ready refusal is
 		// reported as such; the other exit 4s keep the ordinary mapping.
 		if isNotReady(exit, errOut) {
 			return notReadyResult()
 		}
-		return notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 4, Category: "exit"}
+		return SendResult{Outcome: OutcomeTransient, Exit: 4, Category: "exit"}
 	default:
-		return notify.SendResult{Outcome: notify.OutcomeTransient, Exit: exit, Category: "exit"}
+		return SendResult{Outcome: OutcomeTransient, Exit: exit, Category: "exit"}
 	}
 }
 
@@ -180,7 +222,7 @@ func (s NotifySender) Send(ctx context.Context, ref, message string) notify.Send
 // delivery is in flight. The stdout is kept only to classify the
 // status word, and the stderr only to classify an agent_not_ready
 // refusal: neither is returned, logged or stored.
-func (s NotifySender) runSend(ctx context.Context, argv []string, bound time.Duration) (int, error, *captureWriter, *captureWriter) {
+func (s Sender) runSend(ctx context.Context, argv []string, bound time.Duration) (int, error, *captureWriter, *captureWriter) {
 	r := Runner{Bin: s.Bin, Environ: withoutPaneID(s.Environ)}
 	var out, errOut captureWriter
 	exit, err := r.Run(ctx, argv, nil, &out, &errOut, bound)
@@ -194,8 +236,8 @@ func (s NotifySender) runSend(ctx context.Context, argv []string, bound time.Dur
 
 // notReadyResult is the SendResult of a send whose attempts were all
 // refused as not-ready, or whose retry was skipped for lack of time.
-func notReadyResult() notify.SendResult {
-	return notify.SendResult{Outcome: notify.OutcomeTransient, Exit: 4, Category: "not_ready"}
+func notReadyResult() SendResult {
+	return SendResult{Outcome: OutcomeTransient, Exit: 4, Category: "not_ready"}
 }
 
 // isNotReady reports whether the run was refused as not-ready: exit 4
@@ -243,7 +285,7 @@ func statusWord(data []byte) string {
 }
 
 // paneIDKey is the environment variable the backend uses to identify
-// the sending pane. A notification is sent by Nau, not by a pane, so
+// the sending pane. A message is sent by Nau, not by a pane, so
 // the send child never receives it: the backend must not attribute the
 // message to the pane that fired the hook or that runs the serve, and
 // must not refuse it as a worker report when that pane is a worker.

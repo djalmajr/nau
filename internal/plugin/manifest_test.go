@@ -127,7 +127,6 @@ func TestManifest(t *testing.T) {
 		"startup sync":             {"nau", "plugin", "startup"},
 		"events workspace-created": {"nau", "plugin", "event"},
 		"events workspace-closed":  {"nau", "plugin", "event"},
-		"events agent-status":      {"nau", "plugin", "event"},
 		"actions status":           {"nau", "plugin", "bridge", "status"},
 		"actions sync":             {"nau", "plugin", "bridge", "sync"},
 	}

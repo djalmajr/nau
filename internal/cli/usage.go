@@ -37,23 +37,6 @@ commands:
                                     holds and priorities, retained folders (a record, never
                                     a permission to delete) and node facts
                                     (every jobs form takes [--server <url>])
-  a2a serve [--listen <host:port>] [--db <path>] [--deliver-interval <seconds>]
-                                    run the A2A agent (HTTP+JSON, loopback only): accept
-                                    messages for the project owner and deliver notices
-  a2a card|get|cancel --server <url> [--task <id>]
-                                    A2A client: agent card, task state, cancel a task
-  a2a send --server <url> --session <id> --epoch <n> --seq <n> [--project <org/repo>]
-                        [--job <id>] [--task <id> --context <id>] [--message-id <id>]
-                        (<text>|-)
-                                    A2A client: send a message (new task or continuation)
-  a2a inbox [--db <path>] [--project <org/repo>] [--state <state>]
-  a2a show --task <id> [--db <path>]
-                                    list and read the A2A tasks of this machine (read-only)
-  a2a retry --task <id> --delivery <id> [--db <path>]
-                                    re-queue once an uncertain or exhausted A2A delivery
-  a2a reply --task <id> --answer|--ask|--decline [--decision-id <id>] [--db <path>]
-                        (<text>|-)
-                                    record the owner decision on a task awaiting it
   wake                              read one job event on stdin, record it in the outbox and
                                     attempt one push
   sync [--job <id>] [--push-only]   sync tracked job events and push pending records
@@ -67,49 +50,20 @@ commands:
   auth login|status|logout          manage the per-user dispatcher API key
   config get|set|list               manage the machine configuration
                                     set [--if-automatic] <key> <value>
-  doctor                            check the bridge prerequisites and uncertain A2A deliveries
+  doctor                            check the bridge prerequisites
   capabilities --json               print the bridge capability line
   version                           print the version
   help                              print this usage
   plugin startup|event|bridge       Herdr plugin entry points
-  notify register owner --projeto <org/repo> --to <ref> | orchestrator --job <id>
-                        --to <ref> | coordinator --to <ref> | watch --pane <ws:pane>
-                        [--job <id>] [--projeto <org/repo>] | workspace
-                        --workspace <ws> [--job <id>] [--projeto <org/repo>]
-                                    register notification recipients and sources
-  notify unregister owner --projeto <org/repo> | orchestrator --job <id> |
-                        coordinator | watch --pane <ws:pane> | workspace --workspace <ws>
-                                    unregister notification recipients and sources
-  notify list                   show the registrations and the notification,
-                                    delivery and pending counts (read-only)
-  notify status [--id <nid>]    show the last 50 notifications, or exactly one by
-                                    id (read-only)
-  notify deliver [--timeout <ms>]
-                                project new job events and deliver the due
-                                    notifications
-  notify ingest agent-status|workspace
-                                ingest a Herdr agent status or workspace event from stdin
-                                    (64 KiB cap)
-  notify raise --class cross_project|stuck [--projeto <org/repo>] [--job <id>]
-                                [--id <raise-id>]
-                                    raise an explicit cross-project or stuck
-                                    notification
-  notify ack <nid> --role owner|orchestrator|coordinator
-                                    acknowledge a delivered notification
-  notify retry <nid> --role owner|orchestrator|coordinator
-                                    re-queue once an uncertain or exhausted delivery
 
 exit codes:
   0   success (forwarded commands: whatever soho returned)
   2   bad usage, input limit exceeded, unknown config key, internal job
-      subcommand refused, registry usage or field rejected (serve, jobs),
-      A2A request or decision refused (a2a)
+      subcommand refused, registry usage or field rejected (serve, jobs)
   3   unknown job id in %s bookkeeping (sync --job) and unknown
-      notification id (notify status --id, notify ack, notify retry), unknown
-      claim, policy or folder (jobs), unknown A2A task (a2a)
+      claim, policy or folder (jobs)
   4   soho not found or not runnable; no eligible machine available
-      (route); registry unreachable or unavailable (serve, jobs); A2A
-      server unreachable or database unavailable (a2a)
+      (route); registry unreachable or unavailable (serve, jobs)
   40  no API key configured (push required)
   41  API key rejected by the dispatcher (401/403)
   42  dispatcher unreachable or retries exhausted; records stay pending

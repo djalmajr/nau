@@ -46,20 +46,6 @@ job_wake_cmd=nau wake
 
 With this set, every job event that wakes the dispatcher is also recorded in the outbox as soon as it happens. The backend passes `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`; `nau wake` reads only these variables.
 
-## Register notification recipients (optional)
-
-Native notifications reach only explicitly registered recipients; until the first `notify register`, no notification file is written. Register the project owner, the job orchestrator, the machine coordinator and the Herdr panes to watch:
-
-```text
-nau notify register owner --projeto <org>/<repo> --to <ref>
-nau notify register orchestrator --job <id> --to <ref>
-nau notify register coordinator --to <ref>
-nau notify register watch --pane <ws:pane> --job <id>
-nau notify register workspace --workspace <ws> --job <id>
-```
-
-`<ref>` is a `soho send` reference `<machine>/<ws>:<pane>` or a local agent name; it is validated, never guessed. `notify list` and `notify status` are read-only; `notify deliver`, `notify ingest agent-status|workspace`, `notify raise`, `notify ack` and `notify retry` write the ledger and are refused under `HERDR_HERMES_NOWRITE=1` with exit 2.
-
 ## Dispatcher host (optional)
 
 The host the dispatcher uses to reach the fleet chooses machines with `nau route`. List the fleet in priority order with saved Herdr machine labels (`local` is the reserved label for the Herdr server of the host that runs `route`); a dispatch-only host that must never run jobs is simply not listed in the fleet:
