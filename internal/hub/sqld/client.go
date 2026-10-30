@@ -335,7 +335,13 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("sqld: %v", err)
+		// The transport error can quote a malformed header line from the
+		// server or the configured URL: only a fixed text is shown, and
+		// the cause stays reachable through errors.Is and errors.As.
+		if ctx.Err() != nil {
+			return nil, opaqueError{"sqld: the request was canceled or timed out", err}
+		}
+		return nil, opaqueError{"sqld: the request failed", err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -345,7 +351,8 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
 	if err != nil {
-		return nil, fmt.Errorf("sqld: read response: %v", err)
+		// A read error can quote a malformed trailer from the server.
+		return nil, opaqueError{"sqld: the response could not be read", err}
 	}
 	if len(raw) > maxResponse {
 		return nil, fmt.Errorf("sqld: response larger than %d bytes", maxResponse)
@@ -446,3 +453,14 @@ func decodeValue(wv wireValue) (store.Value, error) {
 		return nil, errors.New("sqld: unknown value type")
 	}
 }
+
+// opaqueError shows a fixed local text and keeps the cause only for
+// errors.Is and errors.As: the cause may quote what the server sent.
+type opaqueError struct {
+	msg   string
+	cause error
+}
+
+func (e opaqueError) Error() string { return e.msg }
+
+func (e opaqueError) Unwrap() error { return e.cause }

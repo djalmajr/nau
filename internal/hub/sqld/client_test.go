@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -760,6 +761,69 @@ func TestErrorsCarryNoServerText(t *testing.T) {
 			f := newFakeServer(t, func(req *requestWire) []itemWire { return c.items })
 			cl := f.clientFor(t, tok)
 			_, err := cl.Execute(context.Background(), stmtForTest("SELECT 1", nil))
+			if err == nil {
+				t.Fatal("Execute: want an error")
+			}
+			if strings.Contains(err.Error(), tok) {
+				t.Fatalf("the token leaked into the error: %v", err)
+			}
+		})
+	}
+}
+
+// rawServer answers every connection with the given raw HTTP response,
+// for the malformed answers httptest cannot produce.
+func rawServer(t *testing.T, response string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 64<<10)
+				_, _ = c.Read(buf)
+				_, _ = io.WriteString(c, response)
+			}(conn)
+		}
+	}()
+	return "http://" + ln.Addr().String()
+}
+
+// TestTransportAndReadErrorsCarryNoServerText: a malformed header line or
+// trailer that echoes the token, and a URL whose user part is the token,
+// never reach the error text.
+func TestTransportAndReadErrorsCarryNoServerText(t *testing.T) {
+	tok := sentinelToken
+	cases := []struct {
+		name string
+		url  func(t *testing.T) string
+	}{
+		{"header line", func(t *testing.T) string {
+			return rawServer(t, "HTTP/1.1 200 OK\r\nBearer "+tok+"\r\n\r\n")
+		}},
+		{"trailer", func(t *testing.T) string {
+			return rawServer(t, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nBearer "+tok+"\r\n\r\n")
+		}},
+		{"user in the url", func(t *testing.T) string {
+			return "http://" + tok + "@127.0.0.1:1"
+		}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			cl, err := New(c.url(t), tok)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			_, err = cl.Execute(context.Background(), stmtForTest("SELECT 1", nil))
 			if err == nil {
 				t.Fatal("Execute: want an error")
 			}
