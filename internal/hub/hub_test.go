@@ -49,13 +49,15 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 		return nil, f.retainErr
 	}
 	var results []store.Result
-	for _, s := range stmts {
+	for i, s := range stmts {
 		switch {
 		case strings.HasPrefix(s.SQL, "DELETE FROM agent_history WHERE at_ms <"),
 			strings.HasPrefix(s.SQL, "DELETE FROM working_hourly WHERE hour_ms <"):
 			f.retainCutoffs = append(f.retainCutoffs, s.Args...)
 		default:
-			return nil, errors.New("fakeStore: Batch not implemented for " + s.SQL)
+			// The statement the store does not model: a statement
+			// failure with its number, like the real store reports.
+			return nil, &store.StatementError{Index: i + 1}
 		}
 		results = append(results, store.Result{Affected: 1})
 	}

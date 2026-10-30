@@ -52,29 +52,31 @@ func (f *fakeDB) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.batchLogs = append(f.batchLogs, stmts)
-	// Shadow pass: if any statement fails, nothing is applied.
-	for _, s := range stmts {
+	// Shadow pass: if any statement fails, nothing is applied; the
+	// failure is reported like the real store: a StatementError with
+	// the statement number.
+	for i, s := range stmts {
 		if f.failOn != "" && strings.Contains(s.SQL, f.failOn) {
-			return nil, errors.New("fakeDB: statement refused: " + f.failOn)
+			return nil, &store.StatementError{Index: i + 1}
 		}
 	}
 	var results []store.Result
-	for _, s := range stmts {
+	for i, s := range stmts {
 		if strings.Contains(s.SQL, "CREATE TABLE") {
 			name := createTableName(s.SQL)
 			f.tables[name] = true
 		}
 		if strings.Contains(s.SQL, "INSERT INTO schema_migrations") {
 			if len(s.Args) != 2 {
-				return nil, errors.New("fakeDB: the registration needs two arguments")
+				return nil, &store.StatementError{Index: i + 1}
 			}
 			v, ok := s.Args[0].(int64)
 			if !ok {
-				return nil, errors.New("fakeDB: the registration version is not an int64")
+				return nil, &store.StatementError{Index: i + 1}
 			}
 			ms, ok := s.Args[1].(int64)
 			if !ok || ms <= 0 {
-				return nil, errors.New("fakeDB: the registration timestamp is not a positive int64")
+				return nil, &store.StatementError{Index: i + 1}
 			}
 			f.versions = append(f.versions, v)
 		}

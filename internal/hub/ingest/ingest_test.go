@@ -146,6 +146,36 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 	if f.batchErr != nil {
 		return nil, f.batchErr
 	}
+	// The batch is atomic: the first statement that fails is found
+	// before anything is applied, and the failure is reported like
+	// the real store: a StatementError with the statement number.
+	for i, s := range stmts {
+		switch {
+		case s.SQL == sqlUpdateSnapshot:
+			// The guarded write fails when the row is not at the
+			// version the call read.
+			mid, _ := s.Args[3].(string)
+			last, _ := s.Args[4].(int64)
+			cur, ok := f.snapshots[mid]
+			if !ok || cur.generatedMS != last {
+				return nil, &store.StatementError{Index: i + 1}
+			}
+		case s.SQL == sqlInsertSnapshot:
+			// The guarded write of a new machine fails when a
+			// snapshot appeared.
+			mid, _ := s.Args[0].(string)
+			if _, ok := f.snapshots[mid]; ok {
+				return nil, &store.StatementError{Index: i + 1}
+			}
+		case s.SQL == sqlRetainHistory, s.SQL == sqlRetainHourly,
+			s.SQL == sqlGuardCheck, s.SQL == sqlGuardClear:
+			// the retention deletes and the guard pair never fail
+		case f.dmlIsKnown(s):
+			// the modeled DML statements never fail
+		default:
+			return nil, &store.StatementError{Index: i + 1}
+		}
+	}
 	var results []store.Result
 	for _, s := range stmts {
 		switch {
@@ -173,33 +203,33 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 				}
 			}
 		case s.SQL == sqlUpdateSnapshot:
-			// The guarded write: the row exists and the version is
-			// still the one the call read; the guard fails otherwise
-			// and the batch aborts with nothing applied.
-			mid, _ := s.Args[3].(string)
-			last, _ := s.Args[4].(int64)
-			cur, ok := f.snapshots[mid]
-			if !ok || cur.generatedMS != last {
-				return nil, errors.New("fakeStore: the guard failed: the version moved")
-			}
-			f.snapshots[mid] = fakeSnapshot{s.Args[0].(int64), s.Args[1].(int64), s.Args[2].(string)}
+			// The guarded write, checked in the shadow pass: the row
+			// is at the version the call read.
+			f.snapshots[s.Args[3].(string)] = fakeSnapshot{s.Args[0].(int64), s.Args[1].(int64), s.Args[2].(string)}
 		case s.SQL == sqlInsertSnapshot:
-			mid, _ := s.Args[0].(string)
-			if _, ok := f.snapshots[mid]; ok {
-				return nil, errors.New("fakeStore: the guard failed: a snapshot appeared")
-			}
-			f.snapshots[mid] = fakeSnapshot{s.Args[1].(int64), s.Args[2].(int64), s.Args[3].(string)}
+			// The guarded write of a new machine, checked in the
+			// shadow pass: no snapshot exists.
+			f.snapshots[s.Args[0].(string)] = fakeSnapshot{s.Args[1].(int64), s.Args[2].(int64), s.Args[3].(string)}
 		case s.SQL == sqlGuardCheck || s.SQL == sqlGuardClear:
 			// The guard check and clear are modeled by the guarded
 			// writes above: reaching them means the check passed.
 		case f.applyDML(s):
 			// the batch statement applied per the store semantics
-		default:
-			return nil, errors.New("fakeStore: unexpected batch statement " + s.SQL)
 		}
 		results = append(results, store.Result{Affected: 1})
 	}
 	return results, nil
+}
+
+// dmlIsKnown reports whether the statement is one the store models,
+// without applying it: the shadow pass of the atomic batch uses it
+// before anything is applied.
+func (f *fakeStore) dmlIsKnown(s store.Stmt) bool {
+	switch s.SQL {
+	case sqlDeleteAgents, sqlInsertAgent, sqlInsertHistory, sqlUpsertHidden, sqlUpsertHourly:
+		return true
+	}
+	return false
 }
 
 // applyDML applies one DML statement with the store semantics. The
@@ -806,6 +836,142 @@ func TestApplyConcurrentKeepsTheNewer(t *testing.T) {
 	}
 	if rows != 2 {
 		t.Fatalf("history rows of the agent = %d, want 2 (the seed and the newer)", rows)
+	}
+}
+
+// movingWriter fails the wrapped batch on a statement after the
+// guard and commits a newer version of the machine in the window
+// surrounding the failed batch.
+type movingWriter struct {
+	store.Store
+	t       *testing.T
+	machine string
+	base    int64
+	calls   int
+}
+
+func (m *movingWriter) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
+	m.calls++
+	// The unrelated writer commits in the window surrounding the
+	// failed batch.
+	bad := append(append([]store.Stmt{}, stmts...), store.Stmt{SQL: "INSERT INTO a_missing_table VALUES (1)"})
+	res, err := m.Store.Batch(ctx, bad)
+	if err != nil {
+		other := mkInv(m.base+int64(m.calls)*1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil)))
+		if r, aerr := Apply(ctx, m.Store, m.machine, other, other.GeneratedMS+10); aerr != nil || !r.Applied {
+			m.t.Fatalf("the other writer must commit in the window: applied=%v err=%v", r.Applied, aerr)
+		}
+	}
+	return res, err
+}
+
+// TestApplyKeepsTheOriginalErrorWhenTheGuardIsIntact: a common
+// failure of a statement after the guard, with another apply moving
+// the version in the window, comes back as the original error: no
+// retry, no ErrConflict, and the version the other writer committed
+// is intact.
+func TestApplyKeepsTheOriginalErrorWhenTheGuardIsIntact(t *testing.T) {
+	db := newFakeStore()
+	ctx := context.Background()
+	const g int64 = t0
+	const m = "m1"
+	if r, err := Apply(ctx, db, m, mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed: applied=%v err=%v", r.Applied, err)
+	}
+	w := &movingWriter{Store: db, t: t, machine: m, base: g}
+	bigger := mkInv(g+100000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil)))
+	res, err := Apply(ctx, w, m, bigger, g+100010)
+	if res.Applied {
+		t.Fatal("the failed batch applied")
+	}
+	if err == nil {
+		t.Fatal("the store error must come back")
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("a common error after the guard must not become a conflict: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("batch calls = %d, want 1 (no retry for a common error)", w.calls)
+	}
+	var se *store.StatementError
+	if !errors.As(err, &se) {
+		t.Fatalf("the original typed error is not preserved: %v", err)
+	}
+	if se.Index != 9 {
+		t.Fatalf("statement index = %d, want 9 (the common failure after the guard)", se.Index)
+	}
+	if !strings.Contains(err.Error(), "9: server error") {
+		t.Fatalf("the original error text is not preserved: %v", err)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if s := db.snapshots[m]; s.generatedMS != g+1000 {
+		t.Fatalf("snapshot generated_ms = %d, want %d (the other writer)", s.generatedMS, g+1000)
+	}
+	// The failed batch changed nothing of the machine state.
+	if a := db.agents[m]["w1:p1"]; a.state != "idle" {
+		t.Fatalf("agent state = %q, want idle (the other writer)", a.state)
+	}
+}
+
+// alwaysMoving commits a newer version of the machine before
+// every batch the wrapped apply runs, so the guard fails on
+// every attempt.
+type alwaysMoving struct {
+	store.Store
+	t       *testing.T
+	machine string
+	next    int64
+	calls   int
+}
+
+func (a *alwaysMoving) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
+	a.calls++
+	other := mkInv(a.next, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil)))
+	if r, err := Apply(ctx, a.Store, a.machine, other, other.GeneratedMS+10); err != nil || !r.Applied {
+		a.t.Fatalf("the other writer must commit in the window: applied=%v err=%v", r.Applied, err)
+	}
+	a.next += 1000
+	_, err := a.Store.Batch(ctx, stmts)
+	if err == nil {
+		a.t.Fatal("the guard must fail: the version moved")
+	}
+	return nil, err
+}
+
+// TestApplyRetriesTheGuardFailureAndConflicts: the guard failing on
+// every attempt is the conflict: Apply re-reads and retries, and
+// after the last attempt returns ErrConflict.
+func TestApplyRetriesTheGuardFailureAndConflicts(t *testing.T) {
+	db := newFakeStore()
+	ctx := context.Background()
+	const g int64 = t0
+	const m = "m1"
+	if r, err := Apply(ctx, db, m, mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed: applied=%v err=%v", r.Applied, err)
+	}
+	w := &alwaysMoving{Store: db, t: t, machine: m, next: g + 1000}
+	bigger := mkInv(g+100000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil)))
+	res, err := Apply(ctx, w, m, bigger, g+100010)
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict after the guard fails three times", err)
+	}
+	if res.Applied {
+		t.Fatal("the conflicting apply applied")
+	}
+	if w.calls != 3 {
+		t.Fatalf("batch calls = %d, want 3 (one per attempt)", w.calls)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if s := db.snapshots[m]; s.generatedMS != g+3000 {
+		t.Fatalf("snapshot generated_ms = %d, want %d (the last writer)", s.generatedMS, g+3000)
 	}
 }
 

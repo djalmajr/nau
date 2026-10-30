@@ -42,6 +42,15 @@ const (
 	// the statement stay at most this number, far below the variable
 	// limit of the database.
 	maxStatementArgs = 500
+	// guardWriteIndex and guardCheckIndex are the statement numbers,
+	// one-based in the apply batch, of the guarded snapshot write and
+	// of the guard statement: the failures of the two mark the
+	// conflict window (a newer inventory committed while the batch
+	// ran). The write failing on its own means another writer landed
+	// first on a new machine; the check failing means the write
+	// changed no row.
+	guardWriteIndex = 1
+	guardCheckIndex = 2
 )
 
 // onlineWindowMS is the online window of the queries: a machine is
@@ -244,19 +253,21 @@ const (
 // guarded step changed no row. The check and the writes therefore
 // count together, and an older inventory never lands on top of a
 // newer one even when two applies race between the read and the
-// write. When the guard fails because a newer inventory committed in
-// that window, Apply re-reads and retries, up to maxApplyAttempts
-// attempts; after the last one it returns ErrConflict. An inventory
-// not greater than the last applied one of the machine changes
-// nothing and returns Applied: false, which makes the repeat
-// idempotent and ignores the out-of-order ones.
+// write. When the guarded write or the guard fails because a newer
+// inventory committed in that window, Apply re-reads and retries, up
+// to maxApplyAttempts attempts; after the last one it returns
+// ErrConflict. A failure of any other statement is a store error and
+// comes back as is on the first attempt, with no retry and no
+// ErrConflict. An inventory not greater than the last applied one of
+// the machine changes nothing and returns Applied: false, which makes
+// the repeat idempotent and ignores the out-of-order ones.
 func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.Inventory, receivedMS int64) (Result, error) {
 	for attempt := 0; attempt < maxApplyAttempts; attempt++ {
 		// The order: read the last applied generated_ms of the
 		// machine and refuse the non-newer inventories.
 		res, err := st.Execute(ctx, store.Stmt{SQL: sqlLastGenerated, Args: []store.Value{machineID}})
 		if err != nil {
-			return Result{}, fmt.Errorf("ingest: read the snapshot: %v", err)
+			return Result{}, fmt.Errorf("ingest: read the snapshot: %w", err)
 		}
 		last, hasLast := int64(0), false
 		if len(res.Rows) > 0 {
@@ -272,7 +283,7 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 		// The history diff needs the current agents of the machine.
 		res, err = st.Execute(ctx, store.Stmt{SQL: sqlExistingAgents, Args: []store.Value{machineID}})
 		if err != nil {
-			return Result{}, fmt.Errorf("ingest: read the current agents: %v", err)
+			return Result{}, fmt.Errorf("ingest: read the current agents: %w", err)
 		}
 		existing := make(map[string]existingAgent, len(res.Rows))
 		for _, row := range res.Rows {
@@ -330,12 +341,18 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 			store.Stmt{SQL: sqlUpsertHourly, Args: []store.Value{machineID, hourOf(inv.GeneratedMS), working}},
 		)
 		if _, err := st.Batch(ctx, stmts); err != nil {
-			// The batch failed. When the version the call read moved,
-			// a newer inventory committed in the window: the conflict
-			// retries. Anything else is a store error, returned as is.
+			// The batch failed. Only the guarded write or the guard
+			// failing is the conflict signature: a newer inventory
+			// committed in the window, and the conflict re-reads and
+			// retries. Any other failure is a store error, returned as
+			// is on the first attempt, with no retry and no
+			// ErrConflict.
+			if !isGuardFailure(err) {
+				return Result{}, fmt.Errorf("ingest: apply the inventory: %w", err)
+			}
 			cur, cerr := st.Execute(ctx, store.Stmt{SQL: sqlLastGenerated, Args: []store.Value{machineID}})
 			if cerr != nil {
-				return Result{}, fmt.Errorf("ingest: apply the inventory: %v", err)
+				return Result{}, fmt.Errorf("ingest: apply the inventory: %w", err)
 			}
 			moved := false
 			if hasLast {
@@ -348,7 +365,7 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 				moved = true
 			}
 			if !moved {
-				return Result{}, fmt.Errorf("ingest: apply the inventory: %v", err)
+				return Result{}, fmt.Errorf("ingest: apply the inventory: %w", err)
 			}
 			if attempt == maxApplyAttempts-1 {
 				return Result{}, ErrConflict
@@ -358,6 +375,18 @@ func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.
 		return Result{Applied: true}, nil
 	}
 	return Result{}, ErrConflict
+}
+
+// isGuardFailure reports whether the batch failure came from the
+// guarded write or from the guard statement: the only failures that
+// mean a newer inventory committed while the batch ran. Any other
+// failure is a store error, never a conflict.
+func isGuardFailure(err error) bool {
+	var se *store.StatementError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return se.Index == guardWriteIndex || se.Index == guardCheckIndex
 }
 
 // existingAgent is the diff entry of one current agent.

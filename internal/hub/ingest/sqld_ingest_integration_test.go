@@ -5,6 +5,7 @@ package ingest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -386,5 +387,117 @@ func TestSQLDLargeMachineList(t *testing.T) {
 	}
 	if len(ov.TopProjects) != 1 || ov.TopProjects[0].Project != "acme/web" || ov.TopProjects[0].Agents != n || ov.TopProjects[0].Working != n {
 		t.Fatalf("top_projects = %+v, want the single project with %d agents", ov.TopProjects, n)
+	}
+}
+
+// movingErrorWriter fails the wrapped batch on a statement after the
+// guard and commits a newer version of the machine in the window
+// surrounding the failed batch, against the real sqld.
+type movingErrorWriter struct {
+	store.Store
+	machine string
+	base    int64
+	calls   int
+}
+
+func (m *movingErrorWriter) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
+	m.calls++
+	// The unrelated writer commits in the window surrounding the
+	// failed batch.
+	bad := append(append([]store.Stmt{}, stmts...), store.Stmt{SQL: "INSERT INTO a_missing_table VALUES (1)"})
+	res, err := m.Store.Batch(ctx, bad)
+	if err != nil {
+		other := mkInv(m.base+int64(m.calls)*1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil)))
+		if r, aerr := Apply(ctx, m.Store, m.machine, other, other.GeneratedMS+10); aerr != nil || !r.Applied {
+			return nil, fmt.Errorf("the other writer must commit in the window: applied=%v err=%v", r.Applied, aerr)
+		}
+	}
+	return res, err
+}
+
+// alwaysMovingSQL commits a newer version of the machine before
+// every batch the wrapped apply runs, so the guard fails on every
+// attempt, against the real sqld.
+type alwaysMovingSQL struct {
+	store.Store
+	machine string
+	next    int64
+	calls   int
+}
+
+func (a *alwaysMovingSQL) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
+	a.calls++
+	other := mkInv(a.next, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil)))
+	if r, err := Apply(ctx, a.Store, a.machine, other, other.GeneratedMS+10); err != nil || !r.Applied {
+		return nil, fmt.Errorf("the other writer must commit in the window: applied=%v err=%v", r.Applied, err)
+	}
+	a.next += 1000
+	return a.Store.Batch(ctx, stmts)
+}
+
+// TestSQLDKeepsTheOriginalErrorWhenTheGuardIsIntact: the
+// classification against the real sqld. A common failure of a
+// statement after the guard, with another apply moving the version in
+// the window, comes back as the original error: no retry, no
+// ErrConflict. The guard failing on every attempt still retries and
+// conflicts on the third.
+func TestSQLDKeepsTheOriginalErrorWhenTheGuardIsIntact(t *testing.T) {
+	st := realIngestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const g int64 = 1793376000000
+
+	// The moving error: the common failure after the guard, with
+	// another apply moving the version in the window.
+	if r, err := Apply(ctx, st, "m7", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed m7: applied=%v err=%v", r.Applied, err)
+	}
+	w := &movingErrorWriter{Store: st, machine: "m7", base: g}
+	bigger := mkInv(g+100000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil)))
+	res, err := Apply(ctx, w, "m7", bigger, g+100010)
+	if res.Applied {
+		t.Fatal("the failed batch applied")
+	}
+	if err == nil {
+		t.Fatal("the store error must come back")
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("a common error after the guard must not become a conflict: %v", err)
+	}
+	if w.calls != 1 {
+		t.Fatalf("batch calls = %d, want 1 (no retry for a common error)", w.calls)
+	}
+	var se *store.StatementError
+	if !errors.As(err, &se) {
+		t.Fatalf("the original typed error is not preserved: %v", err)
+	}
+
+	// The conflict: the guard failing on every attempt retries and
+	// conflicts on the third.
+	if r, err := Apply(ctx, st, "m8", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed m8: applied=%v err=%v", r.Applied, err)
+	}
+	am := &alwaysMovingSQL{Store: st, machine: "m8", next: g + 1000}
+	res2, err2 := Apply(ctx, am, "m8", mkInv(g+200000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil))), g+200010)
+	if !errors.Is(err2, ErrConflict) {
+		t.Fatalf("err = %v, want ErrConflict after the guard fails three times", err2)
+	}
+	if res2.Applied {
+		t.Fatal("the conflicting apply applied")
+	}
+	if am.calls != 3 {
+		t.Fatalf("batch calls = %d, want 3 (one per attempt)", am.calls)
+	}
+
+	// The guard table is empty at the end.
+	res3, err := st.Execute(ctx, store.Stmt{SQL: "SELECT COUNT(*) FROM ingest_guard"})
+	if err != nil || len(res3.Rows) != 1 || res3.Rows[0][0] != int64(0) {
+		t.Fatalf("ingest_guard rows = %v, want 0; err=%v", res3.Rows, err)
 	}
 }
