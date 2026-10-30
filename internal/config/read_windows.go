@@ -1,4 +1,4 @@
-package outbox
+package config
 
 import (
 	"io"
@@ -7,7 +7,7 @@ import (
 )
 
 // ReadReplacedFile reads path the way a lock-free reader must on Windows:
-// the atomic replace (WriteFileAtomic's rename) holds a DELETE-access
+// the atomic replace (writeFileAtomic's rename) holds a DELETE-access
 // handle on the file for a moment, and an open without FILE_SHARE_DELETE
 // fails then with a sharing violation. The open here admits that handle —
 // and nothing else changes: other holders (an exclusive one, share mode 0)
@@ -15,7 +15,7 @@ import (
 // "open <path>: <message>" text os.ReadFile produces, so os.IsNotExist
 // and the existing error wrapping keep working. No reparse-point flag: the
 // read keeps following links exactly as os.ReadFile does today.
-func ReadReplacedFile(path string) ([]byte, error) {
+func readReplacedFile(path string) ([]byte, error) {
 	name, err := syscall.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}

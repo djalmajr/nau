@@ -8,20 +8,15 @@ import (
 	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
-// TestMain lets the re-executed test binary act as the fake soho
-// or as the pty helper of the terminal echo tests.
+// TestMain lets the re-executed test binary act as the fake soho.
 func TestMain(m *testing.M) {
 	fakesoho.Main()
-	if testMainHook != nil {
-		testMainHook()
-	}
-	// Fail closed against a real soho: after the re-executed roles
-	// above (which exit before this point and are unaffected), the test
-	// process PATH points at an empty directory, so the default
-	// soho name never resolves to a binary on the machine — every
-	// test that needs soho passes an absolute fake path — and
-	// local runs behave like CI. The directory is removed after the run.
-	emptyPath, err := os.MkdirTemp("", "herdr-hermes-test-path-")
+	// Fail closed against a real soho: the test process PATH points at an
+	// empty directory, so the default soho name never resolves to a binary
+	// on the machine — every test that needs soho passes an absolute fake
+	// path — and local runs behave like CI. The directory is removed after
+	// the run.
+	emptyPath, err := os.MkdirTemp("", "nau-test-path-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cli test: create empty PATH dir: %v\n", err)
 		os.Exit(1)
@@ -34,7 +29,3 @@ func TestMain(m *testing.M) {
 	_ = os.RemoveAll(emptyPath)
 	os.Exit(code)
 }
-
-// testMainHook is set by platform-specific test files that re-execute the
-// test binary as a helper (the pty helper of the terminal echo tests).
-var testMainHook func()

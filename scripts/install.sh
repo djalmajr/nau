@@ -45,7 +45,7 @@ pin_backend() {
         return
         ;;
     esac
-    echo "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend" >&2
+    echo "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic" >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -140,8 +140,7 @@ esac
 
 echo "nau install: installed" >&2
 "$NAU" version
-# doctor is informational: its non-zero exit (for example a missing
-# backend) must not fail the install.
+# doctor is informational: its output must not fail the install.
 if ! "$NAU" doctor; then
     echo "nau install: doctor reported a problem (informational); see the output above" >&2
 fi

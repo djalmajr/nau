@@ -9,9 +9,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/djalmajr/nau/internal/outbox"
-	"github.com/djalmajr/nau/internal/testutil/fakesoho"
 )
 
 // runCLI runs Run with a hermetic env over a fresh ConfigDir and returns
@@ -42,8 +39,7 @@ func getenvFor(nowrite bool) func(string) string {
 }
 
 // assertDirEmpty requires the configuration directory to hold no files at
-// all (read-only commands must not create the config dir, state dir or any
-// other file).
+// all (read-only commands must not create the config dir or any other file).
 func assertDirEmpty(t *testing.T, dir string) {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -60,11 +56,10 @@ func assertDirEmpty(t *testing.T, dir string) {
 }
 
 var allCommandNames = []string{
-	"job", "wake", "sync", "push", "outbox", "session", "decision", "auth",
-	"config", "doctor", "capabilities", "version", "help",
+	"config", "doctor", "version", "help",
 }
 
-var allExitCodes = []string{"0", "2", "3", "4", "40", "41", "42", "43"}
+var allExitCodes = []string{"0", "2", "4"}
 
 func TestHelp(t *testing.T) {
 	stdout, stderr, exit := runCLI(t, t.TempDir(), false, "help")
@@ -107,20 +102,12 @@ func TestUnknownCommand(t *testing.T) {
 	if exit != 2 || !strings.Contains(stderr, "commands:") || !strings.Contains(stdout, `"status":"2"`) {
 		t.Errorf("bad flag: exit %d, stderr %q, stdout %q", exit, stderr, stdout)
 	}
-}
-
-func TestCapabilities(t *testing.T) {
-	stdout, _, exit := runCLI(t, t.TempDir(), false, "capabilities", "--json")
-	if exit != 0 {
-		t.Fatalf("capabilities exit = %d", exit)
-	}
-	if stdout != "{\"schema\":1,\"bridge\":1,\"outbox\":1,\"push\":1}\n" {
-		t.Errorf("capabilities stdout = %q", stdout)
-	}
-	// Without --json: exit 2.
-	stdout, stderr, exit := runCLI(t, t.TempDir(), false, "capabilities")
-	if exit != 2 || !strings.Contains(stderr, "commands:") || !strings.Contains(stdout, `"status":"2"`) {
-		t.Errorf("capabilities without --json: exit %d, stderr %q, stdout %q", exit, stderr, stdout)
+	// A removed bridge command is an unknown command.
+	for _, removed := range []string{"job", "sync", "wake", "push", "outbox", "auth", "session", "decision", "gate", "route", "capabilities"} {
+		stdout, _, exit = runCLI(t, t.TempDir(), false, removed)
+		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) || !strings.Contains(stdout, removed) {
+			t.Errorf("removed command %s: exit %d, stdout %q", removed, exit, stdout)
+		}
 	}
 }
 
@@ -150,110 +137,54 @@ func TestNowrite(t *testing.T) {
 		args   []string
 		stdout string
 	}{
-		{[]string{"outbox"}, "{\"outbox\":\"fim\",\"ultimo_seq\":0,\"entregue_seq\":0}\n"},
-		{[]string{"outbox", "--since", "0", "--wait", "0"}, "{\"outbox\":\"fim\",\"ultimo_seq\":0,\"entregue_seq\":0}\n"},
 		{[]string{"config", "get", "machine_label"}, "{\"key\":\"machine_label\",\"value\":\"\"}\n"},
-		{[]string{"capabilities", "--json"}, "{\"schema\":1,\"bridge\":1,\"outbox\":1,\"push\":1}\n"},
 		{[]string{"help"}, ""},
 	} {
 		dir := t.TempDir()
 		stdout, _, exit := runCLI(t, dir, true, tc.args...)
 		if exit != 0 {
-			t.Fatalf("%v under NOWRITE: exit %d, stdout %q", tc.args, exit, stdout)
+			t.Fatalf("%v under NAU_NOWRITE: exit %d, stdout %q", tc.args, exit, stdout)
 		}
 		if tc.stdout != "" && stdout != tc.stdout {
 			t.Errorf("%v stdout = %q, want %q", tc.args, stdout, tc.stdout)
 		}
 		assertDirEmpty(t, dir)
 	}
-	// config list under NOWRITE: defaults, nothing written. The
+	// config list under NAU_NOWRITE: defaults, nothing written. The
 	// herdr_soho_bin value is the resolved effective one; the PATH is
 	// controlled so the resolution is deterministic.
 	dir := t.TempDir()
 	sohoDir := sohoPathDir(t)
 	t.Setenv("PATH", sohoDir)
 	stdout, _, exit := runCLI(t, dir, true, "config", "list")
-	if exit != 0 || !strings.Contains(stdout, `"herdr_soho_bin":"`+jsonText(filepath.Join(sohoDir, exeName("soho")))+`"`) || !strings.Contains(stdout, `"push_timeout_s":15`) {
-		t.Errorf("config list under NOWRITE: exit %d, stdout %q", exit, stdout)
+	if exit != 0 || !strings.Contains(stdout, `"herdr_soho_bin":"`+jsonText(filepath.Join(sohoDir, exeName("soho")))+`"`) {
+		t.Errorf("config list under NAU_NOWRITE: exit %d, stdout %q", exit, stdout)
 	}
 	assertDirEmpty(t, dir)
-	// version under NOWRITE: nothing written.
+	// version under NAU_NOWRITE: nothing written.
 	dir = t.TempDir()
 	_, _, exit = runCLI(t, dir, true, "version")
 	if exit != 0 {
-		t.Fatalf("version under NOWRITE: exit %d", exit)
+		t.Fatalf("version under NAU_NOWRITE: exit %d", exit)
 	}
 	assertDirEmpty(t, dir)
-	// The one writing command in this slice refuses before any side effect.
+	// The one writing command refuses before any side effect.
 	dir = t.TempDir()
 	stdout, _, exit = runCLI(t, dir, true, "config", "set", "machine_label", "x")
 	if exit != 2 {
-		t.Fatalf("config set under NOWRITE: exit %d, want 2", exit)
+		t.Fatalf("config set under NAU_NOWRITE: exit %d, want 2", exit)
 	}
-	if stdout != "{\"status\":\"nowrite\",\"motivo\":\"HERDR_HERMES_NOWRITE=1\"}\n" {
-		t.Errorf("config set under NOWRITE stdout = %q", stdout)
+	if stdout != "{\"status\":\"nowrite\",\"motivo\":\"NAU_NOWRITE=1\"}\n" {
+		t.Errorf("config set under NAU_NOWRITE stdout = %q", stdout)
 	}
 	assertDirEmpty(t, dir)
-	// Unknown command still exits 2 under NOWRITE.
+	// Unknown command still exits 2 under NAU_NOWRITE.
 	dir = t.TempDir()
 	_, _, exit = runCLI(t, dir, true, "frobnicate")
 	if exit != 2 {
-		t.Fatalf("unknown command under NOWRITE: exit %d, want 2", exit)
+		t.Fatalf("unknown command under NAU_NOWRITE: exit %d, want 2", exit)
 	}
 	assertDirEmpty(t, dir)
-
-	// Slice-4b read-only additions: doctor (fake soho, so it exits 0) and
-	// auth status work under NOWRITE and write nothing.
-	dir = t.TempDir()
-	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0), fakesoho.Rule{Argv: []string{"config"}, Code: 0})
-	setSohoConfig(t, dir, exe, "machine-a")
-	before := dirEntries(t, dir)
-	stdout, _, exit = runCLI(t, dir, true, "doctor")
-	if exit != 0 {
-		t.Fatalf("doctor under NOWRITE: exit %d, want 0 (stdout %q)", exit, stdout)
-	}
-	if !strings.Contains(stdout, `"machine_label":true`) || !strings.Contains(stdout, `"outbox":{"ultimo_seq":0`) {
-		t.Errorf("doctor under NOWRITE stdout = %q", stdout)
-	}
-	if after := dirEntries(t, dir); after != before {
-		t.Errorf("doctor under NOWRITE wrote files: before %q after %q", before, after)
-	}
-	dir = t.TempDir()
-	stdout, _, exit = runCLI(t, dir, true, "auth", "status")
-	if exit != 0 || stdout != `{"configured":false,"store":"file"}`+"\n" {
-		t.Fatalf("auth status under NOWRITE: exit %d, stdout %q", exit, stdout)
-	}
-	assertDirEmpty(t, dir)
-
-	// Every writing command refuses before any side effect (exit 2, the
-	// nowrite line, nothing written).
-	for _, args := range [][]string{
-		{"job", "start", "--id", "job-1", "--repo", "org/repo"},
-		{"job", "amend", "--id", "job-1"},
-		{"job", "send", "--id", "job-1"},
-		{"job", "ack", "--id", "job-1"},
-		{"job", "cancel", "--id", "job-1"},
-		{"job", "close", "--id", "job-1"},
-		{"wake"},
-		{"sync"},
-		{"push"},
-		{"session", "start", "--projeto", "org/repo"},
-		{"session", "update", "--projeto", "org/repo"},
-		{"session", "end", "--projeto", "org/repo"},
-		{"decision", "--projeto", "org/repo", "--motivo", "m", "--escopo", "global"},
-		{"auth", "login", "--key", "-"},
-		{"auth", "logout"},
-	} {
-		dir = t.TempDir()
-		stdout, _, exit = runCLI(t, dir, true, args...)
-		if exit != 2 {
-			t.Fatalf("%v under NOWRITE: exit %d, want 2 (stdout %q)", args, exit, stdout)
-		}
-		if stdout != "{\"status\":\"nowrite\",\"motivo\":\"HERDR_HERMES_NOWRITE=1\"}\n" {
-			t.Errorf("%v under NOWRITE stdout = %q", args, stdout)
-		}
-		assertDirEmpty(t, dir)
-	}
 }
 
 // dirEntries returns the sorted entry names of a dir (one comma-joined
@@ -269,51 +200,6 @@ func dirEntries(t *testing.T, dir string) string {
 		names = append(names, e.Name())
 	}
 	return strings.Join(names, ",")
-}
-
-// TestNowriteExistingStateCreatesNoFiles: with the state directory already
-// existing, the read-only commands under NOWRITE create no file anywhere
-// under the config dir. The fresh-dir cases cannot catch this: the
-// read-only store open fails before anything is touched.
-func TestNowriteExistingStateCreatesNoFiles(t *testing.T) {
-	exe, _ := installFakeSoho(t, capsRule(capsJSON, 0), fakesoho.Rule{Argv: []string{"config"}, Code: 0})
-	cases := []struct {
-		name  string
-		setup func(t *testing.T, dir string)
-		run   func(t *testing.T, dir string) int
-	}{
-		{
-			name:  "doctor",
-			setup: func(t *testing.T, dir string) { setSohoConfig(t, dir, exe, "machine-a") },
-			run:   func(t *testing.T, dir string) int { _, _, exit := runCLI(t, dir, true, "doctor"); return exit },
-		},
-		{
-			name: "outbox",
-			run:  func(t *testing.T, dir string) int { _, _, exit := runCLI(t, dir, true, "outbox"); return exit },
-		},
-		{
-			name: "auth status",
-			run:  func(t *testing.T, dir string) int { _, _, exit := runCLI(t, dir, true, "auth", "status"); return exit },
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(dir, "state"), 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if tc.setup != nil {
-				tc.setup(t, dir)
-			}
-			before := filesUnder(t, dir)
-			if exit := tc.run(t, dir); exit != 0 {
-				t.Fatalf("exit %d, want 0", exit)
-			}
-			if after := filesUnder(t, dir); after != before {
-				t.Fatalf("created files: before %q after %q", before, after)
-			}
-		})
-	}
 }
 
 // filesUnder lists every file under root as a sorted comma-joined relative
@@ -341,15 +227,14 @@ func filesUnder(t *testing.T, root string) string {
 
 // TestNoConfigDir: when the user config directory is unavailable (ConfigDir
 // empty) the commands that need the config dir refuse with exit 2 and the
-// no_config_dir JSON; help, version and capabilities keep working. There is
-// no silent temp-dir fallback.
+// no_config_dir JSON; help and version keep working. There is no silent
+// temp-dir fallback.
 func TestNoConfigDir(t *testing.T) {
 	for _, args := range [][]string{
-		{"outbox"},
-		{"outbox", "--since", "1", "--wait", "0"},
 		{"config", "get", "machine_label"},
 		{"config", "list"},
 		{"config", "set", "machine_label", "x"},
+		{"doctor"},
 	} {
 		stdout, _, exit := runCLI(t, "", false, args...)
 		if exit != 2 {
@@ -359,14 +244,10 @@ func TestNoConfigDir(t *testing.T) {
 			t.Errorf("%v stdout = %q; want the no_config_dir JSON", args, stdout)
 		}
 	}
-	// help, version and capabilities do not need the config dir.
+	// help and version do not need the config dir.
 	stdout, _, exit := runCLI(t, "", false, "help")
 	if exit != 0 || !strings.Contains(stdout, "usage: nau <command> [args]") {
 		t.Errorf("help with empty ConfigDir: exit %d", exit)
-	}
-	stdout, _, exit = runCLI(t, "", false, "capabilities", "--json")
-	if exit != 0 || stdout != "{\"schema\":1,\"bridge\":1,\"outbox\":1,\"push\":1}\n" {
-		t.Errorf("capabilities with empty ConfigDir: exit %d, stdout %q", exit, stdout)
 	}
 	_, _, exit = runCLI(t, "", false, "version")
 	if exit != 0 {
@@ -379,43 +260,10 @@ func TestNoConfigDir(t *testing.T) {
 	}
 }
 
-// TestOutboxTrailerUnchangedByLastPush: recording last_push in cursor.json
-// must not change the outbox command trailer (delivered_seq is untouched).
-func TestOutboxTrailerUnchangedByLastPush(t *testing.T) {
-	dir := t.TempDir()
-	s, err := outbox.Open(outbox.StateDir(dir), outbox.Options{})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if _, err := s.Append(outbox.Record{
-		Tipo:    outbox.TipoDispatch,
-		Maquina: "machine-a",
-		Projeto: "org/repo",
-		Dados:   json.RawMessage(`{}`),
-	}); err != nil {
-		t.Fatalf("Append: %v", err)
-	}
-	if err := s.SetDeliveredSeq(1); err != nil {
-		t.Fatalf("SetDeliveredSeq: %v", err)
-	}
-	if err := s.SetLastPush(outbox.PushResult{Status: "ok", Code: 200}); err != nil {
-		t.Fatalf("SetLastPush: %v", err)
-	}
-	stdout, _, exit := runCLI(t, dir, false, "outbox")
-	if exit != 0 {
-		t.Fatalf("outbox: exit %d, stdout %q", exit, stdout)
-	}
-	lines := strings.Split(strings.TrimSpace(stdout), "\n")
-	lastLine := lines[len(lines)-1]
-	if lastLine != `{"outbox":"fim","ultimo_seq":1,"entregue_seq":1}` {
-		t.Errorf("trailer = %q; want {\"outbox\":\"fim\",\"ultimo_seq\":1,\"entregue_seq\":1}", lastLine)
-	}
-}
-
 // TestProgramNameIdentity covers the identity contract at the Env level:
 // the program name, the empty-Program default, the usage text rendered
-// with no arguments (no mention of the retired name) and the stderr
-// diagnostic prefix.
+// with no arguments (the product phrase, no mention of any retired name)
+// and the stderr diagnostic prefix.
 func TestProgramNameIdentity(t *testing.T) {
 	if ProgramNau != "nau" {
 		t.Fatalf("name = %q, want %q", ProgramNau, "nau")
@@ -426,10 +274,10 @@ func TestProgramNameIdentity(t *testing.T) {
 	if got := (Env{Program: ProgramNau}).program(); got != ProgramNau {
 		t.Errorf("Env{Program: %q} program = %q, want %q", ProgramNau, got, ProgramNau)
 	}
-	const title = " - universal messaging and registry core; this build bridges a remote job dispatcher and a Herdr node"
+	const title = " - read-only hub of the coding agents at work: which agents are working, on which machines, for which developers"
 
 	// No-args prints the usage on stdout, exit 0, empty stderr, and the
-	// usage mentions no name other than the program name itself.
+	// usage leads with the title line carrying the program name.
 	stdout, stderr, exit := runCLI(t, t.TempDir(), false)
 	if exit != 0 {
 		t.Fatalf("no-args exit = %d, want 0, stderr %q", exit, stderr)
@@ -439,13 +287,10 @@ func TestProgramNameIdentity(t *testing.T) {
 	}
 	nauUsage := stdout
 	if !strings.HasPrefix(nauUsage, ProgramNau+title+"\n") {
-		t.Errorf("no-args stdout does not lead with the nau title line: %q", firstNLines(nauUsage, 2))
+		t.Errorf("no-args stdout does not lead with the title line: %q", firstNLines(nauUsage, 2))
 	}
 	if !strings.Contains(nauUsage, "usage: "+ProgramNau+" <command> [args]\n") {
-		t.Errorf("no-args stdout lacks the nau usage line")
-	}
-	if strings.Contains(nauUsage, "herdr-hermes") {
-		t.Errorf("no-args stdout mentions the retired name: %q", firstNLines(nauUsage, 3))
+		t.Errorf("no-args stdout lacks the usage line")
 	}
 
 	// The stderr diagnostic prefix follows the program name for the same

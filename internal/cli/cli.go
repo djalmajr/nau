@@ -1,9 +1,8 @@
 // Package cli implements the nau command line: the command table
-// with the HERDR_HERMES_NOWRITE read-only gating, the shared output
+// with the NAU_NOWRITE read-only gating and the shared output
 // conventions (one JSON line on stdout, diagnostics on stderr, errors as
-// {"status":"<code>","motivo":"<text>"}), and the slice-1 commands
-// (outbox, config, capabilities, version, help). Later slices register
-// their commands in the marked blocks of the table.
+// {"status":"<code>","motivo":"<text>"}), with the commands config,
+// doctor, version and help.
 package cli
 
 import (
@@ -21,7 +20,7 @@ import (
 var version = "dev"
 
 // nowriteVar is the read-only gate.
-const nowriteVar = "HERDR_HERMES_NOWRITE"
+const nowriteVar = "NAU_NOWRITE"
 
 // command is one entry of the command table.
 type command struct {
@@ -31,38 +30,19 @@ type command struct {
 	run            func(args []string, env Env) int
 }
 
-// Command table. The later slices register their commands in the marked
-// blocks so parallel slices merge cleanly.
+// Command table.
 var commands = []command{
-	// slice 2: job, sync, doctor
-	{"job", false, true, cmdJob},
-	{"sync", true, true, cmdSync},
-	{"doctor", false, true, cmdDoctor},
-	// slice 1: outbox, config, capabilities, version, help
-	{"outbox", false, true, cmdOutbox},
-	// slice 3: wake, session, decision, push, auth
-	{"wake", true, true, cmdWake},
-	{"session", true, true, cmdSession},
-	{"decision", true, true, cmdDecision},
-	{"push", true, true, cmdPush},
-	{"auth", false, true, cmdAuth},
 	{"config", false, true, cmdConfig},
-	{"capabilities", false, false, cmdCapabilities},
+	{"doctor", false, true, cmdDoctor},
 	{"version", false, false, cmdVersion},
 	{"help", false, false, cmdHelp},
-	// DJA-195: route
-	{"route", false, true, cmdRoute},
-	// DJA-430: the forced command of the dispatch ssh key
-	// (no config dir needed: the gate refuses without one, and an accepted
-	// job or outbox applies its own requirement)
-	{"gate", false, false, cmdGate},
 	// DJA-620: the central hub server (no local state: the store is the
 	// remote database named by the environment)
 	{"hub", false, false, cmdHub},
 }
 
 // Run executes args[0] as a command and returns its exit code. An unknown
-// command exits 2. Under HERDR_HERMES_NOWRITE=1 a command with writes=true
+// command exits 2. Under NAU_NOWRITE=1 a command with writes=true
 // exits 2 with the nowrite error before any side effect.
 func Run(args []string, env Env) int {
 	if env.Stdout == nil || env.Stderr == nil {
@@ -94,8 +74,8 @@ func Run(args []string, env Env) int {
 		return 2
 	}
 	// A command that reads or writes the config dir cannot run when the user
-	// config directory is unavailable; help, version and capabilities still
-	// work. There is no silent temp-dir fallback.
+	// config directory is unavailable; help and version still work. There is
+	// no silent temp-dir fallback.
 	if cmd.needsConfigDir && env.ConfigDir == "" {
 		_, _ = fmt.Fprintf(env.Stdout, "%s\n", noConfigDirErrorJSON)
 		return 2
@@ -113,7 +93,7 @@ type errorLine struct {
 	Motivo string `json:"motivo"`
 }
 
-const nowriteErrorJSON = `{"status":"nowrite","motivo":"HERDR_HERMES_NOWRITE=1"}`
+const nowriteErrorJSON = `{"status":"nowrite","motivo":"NAU_NOWRITE=1"}`
 
 const noConfigDirErrorJSON = `{"status":"no_config_dir","motivo":"user config directory unavailable"}`
 
@@ -145,31 +125,14 @@ func mustJSON(v any) string {
 
 func quote(s string) string { return `"` + s + `"` }
 
-func cmdCapabilities(args []string, env Env) int {
-	if len(args) != 1 || args[0] != "--json" {
-		badUsage(env, "usage: capabilities --json")
-		return 2
-	}
-	_, _ = io.WriteString(env.Stdout, "{\"schema\":1,\"bridge\":1,\"outbox\":1,\"push\":1}\n")
-	return 0
-}
-
 func cmdVersion(args []string, env Env) int {
 	if len(args) != 0 {
 		badUsage(env, "usage: version")
 		return 2
 	}
-	v := version
-	if v == "" {
-		v = "dev"
-	}
-	if v == "dev" {
-		info, ok := debug.ReadBuildInfo()
-		v = devVersion(info, ok)
-	}
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(struct {
 		Version string `json:"version"`
-	}{Version: v}))
+	}{Version: currentVersion()}))
 	return 0
 }
 
@@ -191,21 +154,6 @@ func devVersion(info *debug.BuildInfo, ok bool) string {
 		return "dev+" + v
 	}
 	return "dev"
-}
-
-// vcsRevision returns the VCS revision recorded by the Go toolchain for
-// dev builds, like the reference implementation.
-func vcsRevision() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return ""
-	}
-	for _, setting := range info.Settings {
-		if setting.Key == "vcs.revision" {
-			return setting.Value
-		}
-	}
-	return ""
 }
 
 func cmdHelp(args []string, env Env) int {

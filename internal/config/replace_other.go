@@ -1,6 +1,6 @@
 //go:build !windows
 
-package outbox
+package config
 
 import "os"
 

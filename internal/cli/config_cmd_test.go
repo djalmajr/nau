@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -95,21 +94,22 @@ func TestConfigSetGet(t *testing.T) {
 	}
 }
 
+// TestConfigList: the list shows the effective (resolved) value of
+// herdr_soho_bin and the machine label; the PATH is controlled so the
+// resolution is deterministic: a soho executable in a known directory
+// resolves to its path.
 func TestConfigList(t *testing.T) {
-	// The list shows the effective (resolved) value of herdr_soho_bin;
-	// the PATH is controlled so the resolution is deterministic: a soho
-	// executable in a known directory resolves to its path.
 	sohoDir := sohoPathDir(t)
 	t.Setenv("PATH", sohoDir)
 	dir := t.TempDir()
-	if _, _, exit := runCLI(t, dir, false, "config", "set", "dispatcher_url", "set-value"); exit != 0 {
-		t.Fatal("setup: config set dispatcher_url")
+	if _, _, exit := runCLI(t, dir, false, "config", "set", "machine_label", "m1"); exit != 0 {
+		t.Fatal("setup: config set machine_label")
 	}
 	stdout, _, exit := runCLI(t, dir, false, "config", "list")
 	if exit != 0 {
 		t.Fatalf("config list exit = %d", exit)
 	}
-	want := `{"config":{"machine_label":"","dispatcher_url":"set-value","herdr_soho_bin":"` + jsonText(filepath.Join(sohoDir, exeName("soho"))) + `","push_timeout_s":15,"herdr_bin":"herdr","route_machines":"","route_disabled":"","route_orchestrator_name":"orchestrator","route_probe_timeout_s":20}}
+	want := `{"config":{"machine_label":"m1","herdr_soho_bin":"` + jsonText(filepath.Join(sohoDir, exeName("soho"))) + `"}}
 `
 	if stdout != want {
 		t.Errorf("config list = %q, want %q", stdout, want)
@@ -192,29 +192,6 @@ func TestConfigGetSohoBinResolved(t *testing.T) {
 	}
 }
 
-func TestConfigPushTimeout(t *testing.T) {
-	dir := t.TempDir()
-	stdout, _, exit := runCLI(t, dir, false, "config", "set", "push_timeout_s", "30")
-	if exit != 0 {
-		t.Fatalf("set 30: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "push_timeout_s")
-	if exit != 0 || stdout != "{\"key\":\"push_timeout_s\",\"value\":\"30\"}\n" {
-		t.Errorf("get push_timeout_s = %q (exit %d)", stdout, exit)
-	}
-	for _, bad := range []string{"0", "-5", "abc", "1.5", ""} {
-		stdout, _, exit := runCLI(t, dir, false, "config", "set", "push_timeout_s", bad)
-		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
-			t.Errorf("set %q: exit %d, stdout %q; want exit 2", bad, exit, stdout)
-		}
-	}
-	// The valid value survives the rejected writes.
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "push_timeout_s")
-	if exit != 0 || stdout != "{\"key\":\"push_timeout_s\",\"value\":\"30\"}\n" {
-		t.Errorf("get after bad sets = %q (exit %d)", stdout, exit)
-	}
-}
-
 func TestConfigUnknownKey(t *testing.T) {
 	dir := t.TempDir()
 	stdout, _, exit := runCLI(t, dir, false, "config", "set", "not_a_key", "x")
@@ -225,13 +202,22 @@ func TestConfigUnknownKey(t *testing.T) {
 	if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
 		t.Errorf("get unknown: exit %d, stdout %q", exit, stdout)
 	}
-	// An unknown key already in the file is also refused at read time.
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("machine_label=lab\nbogus=1\n"), 0o600); err != nil {
+	// A removed key already in the file is ignored on read: the kept key
+	// still reads, while the removed key itself is refused at get and set.
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("machine_label=lab\ndispatcher_url=http://x.invalid\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	stdout, _, exit = runCLI(t, dir, false, "config", "get", "machine_label")
-	if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
-		t.Errorf("get with unknown key in file: exit %d, stdout %q", exit, stdout)
+	if exit != 0 || stdout != "{\"key\":\"machine_label\",\"value\":\"lab\"}\n" {
+		t.Errorf("get with a removed key in the file: exit %d, stdout %q", exit, stdout)
+	}
+	stdout, _, exit = runCLI(t, dir, false, "config", "get", "dispatcher_url")
+	if exit != 2 || !strings.Contains(stdout, `"status":"2"`) || !strings.Contains(stdout, "dispatcher_url") {
+		t.Errorf("get of a removed key: exit %d, stdout %q", exit, stdout)
+	}
+	stdout, _, exit = runCLI(t, dir, false, "config", "set", "dispatcher_url", "http://y.invalid")
+	if exit != 2 || !strings.Contains(stdout, `"status":"2"`) || !strings.Contains(stdout, "dispatcher_url") {
+		t.Errorf("set of a removed key: exit %d, stdout %q", exit, stdout)
 	}
 }
 
@@ -256,318 +242,6 @@ func TestConfigCommentsAndBlanks(t *testing.T) {
 	if want := strings.Replace(content, "machine_label=lab-9", "machine_label=lab-10", 1); string(data) != want {
 		t.Errorf("config = %q, want %q", data, want)
 	}
-}
-
-func TestConfigRouteGetDefaults(t *testing.T) {
-	dir := t.TempDir()
-	for _, tc := range []struct {
-		key  string
-		want string
-	}{
-		{"herdr_bin", `{"key":"herdr_bin","value":"herdr"}`},
-		{"route_machines", `{"key":"route_machines","value":""}`},
-		{"route_disabled", `{"key":"route_disabled","value":""}`},
-		{"route_orchestrator_name", `{"key":"route_orchestrator_name","value":"orchestrator"}`},
-		{"route_probe_timeout_s", `{"key":"route_probe_timeout_s","value":"20"}`},
-	} {
-		stdout, _, exit := runCLI(t, dir, false, "config", "get", tc.key)
-		if exit != 0 {
-			t.Fatalf("config get %s exit = %d, stdout %q", tc.key, exit, stdout)
-		}
-		if stdout != tc.want+"\n" {
-			t.Errorf("config get %s = %q, want %q", tc.key, stdout, tc.want)
-		}
-	}
-}
-
-func TestConfigRouteSetGetNormalization(t *testing.T) {
-	dir := t.TempDir()
-	stdout, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", " mac-a , win-a ")
-	if exit != 0 {
-		t.Fatalf("config set exit = %d, stdout %q", exit, stdout)
-	}
-	// set prints the stored (normalized) value.
-	if stdout != "{\"key\":\"route_machines\",\"value\":\"mac-a,win-a\"}\n" {
-		t.Errorf("config set route_machines = %q", stdout)
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(data), "route_machines=mac-a,win-a\n") {
-		t.Errorf("config file holds the unnormalized value:\n%s", data)
-	}
-	// get prints the effective (normalized) value.
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_machines")
-	if exit != 0 || stdout != "{\"key\":\"route_machines\",\"value\":\"mac-a,win-a\"}\n" {
-		t.Errorf("config get route_machines = %q (exit %d)", stdout, exit)
-	}
-	// route_disabled normalizes the same way.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "route_disabled", " win-a , mac-a ")
-	if exit != 0 {
-		t.Fatalf("set route_disabled: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_disabled")
-	if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"win-a,mac-a\"}\n" {
-		t.Errorf("config get route_disabled = %q (exit %d)", stdout, exit)
-	}
-	// herdr_bin is stored trimmed.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "herdr_bin", "  herdr-x  ")
-	if exit != 0 {
-		t.Fatalf("set herdr_bin: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "herdr_bin")
-	if exit != 0 || stdout != "{\"key\":\"herdr_bin\",\"value\":\"herdr-x\"}\n" {
-		t.Errorf("config get herdr_bin = %q (exit %d)", stdout, exit)
-	}
-	// The empty value is valid and stored empty.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "route_machines", "")
-	if exit != 0 {
-		t.Fatalf("set empty route_machines: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_machines")
-	if exit != 0 || stdout != "{\"key\":\"route_machines\",\"value\":\"\"}\n" {
-		t.Errorf("config get empty route_machines = %q (exit %d)", stdout, exit)
-	}
-	// route_orchestrator_name round trip.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "route_orchestrator_name", "orch-2")
-	if exit != 0 {
-		t.Fatalf("set route_orchestrator_name: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_orchestrator_name")
-	if exit != 0 || stdout != "{\"key\":\"route_orchestrator_name\",\"value\":\"orch-2\"}\n" {
-		t.Errorf("config get route_orchestrator_name = %q (exit %d)", stdout, exit)
-	}
-}
-
-func TestConfigRouteSetInvalid(t *testing.T) {
-	dir := t.TempDir()
-	// A refused set in a fresh dir creates no file.
-	stdout, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "a,,b")
-	if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
-		t.Fatalf("set a,,b: exit %d, stdout %q; want exit 2", exit, stdout)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "config")); !os.IsNotExist(err) {
-		t.Fatalf("refused set created the config file: %v", err)
-	}
-	// A valid set first, so each refusal must leave the file unchanged.
-	if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "mac-a"); exit != 0 {
-		t.Fatal("setup: config set route_machines mac-a")
-	}
-	before, err := os.ReadFile(filepath.Join(dir, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var many []string
-	for i := 0; i < 33; i++ {
-		many = append(many, fmt.Sprintf("m%02d", i))
-	}
-	invalid := []struct {
-		key string
-		val string
-	}{
-		{"herdr_bin", ""},
-		{"herdr_bin", "   "},
-		{"route_machines", "-x"},
-		{"route_machines", "a b"},
-		{"route_machines", "a,,b"},
-		{"route_machines", "a,"},
-		{"route_machines", ",a"},
-		{"route_machines", "mac-a,mac-a"},
-		{"route_machines", "a/b"},
-		{"route_machines", strings.Join(many, ",")}, // 33 items
-		{"route_disabled", "-x"},
-		{"route_disabled", "win-a,win-a"},
-		{"route_orchestrator_name", ""},
-		{"route_orchestrator_name", "Orchestrator"},
-		{"route_orchestrator_name", "-x"},
-		{"route_orchestrator_name", "9name"},
-		{"route_orchestrator_name", strings.Repeat("a", 33)},
-		{"route_probe_timeout_s", "0"},
-		{"route_probe_timeout_s", "121"},
-		{"route_probe_timeout_s", "x"},
-	}
-	for _, tc := range invalid {
-		stdout, _, exit := runCLI(t, dir, false, "config", "set", tc.key, tc.val)
-		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) || !strings.Contains(stdout, tc.key) {
-			t.Errorf("set %s %q: exit %d, stdout %q; want exit 2 naming the key", tc.key, tc.val, exit, stdout)
-		}
-		after, err := os.ReadFile(filepath.Join(dir, "config"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(after) != string(before) {
-			t.Errorf("set %s %q changed the file:\n%s", tc.key, tc.val, after)
-		}
-	}
-}
-
-func TestConfigRouteProbeTimeoutBounds(t *testing.T) {
-	dir := t.TempDir()
-	for _, bad := range []string{"0", "121", "x"} {
-		stdout, _, exit := runCLI(t, dir, false, "config", "set", "route_probe_timeout_s", bad)
-		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
-			t.Errorf("set %q: exit %d, stdout %q; want exit 2", bad, exit, stdout)
-		}
-	}
-	// 1 is the lower bound and valid.
-	stdout, _, exit := runCLI(t, dir, false, "config", "set", "route_probe_timeout_s", "1")
-	if exit != 0 {
-		t.Fatalf("set 1: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_probe_timeout_s")
-	if exit != 0 || stdout != "{\"key\":\"route_probe_timeout_s\",\"value\":\"1\"}\n" {
-		t.Errorf("get after set 1 = %q (exit %d)", stdout, exit)
-	}
-	// 120 is the upper bound and valid.
-	stdout, _, exit = runCLI(t, dir, false, "config", "set", "route_probe_timeout_s", "120")
-	if exit != 0 {
-		t.Fatalf("set 120: exit %d, stdout %q", exit, stdout)
-	}
-	stdout, _, exit = runCLI(t, dir, false, "config", "get", "route_probe_timeout_s")
-	if exit != 0 || stdout != "{\"key\":\"route_probe_timeout_s\",\"value\":\"120\"}\n" {
-		t.Errorf("get after set 120 = %q (exit %d)", stdout, exit)
-	}
-}
-
-func TestConfigListInvalidRouterValue(t *testing.T) {
-	dir := t.TempDir()
-	for _, tc := range []struct {
-		line string
-		key  string
-	}{
-		{"route_machines=mac-a,mac-a\n", "route_machines"},
-		{"route_machines=-x\n", "route_machines"},
-		{"route_machines=a,,b\n", "route_machines"},
-		{"route_disabled=win-a,win-a\n", "route_disabled"},
-		{"route_disabled=a,\n", "route_disabled"},
-		{"route_orchestrator_name=Orchestrator\n", "route_orchestrator_name"},
-		{"route_orchestrator_name=9name\n", "route_orchestrator_name"},
-		{"route_probe_timeout_s=0\n", "route_probe_timeout_s"},
-		{"route_probe_timeout_s=121\n", "route_probe_timeout_s"},
-		{"route_probe_timeout_s=abc\n", "route_probe_timeout_s"},
-		{"herdr_bin=\n", "herdr_bin"},
-	} {
-		if err := os.WriteFile(filepath.Join(dir, "config"), []byte(tc.line), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		stdout, _, exit := runCLI(t, dir, false, "config", "list")
-		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) {
-			t.Errorf("config list with %q: exit %d, stdout %q; want exit 2", tc.line, exit, stdout)
-		}
-		if !strings.Contains(stdout, tc.key) {
-			t.Errorf("config list with %q: the error does not name the key: %q", tc.line, stdout)
-		}
-	}
-}
-
-// TestConfigSetRouteUnmatchedWarning: a successful set of route_disabled or
-// route_machines prints one warning line on stderr (after the stdout line,
-// exit 0) when the stored route_disabled labels are not in route_machines;
-// no other command or key warns, and a refused set prints no warning.
-func TestConfigSetRouteUnmatchedWarning(t *testing.T) {
-	warn := "nau: config: warning: route_disabled labels not in route_machines exclude nothing: "
-
-	t.Run("empty fleet staging", func(t *testing.T) {
-		dir := t.TempDir()
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "ghost")
-		if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"ghost\"}\n" || stderr != "" {
-			t.Fatalf("staged exclusion: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		stdout, stderr, exit = runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a")
-		if exit != 0 || stdout != "{\"key\":\"route_machines\",\"value\":\"local,win-a\"}\n" {
-			t.Fatalf("fleet set: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		if stderr != warn+"ghost\n" {
-			t.Errorf("fleet set stderr = %q, want the warning naming ghost", stderr)
-		}
-	})
-
-	t.Run("matching", func(t *testing.T) {
-		dir := t.TempDir()
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a"); exit != 0 {
-			t.Fatalf("setup fleet: exit %d", exit)
-		}
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "win-a")
-		if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"win-a\"}\n" || stderr != "" {
-			t.Fatalf("matching exclusion: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-	})
-
-	t.Run("unmatched", func(t *testing.T) {
-		dir := t.TempDir()
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a"); exit != 0 {
-			t.Fatalf("setup fleet: exit %d", exit)
-		}
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "ghost-box")
-		if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"ghost-box\"}\n" {
-			t.Fatalf("unmatched set: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		if stderr != warn+"ghost-box\n" {
-			t.Errorf("unmatched set stderr = %q, want the warning naming ghost-box", stderr)
-		}
-		stdout, stderr, exit = runCLI(t, dir, false, "config", "set", "route_disabled", "")
-		if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"\"}\n" || stderr != "" {
-			t.Fatalf("empty exclusions: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-	})
-
-	t.Run("changed fleet", func(t *testing.T) {
-		dir := t.TempDir()
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a"); exit != 0 {
-			t.Fatalf("setup fleet: exit %d", exit)
-		}
-		if _, stderr, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "win-a"); exit != 0 || stderr != "" {
-			t.Fatalf("exclusion before the fleet change: exit %d, stderr %q", exit, stderr)
-		}
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local")
-		if exit != 0 || stdout != "{\"key\":\"route_machines\",\"value\":\"local\"}\n" {
-			t.Fatalf("shrunken fleet: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		if stderr != warn+"win-a\n" {
-			t.Errorf("shrunken fleet stderr = %q, want the warning naming win-a", stderr)
-		}
-		stdout, stderr, exit = runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a")
-		if exit != 0 || stdout != "{\"key\":\"route_machines\",\"value\":\"local,win-a\"}\n" || stderr != "" {
-			t.Fatalf("restored fleet: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-	})
-
-	t.Run("other keys never warn", func(t *testing.T) {
-		dir := t.TempDir()
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a"); exit != 0 {
-			t.Fatalf("setup fleet: exit %d", exit)
-		}
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "ghost"); exit != 0 {
-			t.Fatalf("setup exclusion: exit %d", exit)
-		}
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_probe_timeout_s", "5")
-		if exit != 0 || stdout != "{\"key\":\"route_probe_timeout_s\",\"value\":\"5\"}\n" || stderr != "" {
-			t.Fatalf("timeout set: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		stdout, stderr, exit = runCLI(t, dir, false, "config", "get", "route_disabled")
-		if exit != 0 || stdout != "{\"key\":\"route_disabled\",\"value\":\"ghost\"}\n" || stderr != "" {
-			t.Fatalf("get: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		stdout, stderr, exit = runCLI(t, dir, false, "config", "list")
-		if exit != 0 || stderr != "" || !strings.Contains(stdout, `"route_disabled":"ghost"`) {
-			t.Fatalf("list: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-	})
-
-	t.Run("invalid value warns nothing", func(t *testing.T) {
-		dir := t.TempDir()
-		if _, _, exit := runCLI(t, dir, false, "config", "set", "route_machines", "local,win-a"); exit != 0 {
-			t.Fatalf("setup fleet: exit %d", exit)
-		}
-		stdout, stderr, exit := runCLI(t, dir, false, "config", "set", "route_disabled", "a b")
-		if exit != 2 || !strings.Contains(stdout, `"status":"2"`) || !strings.Contains(stdout, "route_disabled") {
-			t.Fatalf("invalid set: exit %d, stdout %q, stderr %q", exit, stdout, stderr)
-		}
-		if strings.Contains(stderr, "warning:") {
-			t.Errorf("invalid set stderr carries the warning line: %q", stderr)
-		}
-	})
 }
 
 func TestConfigUsage(t *testing.T) {

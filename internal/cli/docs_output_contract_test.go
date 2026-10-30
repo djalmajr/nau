@@ -90,7 +90,7 @@ func TestDocsHelpBadUsageKeepsJSON(t *testing.T) {
 }
 
 // TestDocsSingleJSONLineCommands keeps the README output contract for the
-// default case: version and capabilities --json print exactly one valid
+// default case: version, config get and config list print exactly one valid
 // JSON line on stdout.
 func TestDocsSingleJSONLineCommands(t *testing.T) {
 	for _, tc := range []struct {
@@ -98,7 +98,8 @@ func TestDocsSingleJSONLineCommands(t *testing.T) {
 		args []string
 	}{
 		{name: "version", args: []string{"version"}},
-		{name: "capabilities", args: []string{"capabilities", "--json"}},
+		{name: "config get", args: []string{"config", "get", "machine_label"}},
+		{name: "config list", args: []string{"config", "list"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, _, exit := runCLI(t, t.TempDir(), false, tc.args...)
@@ -119,28 +120,26 @@ func TestDocsSingleJSONLineCommands(t *testing.T) {
 	}
 }
 
-// TestDocsReadmeOutputContract keeps the README aligned with the real output
-// contract: the single-JSON-line promise is qualified with the plain-text,
-// outbox and forwarding exceptions, the routing onboarding pointer is
-// present, and no active orchestrator wording remains.
+// TestDocsReadmeOutputContract keeps the README aligned with the real
+// output contract: it leads with the product phrase, states the under
+// construction status with the soho inventory as the only source, and
+// carries no bridge wording.
 func TestDocsReadmeOutputContract(t *testing.T) {
 	readme := docLoadReadme(t)
-	if strings.Contains(readme, "Every command prints exactly one JSON line on stdout (diagnostics go to stderr)") {
-		t.Errorf("README still carries the unqualified single-JSON-line promise")
-	}
 	for _, want := range []string{
-		"with these exceptions: `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0",
-		"`outbox` prints one JSON line per record and then the trailer line",
-		"for `job events` is JSON lines and a trailer line",
-		"docs/routing.md#preflight-read-only",
-		"orchestrator-<n>",
-		"`<base>` or `<base>-<n>` when `route_orchestrator_name` sets another base",
+		"Nau is a read-only hub of the coding agents at work: which agents are working, on which machines, for which developers.",
+		"The hub is under construction; the soho inventory is the only source.",
+		"The exit codes are `0`, `2`, `4`.",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README does not contain %q", want)
 		}
 	}
-	if strings.Contains(strings.ToLower(readme), "active orchestrator") {
-		t.Errorf("README mentions an active orchestrator (case-insensitive)")
+	for _, gone := range []string{
+		"dispatcher", "outbox", "bridge", "wake", "capabilities", "auth login",
+	} {
+		if i := strings.Index(strings.ToLower(readme), gone); i >= 0 {
+			t.Errorf("README still carries the bridge wording %q", gone)
+		}
 	}
 }

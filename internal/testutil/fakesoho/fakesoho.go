@@ -39,22 +39,11 @@ const (
 	// role is detected, so the slow first run of a fresh executable
 	// happens outside the tests' measurements.
 	warmMarker = "-fakesoho-warm"
-	// lockHolderMarker is the argv marker that routes a re-exec'd copy of
-	// the test binary into the lock-holder role: it takes the lock on the
-	// next argument and holds it until it is killed, so a lock test can
-	// exercise a process that dies while holding the lock.
-	lockHolderMarker = "-fakesoho-lock-holder"
 )
 
 // lockWait bounds how long a contended lock waits for the lock to be
-// free; a lock test may shorten it and restore it.
+// free; a test may shorten it and restore it.
 var lockWait = 5 * time.Second
-
-// lockHolderUnlock keeps the lock-holder role's unlock closure (and the
-// file behind it) reachable for the life of the re-exec'd process, so
-// the file's finalizer cannot close the descriptor and drop the lock;
-// the system releases the lock with the process.
-var lockHolderUnlock func()
 
 // Rule is one scripted response. Argv matches the process argv (the
 // arguments after the executable), exactly or as a prefix; Call, when
@@ -329,31 +318,6 @@ func Main() {
 	// script, stdin or the call log.
 	if len(os.Args) == 2 && os.Args[1] == warmMarker {
 		os.Exit(0)
-	}
-	// Lock-holder role: a copy of this test binary re-executed by a lock
-	// test; it takes the lock on the path in argv, prints "locked" and
-	// holds it until it is killed, so a test can exercise the lock a dead
-	// process leaves behind (or does not). Checked before the pipe-holder
-	// marker.
-	if len(os.Args) == 3 && os.Args[1] == lockHolderMarker {
-		// The closure is parked in the package variable so the file (and
-		// its lock) stays open until the process is killed; a discarded
-		// closure would let the file's finalizer close the descriptor and
-		// drop the lock at once.
-		var err error
-		if lockHolderUnlock, err = lock(os.Args[2]); err != nil {
-			fmt.Fprintf(os.Stderr, "fakesoho: %v\n", err)
-			os.Exit(126)
-		}
-		fmt.Fprintln(os.Stdout, "locked")
-		// Hold the lock until the test kills this process; the system
-		// releases it with the process. The sleeps keep a timer pending,
-		// so the runtime's deadlock check (a main goroutine blocked
-		// without a timer is a fatal "all goroutines are asleep" error
-		// and would kill the holder, dropping the lock) does not fire.
-		for {
-			time.Sleep(time.Hour)
-		}
 	}
 	// Pipe-holder role: a copy of this binary started by a rule's
 	// HoldPipeMs; it keeps the inherited stdout and stderr open for the
