@@ -3,3 +3,5 @@
 .worktrees/
 coverage/
 *.log
+web/node_modules/
+web/dist/
