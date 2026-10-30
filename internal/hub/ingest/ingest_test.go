@@ -55,6 +55,10 @@ type fakeStore struct {
 	batchErr     error
 	executeCalls int
 	batchCalls   int
+	// retainCutoffs records the cutoffs of the retain deletes, in
+	// the statement order, so the tests fix the boundaries without
+	// the constants of the package.
+	retainCutoffs []int64
 }
 
 func newFakeStore() *fakeStore {
@@ -147,6 +151,7 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 		switch {
 		case s.SQL == sqlRetainHistory:
 			cutoff := s.Args[0].(int64)
+			f.retainCutoffs = append(f.retainCutoffs, cutoff)
 			kept := f.history[:0]
 			for _, h := range f.history {
 				if h.atMS >= cutoff {
@@ -156,6 +161,7 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 			f.history = kept
 		case s.SQL == sqlRetainHourly:
 			cutoff := s.Args[0].(int64)
+			f.retainCutoffs = append(f.retainCutoffs, cutoff)
 			for mid, m := range f.hourly {
 				for hour := range m {
 					if hour < cutoff {
@@ -166,6 +172,26 @@ func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Resu
 					delete(f.hourly, mid)
 				}
 			}
+		case s.SQL == sqlUpdateSnapshot:
+			// The guarded write: the row exists and the version is
+			// still the one the call read; the guard fails otherwise
+			// and the batch aborts with nothing applied.
+			mid, _ := s.Args[3].(string)
+			last, _ := s.Args[4].(int64)
+			cur, ok := f.snapshots[mid]
+			if !ok || cur.generatedMS != last {
+				return nil, errors.New("fakeStore: the guard failed: the version moved")
+			}
+			f.snapshots[mid] = fakeSnapshot{s.Args[0].(int64), s.Args[1].(int64), s.Args[2].(string)}
+		case s.SQL == sqlInsertSnapshot:
+			mid, _ := s.Args[0].(string)
+			if _, ok := f.snapshots[mid]; ok {
+				return nil, errors.New("fakeStore: the guard failed: a snapshot appeared")
+			}
+			f.snapshots[mid] = fakeSnapshot{s.Args[1].(int64), s.Args[2].(int64), s.Args[3].(string)}
+		case s.SQL == sqlGuardCheck || s.SQL == sqlGuardClear:
+			// The guard check and clear are modeled by the guarded
+			// writes above: reaching them means the check passed.
 		case f.applyDML(s):
 			// the batch statement applied per the store semantics
 		default:
@@ -199,12 +225,6 @@ func (f *fakeStore) applyDML(s store.Stmt) bool {
 			project: s.Args[2].(string), name: s.Args[3].(string),
 			state: s.Args[4].(string), reason: rp, atMS: s.Args[6].(int64),
 		})
-		return true
-	case s.SQL == sqlUpsertSnapshot:
-		f.snapshots[s.Args[0].(string)] = fakeSnapshot{
-			generatedMS: s.Args[1].(int64), receivedMS: s.Args[2].(int64),
-			sohoVersion: s.Args[3].(string),
-		}
 		return true
 	case s.SQL == sqlUpsertHidden:
 		f.hidden[s.Args[0].(string)] = inventory.Hidden{
@@ -707,6 +727,88 @@ func TestApplyBatchIsAtomic(t *testing.T) {
 	}
 }
 
+// pauseBatch is the store wrapper that pauses before its batch: the
+// test interleaves two applies of the same machine inside the window
+// between the read and the write of the first one.
+type pauseBatch struct {
+	*fakeStore
+	ready, release chan struct{}
+}
+
+func (p *pauseBatch) Batch(ctx context.Context, v []store.Stmt) ([]store.Result, error) {
+	select {
+	case <-p.ready:
+	default:
+		close(p.ready)
+	}
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return p.fakeStore.Batch(ctx, v)
+}
+
+// TestApplyConcurrentKeepsTheNewer: the older apply pauses before its
+// batch, the newer one applies fully, and the released older one must
+// not land on top of it: the final state is the newer inventory and
+// its history has no row of the older one.
+func TestApplyConcurrentKeepsTheNewer(t *testing.T) {
+	db := newFakeStore()
+	ctx := context.Background()
+	const g int64 = t0
+	if r, err := Apply(ctx, db, "m3", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed: applied=%v err=%v", r.Applied, err)
+	}
+	paused := &pauseBatch{fakeStore: db, ready: make(chan struct{}), release: make(chan struct{})}
+	type outcome struct {
+		applied bool
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		r, err := Apply(ctx, paused, "m3", mkInv(g+1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil))), g+1010)
+		done <- outcome{r.Applied, err}
+	}()
+	<-paused.ready // the stale call is inside the window, before its batch
+	if r, err := Apply(ctx, db, "m3", mkInv(g+2000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil))), g+2010); err != nil || !r.Applied {
+		t.Fatalf("the newer apply: applied=%v err=%v", r.Applied, err)
+	}
+	close(paused.release)
+	out := <-done
+	if out.err != nil || out.applied {
+		t.Fatalf("the stale apply after the conflict: applied=%v err=%v, want false and no error", out.applied, out.err)
+	}
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	if s := db.snapshots["m3"]; s.generatedMS != g+2000 {
+		t.Fatalf("snapshot generated_ms = %d, want %d (the newer one wins)", s.generatedMS, g+2000)
+	}
+	if a := db.agents["m3"]["w1:p1"]; a.state != "done" {
+		t.Fatalf("agent state = %q, want done (the stale one must not overwrite)", a.state)
+	}
+	// The stale apply left no transition of its own.
+	for _, h := range db.history {
+		if h.machineID == "m3" && h.atMS == g+1000 {
+			t.Fatalf("history row at %d: the stale apply must not leave a transition", g+1000)
+		}
+	}
+	// The seed and the newer transition are the only rows of the
+	// agent.
+	var rows int
+	for _, h := range db.history {
+		if h.machineID == "m3" && h.terminal == "w1:p1" {
+			rows++
+		}
+	}
+	if rows != 2 {
+		t.Fatalf("history rows of the agent = %d, want 2 (the seed and the newer)", rows)
+	}
+}
+
 // TestApplyObservedMSIsReceivedMS: every agent takes the receivedMS as
 // its observed_ms.
 func TestApplyObservedMSIsReceivedMS(t *testing.T) {
@@ -777,55 +879,44 @@ func TestMachineOfflineAndBack(t *testing.T) {
 }
 
 // TestRetainSevenDayAnd48hBoundaries: the row at the exact boundary
-// stays, the one older than it goes.
+// stays, the one older than it goes. The boundaries are fixed as
+// literals, independent of the constants of the package, so a
+// changed retention constant breaks the test without a sqld.
 func TestRetainSevenDayAnd48hBoundaries(t *testing.T) {
 	db := newFakeStore()
 	ctx := context.Background()
 	now := t0 + 8*24*hourMS
-	// m1: history, one row at now-7d-1 and one at now-7d.
-	older := now - retentionHistory - 1
-	if r, err := Apply(ctx, db, "m1", mkInv(now-retentionHistory-2*hourMS, inventory.Hidden{},
-		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", &older, nil))), now-retentionHistory-2*hourMS+100); err != nil || !r.Applied {
-		t.Fatalf("Apply the old inventory: applied=%v err=%v", r.Applied, err)
+	// Absolute timestamps, on the hour, eight days after the base.
+	const sevenDays = 604800000       // 7 * 24 * 3600 * 1000
+	const fortyEightHours = 172800000 // 48 * 3600 * 1000
+	db.history = []fakeHistory{
+		{machineID: "m1", terminal: "w1:p1", project: "acme/web", name: "build", state: "working", atMS: now - sevenDays - 1},
+		{machineID: "m1", terminal: "w1:p1", project: "acme/web", name: "build", state: "needs_you", atMS: now - sevenDays},
 	}
-	boundary := now - retentionHistory
-	if r, err := Apply(ctx, db, "m1", mkInv(now-2*hourMS, inventory.Hidden{},
-		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "needs_you", &boundary, nil))), now-2*hourMS+100); err != nil || !r.Applied {
-		t.Fatalf("Apply the boundary inventory: applied=%v err=%v", r.Applied, err)
-	}
-	// m2: working_hourly, one hour at now-48h-1h and one at now-48h.
-	// The older hour is applied first (the order rule).
-	if r, err := Apply(ctx, db, "m2", mkInv(now-retentionHourly-hourMS, inventory.Hidden{},
-		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), now-retentionHourly-hourMS+100); err != nil || !r.Applied {
-		t.Fatalf("Apply the old hour: applied=%v err=%v", r.Applied, err)
-	}
-	if r, err := Apply(ctx, db, "m2", mkInv(now-retentionHourly, inventory.Hidden{},
-		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), now-retentionHourly+100); err != nil || !r.Applied {
-		t.Fatalf("Apply the boundary hour: applied=%v err=%v", r.Applied, err)
+	db.hourly = map[string]map[int64]int64{
+		"m2": {now - fortyEightHours - 1: 1, now - fortyEightHours: 2},
 	}
 	if err := Retain(ctx, db, now); err != nil {
 		t.Fatalf("Retain: %v", err)
 	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
+	// The cutoffs of the deletes are the literal boundaries.
+	if len(db.retainCutoffs) != 2 || db.retainCutoffs[0] != now-sevenDays || db.retainCutoffs[1] != now-fortyEightHours {
+		t.Fatalf("retain cutoffs = %v, want [%d %d] (the 7 day and 48 h boundaries)", db.retainCutoffs, now-sevenDays, now-fortyEightHours)
+	}
 	// The m1 history: one row, at the boundary.
-	var m1Rows []fakeHistory
-	for _, h := range db.history {
-		if h.machineID == "m1" {
-			m1Rows = append(m1Rows, h)
-		}
+	if len(db.history) != 1 {
+		t.Fatalf("history rows = %d, want 1 (the older one is past 7 days)", len(db.history))
 	}
-	if len(m1Rows) != 1 {
-		t.Fatalf("m1 history rows = %d, want 1 (the older one is past 7 days)", len(m1Rows))
-	}
-	if m1Rows[0].atMS != boundary {
-		t.Fatalf("m1 history at_ms = %d, want the boundary %d", m1Rows[0].atMS, boundary)
+	if db.history[0].atMS != now-sevenDays {
+		t.Fatalf("history at_ms = %d, want the boundary %d", db.history[0].atMS, now-sevenDays)
 	}
 	m := db.hourly["m2"]
 	if len(m) != 1 {
 		t.Fatalf("hours = %d, want 1 (the older one is past 48 h)", len(m))
 	}
-	if _, ok := m[now-retentionHourly]; !ok {
+	if _, ok := m[now-fortyEightHours]; !ok {
 		t.Fatalf("hours = %v, want the boundary hour kept", m)
 	}
 }
@@ -972,6 +1063,82 @@ func TestAgentsEmptyListNoQuery(t *testing.T) {
 	}
 }
 
+// recordingStore records the statements it runs, for the checks of the
+// argument budget of the chunked queries.
+type recordingStore struct {
+	store.Store
+	stmts []store.Stmt
+}
+
+func (r *recordingStore) Execute(ctx context.Context, s store.Stmt) (store.Result, error) {
+	r.stmts = append(r.stmts, s)
+	return r.Store.Execute(ctx, s)
+}
+
+// TestLargeMachineListSplitsTheQuery: the machine list is split so
+// that no statement exceeds the argument budget, the duplicate id is
+// counted once, and the aggregates sum over the chunks.
+func TestLargeMachineListSplitsTheQuery(t *testing.T) {
+	db := newFakeStore()
+	ctx := context.Background()
+	const n = 1203
+	// t0 is on the hour: the 24 h series ends at the last complete
+	// hour, the hour before the base.
+	for i := 0; i < n; i++ {
+		id := "m" + itoa(i)
+		db.snapshots[id] = fakeSnapshot{generatedMS: t0, receivedMS: t0 + int64(i), sohoVersion: "v0.3.1"}
+		db.agents[id] = map[string]fakeAgent{"w1:p1": fakeAgent{
+			terminal: "w1:p1", project: "acme/web", session: "w1", name: "build",
+			role: "implementer", kind: "cli-b", state: "working", observedMS: t0,
+		}}
+		db.hidden[id] = inventory.Hidden{Working: 1}
+		db.hourly[id] = map[int64]int64{t0 - hourMS: 1}
+	}
+	// The list carries one duplicate: the join must count it once.
+	list := make([]string, n+1)
+	for i := 0; i < n; i++ {
+		list[i] = "m" + itoa(i)
+	}
+	list[n] = "m0"
+	rec := &recordingStore{Store: db}
+	res, err := Agents(ctx, rec, list, t0+1000)
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if len(res.Agents) != n {
+		t.Fatalf("agents = %d, want %d (the duplicate counted once)", len(res.Agents), n)
+	}
+	if len(res.Hidden) != n {
+		t.Fatalf("hidden = %d, want %d", len(res.Hidden), n)
+	}
+	for _, s := range rec.stmts {
+		if strings.Contains(s.SQL, "machine_id IN (") && len(s.Args) > maxStatementArgs {
+			t.Fatalf("a statement of the large list carries %d arguments, want at most %d", len(s.Args), maxStatementArgs)
+		}
+	}
+	// The overview sums over the chunks: the shown plus the hidden
+	// working, and the hour summed over the machines.
+	rec2 := &recordingStore{Store: db}
+	ov, err := Overview(ctx, rec2, list, t0+1000)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Counts.Working != 2*n {
+		t.Fatalf("working = %d, want %d (the shown plus the hidden, over the chunks)", ov.Counts.Working, 2*n)
+	}
+	if len(ov.PerMachine) != n {
+		t.Fatalf("per_machine = %d, want %d", len(ov.PerMachine), n)
+	}
+	if w := ov.Working24h[hourlyBuckets-1].Working; w != n {
+		t.Fatalf("the last complete hour = %d, want %d (the sum over the chunks)", w, n)
+	}
+	for _, s := range rec2.stmts {
+		if strings.Contains(s.SQL, "machine_id IN (") && len(s.Args) > maxStatementArgs {
+			t.Fatalf("a statement of the large list carries %d arguments, want at most %d", len(s.Args), maxStatementArgs)
+		}
+	}
+}
+
 // TestAgentQuery: the agent with the history, newest first, the 7 day
 // window and the 200 rows cap; ErrNotFound on the absent agent.
 func TestAgentQuery(t *testing.T) {
@@ -1013,8 +1180,8 @@ func TestAgentQuery(t *testing.T) {
 	if detail.Agent.Online {
 		t.Fatal("the stale machine must be offline")
 	}
-	if len(detail.History) != maxHistoryRows {
-		t.Fatalf("history rows = %d, want %d (the cap)", len(detail.History), maxHistoryRows)
+	if len(detail.History) != 200 {
+		t.Fatalf("history rows = %d, want 200 (the contractual cap)", len(detail.History))
 	}
 	// Newest first.
 	for i := 1; i < len(detail.History); i++ {
@@ -1034,6 +1201,22 @@ func TestAgentQuery(t *testing.T) {
 	for _, h := range detail.History {
 		if h.AtMS == oldSince {
 			t.Fatalf("the 8 day old transition is in the answer")
+		}
+	}
+	// The five oldest of the 205 recent transitions are the ones the
+	// cap leaves out, by the newest-first order of the contract.
+	if detail.History[0].AtMS != now {
+		t.Fatalf("history[0] at_ms = %d, want %d (the newest)", detail.History[0].AtMS, now)
+	}
+	if detail.History[199].AtMS != now-199*900000 {
+		t.Fatalf("history[199] at_ms = %d, want %d (the 200th newest)", detail.History[199].AtMS, now-199*900000)
+	}
+	for i := 200; i <= 204; i++ {
+		excluded := now - int64(i)*900000
+		for _, h := range detail.History {
+			if h.AtMS == excluded {
+				t.Fatalf("history at_ms %d: past the cap, out of the answer", excluded)
+			}
 		}
 	}
 	// The absent agent is ErrNotFound.
@@ -1194,13 +1377,18 @@ func TestOverviewNeedsYouCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
-	if len(res.NeedsYou) != maxNeedsYou {
-		t.Fatalf("needs_you = %d, want %d (the cap)", len(res.NeedsYou), maxNeedsYou)
+	if len(res.NeedsYou) != 10 {
+		t.Fatalf("needs_you = %d, want 10 (the contractual cap)", len(res.NeedsYou))
 	}
 	// The 10 oldest: since t0+1000 .. t0+10000, the two newest out.
 	for i, a := range res.NeedsYou {
 		if a.SinceMS == nil || *a.SinceMS != t0+int64(i+1)*1000 {
 			t.Fatalf("needs_you[%d] since = %v, want %d", i, a.SinceMS, t0+int64(i+1)*1000)
+		}
+	}
+	for _, a := range res.NeedsYou {
+		if a.SinceMS != nil && *a.SinceMS > t0+10000 {
+			t.Fatalf("needs_you since %d: past the cap, out of the answer", *a.SinceMS)
 		}
 	}
 }
@@ -1244,8 +1432,8 @@ func TestOverviewTopProjectsCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
-	if len(res.TopProjects) != maxTopProjects {
-		t.Fatalf("top_projects = %d, want %d (the cap)", len(res.TopProjects), maxTopProjects)
+	if len(res.TopProjects) != 5 {
+		t.Fatalf("top_projects = %d, want 5 (the contractual cap)", len(res.TopProjects))
 	}
 	// proj1 (2 working) first, then proj2 (2 idle) and the rest by
 	// the name (the tie-breaker of the test).
@@ -1253,6 +1441,12 @@ func TestOverviewTopProjectsCap(t *testing.T) {
 	for i, w := range wantOrder {
 		if res.TopProjects[i].Project != w {
 			t.Fatalf("top_projects[%d] = %q, want %q", i, res.TopProjects[i].Project, w)
+		}
+	}
+	// proj6 and proj7 are the two left out by the cap.
+	for _, p := range res.TopProjects {
+		if p.Project == "proj6" || p.Project == "proj7" {
+			t.Fatalf("top_projects = %v: %s is past the cap, out of the answer", res.TopProjects, p.Project)
 		}
 	}
 }

@@ -32,7 +32,7 @@ func realIngestStore(t *testing.T) store.Store {
 	defer cancel()
 	for _, name := range []string{
 		"schema_migrations", "hub_meta", "inventory_snapshots", "agents_current",
-		"agent_history", "hidden_counts", "working_hourly",
+		"agent_history", "hidden_counts", "working_hourly", "ingest_guard",
 	} {
 		if _, err := c.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + name}); err != nil {
 			t.Fatalf("drop %s: %v", name, err)
@@ -249,5 +249,142 @@ func TestSQLDRetainBoundaries(t *testing.T) {
 	}
 	if n := count("SELECT COUNT(*) FROM working_hourly WHERE hour_ms = ?", hcut-3600000); n != 0 {
 		t.Fatalf("hour past the boundary = %d, want 0 (deleted)", n)
+	}
+}
+
+// pauseRealBatch is the store wrapper that pauses before its batch:
+// the test interleaves two applies of the same machine inside the
+// window between the read and the write of the first one.
+type pauseRealBatch struct {
+	store.Store
+	ready, release chan struct{}
+}
+
+func (p *pauseRealBatch) Batch(ctx context.Context, v []store.Stmt) ([]store.Result, error) {
+	select {
+	case <-p.ready:
+	default:
+		close(p.ready)
+	}
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return p.Store.Batch(ctx, v)
+}
+
+// TestSQLDConcurrentApplyKeepsTheNewer: against the real sqld, the
+// older apply pauses before its batch, the newer one applies fully,
+// and the released older one must not land on top of it: the final
+// state is the newer inventory and its history has no row of the
+// older one.
+func TestSQLDConcurrentApplyKeepsTheNewer(t *testing.T) {
+	st := realIngestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	const g int64 = 1793376000000
+	if r, err := Apply(ctx, st, "m3", mkInv(g, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "working", nil, nil))), g+10); err != nil || !r.Applied {
+		t.Fatalf("seed: applied=%v err=%v", r.Applied, err)
+	}
+	hold := &pauseRealBatch{Store: st, ready: make(chan struct{}), release: make(chan struct{})}
+	type outcome struct {
+		applied bool
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		r, err := Apply(ctx, hold, "m3", mkInv(g+1000, inventory.Hidden{},
+			mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "idle", nil, nil))), g+1010)
+		done <- outcome{r.Applied, err}
+	}()
+	select {
+	case <-hold.ready:
+	case <-ctx.Done():
+		t.Fatal("the stale apply did not reach its batch")
+	}
+	if r, err := Apply(ctx, st, "m3", mkInv(g+2000, inventory.Hidden{},
+		mkProject("acme/web", "w1", mkAgent("w1:p1", "build", "done", nil, nil))), g+2010); err != nil || !r.Applied {
+		t.Fatalf("the newer apply: applied=%v err=%v", r.Applied, err)
+	}
+	close(hold.release)
+	out := <-done
+	if out.err != nil || out.applied {
+		t.Fatalf("the stale apply after the conflict: applied=%v err=%v, want false and no error", out.applied, out.err)
+	}
+	res, err := st.Execute(ctx, store.Stmt{SQL: "SELECT generated_ms FROM inventory_snapshots WHERE machine_id = ?", Args: []store.Value{"m3"}})
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != g+2000 {
+		t.Fatalf("snapshot = %v, want %d (the newer one wins); err=%v", res.Rows, g+2000, err)
+	}
+	res, err = st.Execute(ctx, store.Stmt{SQL: "SELECT state FROM agents_current WHERE machine_id = ? AND terminal = ?", Args: []store.Value{"m3", "w1:p1"}})
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != "done" {
+		t.Fatalf("agent state = %v, want done (the stale one must not overwrite); err=%v", res.Rows, err)
+	}
+	res, err = st.Execute(ctx, store.Stmt{SQL: "SELECT COUNT(*) FROM agent_history WHERE machine_id = ? AND at_ms = ?", Args: []store.Value{"m3", g + 1000}})
+	if err != nil || len(res.Rows) != 1 || res.Rows[0][0] != int64(0) {
+		t.Fatalf("stale history rows = %v, want 0 (the stale apply must not leave a transition); err=%v", res.Rows, err)
+	}
+}
+
+// TestSQLDLargeMachineList: a list of 1200 machines is answered by
+// the chunked queries: no statement exceeds the argument budget, the
+// join counts each machine once, and the aggregates sum over the
+// chunks.
+func TestSQLDLargeMachineList(t *testing.T) {
+	st := realIngestStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const n = 1200
+	const now int64 = 1793462400000 // on the hour
+	lastHour := now - 3600000       // the last complete hour
+	snap := "INSERT INTO inventory_snapshots (machine_id, generated_ms, received_ms, soho_version) VALUES (?, ?, ?, ?)"
+	agent := "INSERT INTO agents_current (machine_id, terminal, project, session, name, role, kind, model, effort, state, reason, task, report_ready, started_ms, since_ms, observed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	hidden := "INSERT INTO hidden_counts (machine_id, working, needs_you, done, idle, unknown, observed_ms) VALUES (?, ?, ?, ?, ?, ?, ?)"
+	hourly := "INSERT INTO working_hourly (machine_id, hour_ms, max_working) VALUES (?, ?, ?)"
+	stmts := make([]store.Stmt, 0, 4*n)
+	for i := 0; i < n; i++ {
+		id := "m" + itoa(i)
+		stmts = append(stmts,
+			store.Stmt{SQL: snap, Args: []store.Value{id, now - 3600000, now - int64(i), "v0.3.1"}},
+			store.Stmt{SQL: agent, Args: []store.Value{id, "w1:p1", "acme/web", "w1", "build", "implementer", "cli-b", nil, nil, "working", nil, nil, int64(0), now - 7200000, nil, now - int64(i)}},
+			store.Stmt{SQL: hidden, Args: []store.Value{id, int64(1), int64(0), int64(0), int64(0), int64(0), now - int64(i)}},
+			store.Stmt{SQL: hourly, Args: []store.Value{id, lastHour, int64(1)}},
+		)
+	}
+	if _, err := st.Batch(ctx, stmts); err != nil {
+		t.Fatalf("seed the machines: %v", err)
+	}
+	ids := make([]string, n)
+	for i := 0; i < n; i++ {
+		ids[i] = "m" + itoa(i)
+	}
+	agents, err := Agents(ctx, st, ids, now)
+	if err != nil {
+		t.Fatalf("Agents with %d machines: %v", n, err)
+	}
+	if len(agents.Agents) != n {
+		t.Fatalf("agents = %d, want %d (each machine counted once)", len(agents.Agents), n)
+	}
+	for _, a := range agents.Agents {
+		if !a.Online || a.State != inventory.StateWorking {
+			t.Fatalf("agent = %+v, want online working", a)
+		}
+	}
+	ov, err := Overview(ctx, st, ids, now)
+	if err != nil {
+		t.Fatalf("Overview with %d machines: %v", n, err)
+	}
+	if ov.Counts.Working != 2*n {
+		t.Fatalf("working = %d, want %d (the shown plus the hidden, over the chunks)", ov.Counts.Working, 2*n)
+	}
+	if len(ov.PerMachine) != n {
+		t.Fatalf("per_machine = %d, want %d", len(ov.PerMachine), n)
+	}
+	if w := ov.Working24h[hourlyBuckets-1].Working; w != n {
+		t.Fatalf("the last complete hour = %d, want %d (the sum over the chunks)", w, n)
+	}
+	if len(ov.TopProjects) != 1 || ov.TopProjects[0].Project != "acme/web" || ov.TopProjects[0].Agents != n || ov.TopProjects[0].Working != n {
+		t.Fatalf("top_projects = %+v, want the single project with %d agents", ov.TopProjects, n)
 	}
 }

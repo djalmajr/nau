@@ -33,6 +33,15 @@ const (
 	// hourlyBuckets is the number of entries of the 24 h working
 	// series.
 	hourlyBuckets = 24
+	// maxApplyAttempts is the number of attempts of the guarded write
+	// of the Apply: the first attempt plus the retries after a
+	// conflict.
+	maxApplyAttempts = 3
+	// maxStatementArgs is the argument budget of one statement of the
+	// queries: the machine ids of a chunk plus the other arguments of
+	// the statement stay at most this number, far below the variable
+	// limit of the database.
+	maxStatementArgs = 500
 )
 
 // onlineWindowMS is the online window of the queries: a machine is
@@ -43,6 +52,11 @@ var onlineWindowMS int64 = 60 * 1000
 // ErrNotFound is the error of the Agent query when the hub holds no
 // such agent.
 var ErrNotFound = errors.New("ingest: agent not found")
+
+// ErrConflict is the error of the Apply when its guard fails on the
+// last attempt: a newer inventory of the machine committed inside the
+// window of the write and the retries are spent.
+var ErrConflict = errors.New("ingest: the inventory of the machine was superseded while applying")
 
 // Result is the outcome of one Apply.
 type Result struct {
@@ -175,9 +189,18 @@ const (
 	sqlInsertAgent = "INSERT INTO agents_current (machine_id, terminal, project, session, name, role, kind, model, effort, state, reason, task, report_ready, started_ms, since_ms, observed_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
 	// sqlInsertHistory writes one transition.
 	sqlInsertHistory = "INSERT INTO agent_history (machine_id, terminal, project, name, state, reason, at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)"
-	// sqlUpsertSnapshot writes or replaces the snapshot of the
-	// machine.
-	sqlUpsertSnapshot = "INSERT INTO inventory_snapshots (machine_id, generated_ms, received_ms, soho_version) VALUES (?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET generated_ms = excluded.generated_ms, received_ms = excluded.received_ms, soho_version = excluded.soho_version"
+	// sqlUpdateSnapshot is the guarded write of the snapshot of a
+	// machine with a row: it changes exactly one row when the stored
+	// version is still the one the call read.
+	sqlUpdateSnapshot = "UPDATE inventory_snapshots SET generated_ms = ?, received_ms = ?, soho_version = ? WHERE machine_id = ? AND generated_ms = ?"
+	// sqlInsertSnapshot is the guarded write of the snapshot of a
+	// machine without a row.
+	sqlInsertSnapshot = "INSERT INTO inventory_snapshots (machine_id, generated_ms, received_ms, soho_version) VALUES (?, ?, ?, ?)"
+	// sqlGuardCheck fails the batch when the guarded step changed no
+	// row: the CHECK of the table rejects anything but 1.
+	sqlGuardCheck = "INSERT INTO ingest_guard VALUES (changes())"
+	// sqlGuardClear empties the guard table after the check.
+	sqlGuardClear = "DELETE FROM ingest_guard"
 	// sqlUpsertHidden writes or replaces the hidden counts.
 	sqlUpsertHidden = "INSERT INTO hidden_counts (machine_id, working, needs_you, done, idle, unknown, observed_ms) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(machine_id) DO UPDATE SET working = excluded.working, needs_you = excluded.needs_you, done = excluded.done, idle = excluded.idle, unknown = excluded.unknown, observed_ms = excluded.observed_ms"
 	// sqlUpsertHourly keeps, per hour, the maximum of working agents.
@@ -213,81 +236,128 @@ const (
 // Apply writes the inventory of one machine into the hub: the current
 // state of the agents, the transitions, the hidden counts and the
 // working hour. The inventory is the one already validated by
-// inventory.Parse; receivedMS is when the hub received it. An
-// inventory with a generated_ms not greater than the last applied one
-// of the machine changes nothing and returns Applied: false, which
-// makes the repeat idempotent and ignores the out-of-order ones.
+// inventory.Parse; receivedMS is when the hub received it.
+//
+// The order is guarded inside the batch: the snapshot write changes
+// exactly one row only when the generated_ms the call read is still
+// the current one, and the guard statement fails the batch when the
+// guarded step changed no row. The check and the writes therefore
+// count together, and an older inventory never lands on top of a
+// newer one even when two applies race between the read and the
+// write. When the guard fails because a newer inventory committed in
+// that window, Apply re-reads and retries, up to maxApplyAttempts
+// attempts; after the last one it returns ErrConflict. An inventory
+// not greater than the last applied one of the machine changes
+// nothing and returns Applied: false, which makes the repeat
+// idempotent and ignores the out-of-order ones.
 func Apply(ctx context.Context, st store.Store, machineID string, inv inventory.Inventory, receivedMS int64) (Result, error) {
-	// The order: read the last applied generated_ms of the machine
-	// and refuse the non-newer inventories.
-	res, err := st.Execute(ctx, store.Stmt{SQL: sqlLastGenerated, Args: []store.Value{machineID}})
-	if err != nil {
-		return Result{}, fmt.Errorf("ingest: read the snapshot: %v", err)
-	}
-	if len(res.Rows) > 0 {
-		last, ok := res.Rows[0][0].(int64)
-		if !ok {
-			return Result{}, errors.New("ingest: the snapshot generated_ms is not an integer")
+	for attempt := 0; attempt < maxApplyAttempts; attempt++ {
+		// The order: read the last applied generated_ms of the
+		// machine and refuse the non-newer inventories.
+		res, err := st.Execute(ctx, store.Stmt{SQL: sqlLastGenerated, Args: []store.Value{machineID}})
+		if err != nil {
+			return Result{}, fmt.Errorf("ingest: read the snapshot: %v", err)
 		}
-		if inv.GeneratedMS <= last {
-			return Result{Applied: false}, nil
+		last, hasLast := int64(0), false
+		if len(res.Rows) > 0 {
+			g, ok := res.Rows[0][0].(int64)
+			if !ok {
+				return Result{}, errors.New("ingest: the snapshot generated_ms is not an integer")
+			}
+			if inv.GeneratedMS <= g {
+				return Result{Applied: false}, nil
+			}
+			last, hasLast = g, true
 		}
-	}
-	// The history diff needs the current agents of the machine.
-	res, err = st.Execute(ctx, store.Stmt{SQL: sqlExistingAgents, Args: []store.Value{machineID}})
-	if err != nil {
-		return Result{}, fmt.Errorf("ingest: read the current agents: %v", err)
-	}
-	existing := make(map[string]existingAgent, len(res.Rows))
-	for _, row := range res.Rows {
-		terminal, _ := row[0].(string)
-		state, _ := row[1].(string)
-		var reason *inventory.Reason
-		if rs, ok := row[2].(string); ok {
-			r := inventory.Reason(rs)
-			reason = &r
+		// The history diff needs the current agents of the machine.
+		res, err = st.Execute(ctx, store.Stmt{SQL: sqlExistingAgents, Args: []store.Value{machineID}})
+		if err != nil {
+			return Result{}, fmt.Errorf("ingest: read the current agents: %v", err)
 		}
-		existing[terminal] = existingAgent{state: state, reason: reason}
-	}
-	// One atomic batch: the current state, the history, the snapshot,
-	// the hidden counts and the working hour.
-	stmts := make([]store.Stmt, 0, 8)
-	stmts = append(stmts, store.Stmt{SQL: sqlDeleteAgents, Args: []store.Value{machineID}})
-	var working int64
-	for _, p := range inv.Projects {
-		for _, s := range p.Sessions {
-			for _, a := range s.Agents {
-				if a.State == inventory.StateWorking {
-					working++
-				}
-				stmts = append(stmts, insertAgent(machineID, p.Name, s.ID, a, receivedMS))
-				old, had := existing[a.Terminal]
-				if !had || old.state != string(a.State) || !sameReason(old.reason, a.Reason) {
-					atMS := inv.GeneratedMS
-					if a.SinceMS != nil {
-						atMS = *a.SinceMS
+		existing := make(map[string]existingAgent, len(res.Rows))
+		for _, row := range res.Rows {
+			terminal, _ := row[0].(string)
+			state, _ := row[1].(string)
+			var reason *inventory.Reason
+			if rs, ok := row[2].(string); ok {
+				r := inventory.Reason(rs)
+				reason = &r
+			}
+			existing[terminal] = existingAgent{state: state, reason: reason}
+		}
+		// One atomic batch: the guarded snapshot write and its guard
+		// first, then the current state, the history, the hidden
+		// counts and the working hour.
+		stmts := make([]store.Stmt, 0, 10)
+		if hasLast {
+			stmts = append(stmts, store.Stmt{SQL: sqlUpdateSnapshot, Args: []store.Value{inv.GeneratedMS, receivedMS, inv.SohoVersion, machineID, last}})
+		} else {
+			stmts = append(stmts, store.Stmt{SQL: sqlInsertSnapshot, Args: []store.Value{machineID, inv.GeneratedMS, receivedMS, inv.SohoVersion}})
+		}
+		stmts = append(stmts,
+			store.Stmt{SQL: sqlGuardCheck},
+			store.Stmt{SQL: sqlGuardClear},
+			store.Stmt{SQL: sqlDeleteAgents, Args: []store.Value{machineID}},
+		)
+		var working int64
+		for _, p := range inv.Projects {
+			for _, s := range p.Sessions {
+				for _, a := range s.Agents {
+					if a.State == inventory.StateWorking {
+						working++
 					}
-					stmts = append(stmts, store.Stmt{
-						SQL:  sqlInsertHistory,
-						Args: []store.Value{machineID, a.Terminal, p.Name, a.Name, string(a.State), valueReason(a.Reason), atMS},
-					})
+					stmts = append(stmts, insertAgent(machineID, p.Name, s.ID, a, receivedMS))
+					old, had := existing[a.Terminal]
+					if !had || old.state != string(a.State) || !sameReason(old.reason, a.Reason) {
+						atMS := inv.GeneratedMS
+						if a.SinceMS != nil {
+							atMS = *a.SinceMS
+						}
+						stmts = append(stmts, store.Stmt{
+							SQL:  sqlInsertHistory,
+							Args: []store.Value{machineID, a.Terminal, p.Name, a.Name, string(a.State), valueReason(a.Reason), atMS},
+						})
+					}
 				}
 			}
 		}
+		working += int64(inv.Hidden.Working)
+		stmts = append(stmts,
+			store.Stmt{SQL: sqlUpsertHidden, Args: []store.Value{
+				machineID, int64(inv.Hidden.Working), int64(inv.Hidden.NeedsYou), int64(inv.Hidden.Done),
+				int64(inv.Hidden.Idle), int64(inv.Hidden.Unknown), receivedMS,
+			}},
+			store.Stmt{SQL: sqlUpsertHourly, Args: []store.Value{machineID, hourOf(inv.GeneratedMS), working}},
+		)
+		if _, err := st.Batch(ctx, stmts); err != nil {
+			// The batch failed. When the version the call read moved,
+			// a newer inventory committed in the window: the conflict
+			// retries. Anything else is a store error, returned as is.
+			cur, cerr := st.Execute(ctx, store.Stmt{SQL: sqlLastGenerated, Args: []store.Value{machineID}})
+			if cerr != nil {
+				return Result{}, fmt.Errorf("ingest: apply the inventory: %v", err)
+			}
+			moved := false
+			if hasLast {
+				if len(cur.Rows) == 0 {
+					moved = true
+				} else if v, ok := cur.Rows[0][0].(int64); ok {
+					moved = v != last
+				}
+			} else if len(cur.Rows) > 0 {
+				moved = true
+			}
+			if !moved {
+				return Result{}, fmt.Errorf("ingest: apply the inventory: %v", err)
+			}
+			if attempt == maxApplyAttempts-1 {
+				return Result{}, ErrConflict
+			}
+			continue
+		}
+		return Result{Applied: true}, nil
 	}
-	working += int64(inv.Hidden.Working)
-	stmts = append(stmts,
-		store.Stmt{SQL: sqlUpsertSnapshot, Args: []store.Value{machineID, inv.GeneratedMS, receivedMS, inv.SohoVersion}},
-		store.Stmt{SQL: sqlUpsertHidden, Args: []store.Value{
-			machineID, int64(inv.Hidden.Working), int64(inv.Hidden.NeedsYou), int64(inv.Hidden.Done),
-			int64(inv.Hidden.Idle), int64(inv.Hidden.Unknown), receivedMS,
-		}},
-		store.Stmt{SQL: sqlUpsertHourly, Args: []store.Value{machineID, hourOf(inv.GeneratedMS), working}},
-	)
-	if _, err := st.Batch(ctx, stmts); err != nil {
-		return Result{}, fmt.Errorf("ingest: apply the inventory: %v", err)
-	}
-	return Result{Applied: true}, nil
+	return Result{}, ErrConflict
 }
 
 // existingAgent is the diff entry of one current agent.
@@ -350,20 +420,14 @@ func Agents(ctx context.Context, st store.Store, machineIDs []string, nowMS int6
 	if err != nil {
 		return AgentsResult{}, err
 	}
-	res, err := st.Execute(ctx, store.Stmt{
-		SQL:  sqlAgentsIN + inPlaceholders(len(machineIDs)) + " ORDER BY machine_id, terminal",
-		Args: valuesOf(machineIDs),
-	})
+	res, err := runIn(ctx, st, sqlAgentsIN, " ORDER BY machine_id, terminal", machineIDs, maxStatementArgs)
 	if err != nil {
 		return AgentsResult{}, fmt.Errorf("ingest: read the agents: %v", err)
 	}
 	for _, row := range res.Rows {
 		out.Agents = append(out.Agents, agentFromRow(row, online))
 	}
-	res, err = st.Execute(ctx, store.Stmt{
-		SQL:  sqlHiddenIN + inPlaceholders(len(machineIDs)) + " ORDER BY machine_id",
-		Args: valuesOf(machineIDs),
-	})
+	res, err = runIn(ctx, st, sqlHiddenIN, " ORDER BY machine_id", machineIDs, maxStatementArgs)
 	if err != nil {
 		return AgentsResult{}, fmt.Errorf("ingest: read the hidden counts: %v", err)
 	}
@@ -426,10 +490,7 @@ func Overview(ctx context.Context, st store.Store, machineIDs []string, nowMS in
 	if err != nil {
 		return OverviewResult{}, err
 	}
-	res, err := st.Execute(ctx, store.Stmt{
-		SQL:  sqlAgentsIN + inPlaceholders(len(machineIDs)) + " ORDER BY machine_id, terminal",
-		Args: valuesOf(machineIDs),
-	})
+	res, err := runIn(ctx, st, sqlAgentsIN, " ORDER BY machine_id, terminal", machineIDs, maxStatementArgs)
 	if err != nil {
 		return OverviewResult{}, fmt.Errorf("ingest: read the agents: %v", err)
 	}
@@ -438,10 +499,7 @@ func Overview(ctx context.Context, st store.Store, machineIDs []string, nowMS in
 		agents = append(agents, agentFromRow(row, online))
 	}
 	hiddenBy := make(map[string]inventory.Hidden)
-	res, err = st.Execute(ctx, store.Stmt{
-		SQL:  sqlHiddenIN + inPlaceholders(len(machineIDs)) + " ORDER BY machine_id",
-		Args: valuesOf(machineIDs),
-	})
+	res, err = runIn(ctx, st, sqlHiddenIN, " ORDER BY machine_id", machineIDs, maxStatementArgs)
 	if err != nil {
 		return OverviewResult{}, fmt.Errorf("ingest: read the hidden counts: %v", err)
 	}
@@ -542,12 +600,10 @@ func Overview(ctx context.Context, st store.Store, machineIDs []string, nowMS in
 	}
 	// The 24 hours: exactly 24 entries, oldest first, the maximum
 	// working summed over the visible machines per hour, zero where
-	// there is no data. The entries end at the last complete hour.
+	// there is no data. The entries end at the last complete hour. The
+	// budget leaves one argument for the cutoff.
 	curHour := hourOf(nowMS)
-	res, err = st.Execute(ctx, store.Stmt{
-		SQL:  sqlHourlyIN + inPlaceholders(len(machineIDs)) + " AND hour_ms >= ? ORDER BY hour_ms",
-		Args: append(valuesOf(machineIDs), curHour-int64(hourlyBuckets)*hourMS),
-	})
+	res, err = runIn(ctx, st, sqlHourlyIN, " AND hour_ms >= ? ORDER BY hour_ms", machineIDs, maxStatementArgs-1, curHour-int64(hourlyBuckets)*hourMS)
 	if err != nil {
 		return OverviewResult{}, fmt.Errorf("ingest: read the working hours: %v", err)
 	}
@@ -576,10 +632,7 @@ func emptyOverview() OverviewResult {
 // onlineOf marks the machines whose last inventory was received within
 // the online window; a machine without a snapshot is offline.
 func onlineOf(ctx context.Context, st store.Store, machineIDs []string, nowMS int64) (map[string]bool, error) {
-	res, err := st.Execute(ctx, store.Stmt{
-		SQL:  sqlSnapshotIN + inPlaceholders(len(machineIDs)) + " ORDER BY machine_id",
-		Args: valuesOf(machineIDs),
-	})
+	res, err := runIn(ctx, st, sqlSnapshotIN, " ORDER BY machine_id", machineIDs, maxStatementArgs)
 	if err != nil {
 		return nil, fmt.Errorf("ingest: read the snapshots: %v", err)
 	}
@@ -660,6 +713,54 @@ func needsBefore(a, b AgentRow) bool {
 // closed: the caller appends nothing but the following clause.
 func inPlaceholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?, ", n), ", ") + ")"
+}
+
+// runIn runs the IN query in chunks of the machine list and joins the
+// rows: one statement per chunk, the ids of the chunk plus the extra
+// arguments of the statement staying at most budget, and the join of
+// the rows without counting a machine twice. The ids are deduplicated
+// and sorted, so each machine falls in exactly one chunk and the
+// joined rows keep the machine order of the statement.
+func runIn(ctx context.Context, st store.Store, prefix, suffix string, machineIDs []string, budget int, extra ...store.Value) (store.Result, error) {
+	var rows []store.Row
+	for _, chunk := range inChunks(machineIDs, budget) {
+		args := make([]store.Value, 0, len(chunk)+len(extra))
+		args = append(args, valuesOf(chunk)...)
+		args = append(args, extra...)
+		res, err := st.Execute(ctx, store.Stmt{
+			SQL:  prefix + inPlaceholders(len(chunk)) + suffix,
+			Args: args,
+		})
+		if err != nil {
+			return store.Result{}, err
+		}
+		rows = append(rows, res.Rows...)
+	}
+	return store.Result{Rows: rows}, nil
+}
+
+// inChunks deduplicates and sorts the machine ids and splits them
+// into chunks of at most size ids.
+func inChunks(ids []string, size int) [][]string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	sort.Strings(out)
+	var chunks [][]string
+	for len(out) > 0 {
+		n := size
+		if len(out) < n {
+			n = len(out)
+		}
+		chunks = append(chunks, out[:n])
+		out = out[n:]
+	}
+	return chunks
 }
 
 // valuesOf builds the Args list of a machine id list.
