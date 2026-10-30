@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { renderHubApp } from "@/test/hub-harness";
+import { defaultHubState, renderHubApp } from "@/test/hub-harness";
 
 const BUILD_ID = "m2.w1:p2";
 
@@ -87,5 +87,31 @@ describe("agent detail", () => {
     await user.click(within(pageMain()).getByRole("link", { name: "Agentes" }));
     expect(router.state.location.pathname).toBe("/agents");
     expect(router.state.location.search).toMatchObject({ view: "list", q: "xyz" });
+  });
+
+  it("shows the error on a 500 and recovers the detail after the retry", async () => {
+    const state = defaultHubState({ agentDetailFail: 500 });
+    renderHubApp(`/agents/${BUILD_ID}`, state);
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+
+    // Primeira requisição 500: estado de erro, sem o conteúdo do detalhe.
+    const retry = await screen.findByRole("button", { name: "Tentar de novo" });
+    expect(pageMain()).not.toHaveTextContent("build · implementer");
+
+    // O botão refaz a requisição e o detalhe reaparece.
+    state.agentDetailFail = undefined;
+    await user.click(retry);
+
+    expect(
+      await screen.findByRole(
+        "heading",
+        { name: "Retry declined cards in the checkout worker" },
+      ),
+    ).toBeInTheDocument();
+    // Requisição nova: duas chamadas ao endpoint do detalhe (o id vai
+    // codificado no URL: m2.w1%3Ap2).
+    expect(
+      state.calls.filter((call) => decodeURIComponent(call.url) === `/api/agents/${BUILD_ID}`),
+    ).toHaveLength(2);
   });
 });

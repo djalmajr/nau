@@ -49,7 +49,7 @@ import { api } from "@/lib/api";
 import { avatarHue, initials } from "@/lib/avatar";
 import { LOCALE_OPTIONS, useI18n, type Locale, type TranslationKey } from "@/lib/i18n";
 import { useLiveStatus } from "@/lib/live-status";
-import { SESSION_QUERY_KEY, sessionName, useSession } from "@/lib/session";
+import { sessionName, useSession } from "@/lib/session";
 import { type ThemePreference, useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -215,7 +215,9 @@ function UserMenu() {
     } catch {
       // mesmo com falha no DELETE, encerra a sessão localmente
     }
-    queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY });
+    // Limpa todos os dados autenticados (e não só a sessão): os dados de
+    // outra conta nunca reaparecem no navegador depois do logout.
+    queryClient.clear();
     navigate({ to: "/login", replace: true });
   }
 

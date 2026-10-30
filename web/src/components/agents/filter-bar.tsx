@@ -33,7 +33,10 @@ function FilterSelect({
       onValueChange={(next) => onChange(typeof next === "string" ? next : ALL)}
       value={current ? value : ALL}
     >
-      <SelectTrigger aria-label={label} className="w-40">
+      {/* O nome do filtro é visível junto do valor ("Desenvolvedor: Todos");
+          o nome acessível continua no aria-label. */}
+      <SelectTrigger aria-label={label} className="w-60">
+        <span className="shrink-0 text-xs text-muted-foreground">{label}:</span>
         <SelectValue>{current ? current.name : t("filters.all")}</SelectValue>
       </SelectTrigger>
       <SelectContent>
@@ -93,9 +96,11 @@ export function FilterBar({
           aria-hidden
           className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
         />
+        {/* w-80: o placeholder inteiro cabe nos dois idiomas a partir de
+            800 px (medido com o método da revisão). */}
         <Input
           aria-label={t("filters.search")}
-          className="h-8 w-56 pl-8"
+          className="h-8 w-80 pl-8"
           onChange={(event) => onChange({ q: event.currentTarget.value })}
           placeholder={t("filters.search")}
           type="search"

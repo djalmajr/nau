@@ -279,3 +279,22 @@ describe("agents empty and error states", () => {
     });
   });
 });
+
+describe("agents cache keys", () => {
+  it("opens a detail whose opaque id is `list` after loading the list", async () => {
+    // O id é opaco pelo contrato: "list" é id válido e não pode colidir com a
+    // chave da lista (a colisão fazia o detalhe renderizar a AgentsResponse).
+    const a = { ...AGENTS[0], id: "list" };
+    const state = defaultHubState({
+      agentDetail: { list: { agent: a, history: [] } },
+      agents: { agents: [a], generated_ms: 0, hidden: [] },
+    });
+    renderHubApp("/agents", state);
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const link = await screen.findByRole("link", { name: /Retry declined cards/ });
+    await user.click(link);
+    expect(
+      await screen.findByRole("heading", { name: a.task ?? a.name }),
+    ).toBeInTheDocument();
+  });
+});

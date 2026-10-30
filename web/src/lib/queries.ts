@@ -3,37 +3,57 @@
 // mantém as telas vivas (a pílula do header continua "offline").
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import { useSession } from "./session";
 
 /** Intervalo de atualização periódica das telas de dados. */
 export const AGENT_REFRESH_MS = 15_000;
 
-export const AGENTS_QUERY_KEY = ["agents", "list"] as const;
-export const AGENT_QUERY_KEY = (id: string) => ["agents", id] as const;
-export const OVERVIEW_QUERY_KEY = ["overview"] as const;
+// Chaves namespaced: lista e detalhe nunca colidem (um agente com id "list"
+// não pega a chave da lista) e a id do usuário da sessão entra na chave como
+// segunda defesa — a primeira é limpar o QueryClient em logout/401/login
+// (lib/session, app-shell e login). Os dados de uma conta nunca chegam à
+// chave de outra.
+export const AGENTS_QUERY_KEY = (userId: string) => ["agents", "list", userId] as const;
+export const AGENT_QUERY_KEY = (userId: string, id: string) => ["agents", "detail", userId, id] as const;
+export const OVERVIEW_QUERY_KEY = (userId: string) => ["overview", userId] as const;
+
+/** Id do usuário da sessão, lido da query de sessão já em cache. Indefinido
+ *  enquanto a sessão é verificada: as queries ficam desabilitadas (sem
+ *  requisição vazia) até o usuário ser conhecido. */
+function useSessionUserId(): string | undefined {
+  const { data } = useSession();
+  return data?.id;
+}
 
 /** GET /api/agents — a UI filtra a lista completa no cliente. */
 export function useAgents() {
+  const userId = useSessionUserId();
   return useQuery({
-    queryKey: AGENTS_QUERY_KEY,
+    queryKey: AGENTS_QUERY_KEY(userId ?? "anonymous"),
     queryFn: () => api.getAgents(),
     refetchInterval: AGENT_REFRESH_MS,
+    enabled: userId !== undefined,
   });
 }
 
 /** GET /api/agents/{id} — 404 vira ApiError(404) na UI (tela "não encontrado"). */
 export function useAgent(id: string) {
+  const userId = useSessionUserId();
   return useQuery({
-    queryKey: AGENT_QUERY_KEY(id),
+    queryKey: AGENT_QUERY_KEY(userId ?? "anonymous", id),
     queryFn: () => api.getAgent(id),
     refetchInterval: AGENT_REFRESH_MS,
+    enabled: userId !== undefined,
   });
 }
 
 /** GET /api/overview — números, espera, máquinas, 24 h e projetos. */
 export function useOverview() {
+  const userId = useSessionUserId();
   return useQuery({
-    queryKey: OVERVIEW_QUERY_KEY,
+    queryKey: OVERVIEW_QUERY_KEY(userId ?? "anonymous"),
     queryFn: () => api.getOverview(),
     refetchInterval: AGENT_REFRESH_MS,
+    enabled: userId !== undefined,
   });
 }

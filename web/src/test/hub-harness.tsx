@@ -20,7 +20,7 @@ import type {
   SessionUser,
 } from "@/lib/api";
 import { I18nProvider } from "@/lib/i18n";
-import { registerUnauthorizedRedirect } from "@/lib/session";
+import { SESSION_QUERY_KEY, registerUnauthorizedRedirect } from "@/lib/session";
 import { ThemeProvider } from "@/lib/theme";
 import { AgentsPage } from "@/routes/agents";
 import { AgentDetailPage } from "@/routes/agents-detail";
@@ -38,6 +38,8 @@ export interface HubApiState {
   /** null = erro 500 nos endpoints de dados. */
   agents: AgentsResponse | null;
   agentDetail: Record<string, AgentDetailResponse>;
+  /** Status do endpoint de detalhe quando definido (ex.: 500). */
+  agentDetailFail?: number;
   overview: OverviewResponse | null;
   calls: Array<{ method: string; url: string }>;
 }
@@ -74,6 +76,9 @@ export function fakeHubFetch(state: HubApiState) {
     }
     const match = url.match(/^\/api\/agents\/(.+)$/);
     if (match) {
+      if (state.agentDetailFail !== undefined) {
+        return jsonResponse(state.agentDetailFail, { error: "fixture_failure" });
+      }
       const detail = state.agentDetail[decodeURIComponent(match[1])];
       return detail ? jsonResponse(200, detail) : jsonResponse(404, { error: "not_found" });
     }
@@ -134,6 +139,10 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
   });
   registerUnauthorizedRedirect(queryClient, router);
   vi.stubGlobal("fetch", fakeHubFetch(apiState));
+  // Sessão já verificada (caso quente, como na navegação normal do app):
+  // evita a corrida sessão→dados no teste e não afeta os estados de erro
+  // das telas de dados, que é o alvo da suíte.
+  queryClient.setQueryData(SESSION_QUERY_KEY, TEST_USER);
   render(<RouterProvider router={router} />);
   return { router, queryClient };
 }

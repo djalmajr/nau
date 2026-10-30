@@ -1,6 +1,10 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// Máquina compartilhada: a carga do event loop atrasa renders; dá um orçamento
+// maior às queries assíncronas (findBy*) sem mudar as asserções.
+configure({ asyncUtilTimeout: 10_000 });
 
 function createMemoryStorage(): Storage {
   const items = new Map<string, string>();

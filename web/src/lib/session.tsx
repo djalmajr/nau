@@ -31,7 +31,9 @@ type GuardRouter = {
  *  uma vez pelo app (main.tsx) e pelos harnesses de teste. */
 export function registerUnauthorizedRedirect(queryClient: QueryClient, router: GuardRouter): void {
   setUnauthorizedHandler(() => {
-    queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY });
+    // Limpa todos os dados autenticados (e não só a sessão): com a sessão
+    // de outra conta, as telas da anterior nunca reaparecem.
+    queryClient.clear();
     const { href, pathname } = router.state.location;
     if (pathname !== "/login") {
       // `next` guarda o destino interno inteiro para o login devolver o
