@@ -39,6 +39,9 @@ var commands = []command{
 	// DJA-620: the central hub server (no local state: the store is the
 	// remote database named by the environment)
 	{"hub", false, false, cmdHub},
+	// DJA-622: the machine connect to the hub (writes the local
+	// hub.json credential once the pairing is confirmed)
+	{"connect", true, true, cmdConnect},
 }
 
 // Run executes args[0] as a command and returns its exit code. An unknown

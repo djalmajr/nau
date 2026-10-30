@@ -201,6 +201,14 @@ func (a *Auth) RequireSession(h func(ctx context.Context, req hub.Request, u Use
 	}
 }
 
+// SessionUser resolves the signed-in user of a request, or false:
+// the session cookie is checked (signature, stored row, expiration,
+// revocation). The other hub layers (the machines) use it to read the
+// session without owning the cookie.
+func (a *Auth) SessionUser(ctx context.Context, req hub.Request) (User, bool) {
+	return a.sessionUser(ctx, req)
+}
+
 // ---- the shared protections -----------------------------------------
 
 // checkContentType enforces the common protection of the decision: a

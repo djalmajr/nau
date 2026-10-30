@@ -16,6 +16,7 @@ import (
 	"github.com/djalmajr/nau/internal/hub"
 	"github.com/djalmajr/nau/internal/hub/accounts"
 	"github.com/djalmajr/nau/internal/hub/httpserve"
+	"github.com/djalmajr/nau/internal/hub/machines"
 	"github.com/djalmajr/nau/internal/hub/migrate"
 	"github.com/djalmajr/nau/internal/hub/sqld"
 	"github.com/djalmajr/nau/internal/hub/store"
@@ -191,6 +192,20 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 2, "hub serve: "+hubEnvSessionKey+" must be base64 of at least 32 bytes")
 		return 2
 	}
+	// The machine connect is over the same store: the sessions it
+	// reads are the accounts' sessions, and the inventories apply
+	// through the hub store.
+	mach, err := machines.New(machines.Config{
+		Store:       st,
+		Machines:    machines.NewSQL(st),
+		SessionUser: auth.SessionUser,
+		Now:         env.Now,
+	})
+	if err != nil {
+		// The configuration is the fixed one: New cannot fail here.
+		fail(env, 2, "hub serve: the machine connect is misconfigured")
+		return 2
+	}
 	ln, err := hubServeListen("tcp", listen)
 	if err != nil {
 		fail(env, 4, "hub serve: cannot listen on "+listen)
@@ -217,6 +232,7 @@ func cmdHubServe(args []string, env Env) int {
 		CronToken: env.Getenv(hubEnvCronToken),
 	}, static)
 	auth.Register(srvHub)
+	mach.Register(srvHub)
 	srv := httpserve.NewServer(httpserve.New(srvHub))
 	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
 
