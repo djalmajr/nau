@@ -30,8 +30,11 @@ const (
 	randomIDSize = 16
 )
 
-// User is one hub account. The PasswordHash is an internal value: it
-// never leaves the package in a response.
+// User is one hub account. The PasswordHash and the AuthVersion are
+// internal values: they never leave the package in a response. The
+// AuthVersion is the version of the credential: a password change
+// bumps it, and a session is live only while it carries the current
+// version.
 type User struct {
 	ID           string
 	Email        string
@@ -39,6 +42,7 @@ type User struct {
 	Name         string
 	Role         string
 	PasswordHash string
+	AuthVersion  int64
 	CreatedMS    int64
 }
 
@@ -73,10 +77,28 @@ var (
 type AccountStore interface {
 	CountUsers(ctx context.Context) (int, error)
 	BootstrapOwner(ctx context.Context, u User, s SessionRow) error
-	CreateUserWithSession(ctx context.Context, u User, s SessionRow) error
 	FindUserByEmailNorm(ctx context.Context, norm string) (User, bool, error)
 	FindUserByID(ctx context.Context, id string) (User, bool, error)
-	ChangePasswordWithNewSession(ctx context.Context, userID, passwordHash string, s SessionRow) error
+	// ReserveAttempt reserves one login attempt for the e-mail, before
+	// any password verification: the row is inserted only while the
+	// per-e-mail and the global counts inside the window stay below
+	// the limits, in one statement. It reports false, with no error,
+	// when no attempt fits the budget. A wrong attempt leaves the
+	// reservation as the failure; a success clears the e-mail.
+	ReserveAttempt(ctx context.Context, emailNorm string, atMS int64) (bool, error)
+	// CreateSessionForUser inserts the session only while the user
+	// still carries the verified auth version and password hash, in
+	// one conditional statement: a rotation between the read and the
+	// write leaves no row. It reports false, with no error, when the
+	// row did not enter.
+	CreateSessionForUser(ctx context.Context, s SessionRow, userID string, authVersion int64, passwordHash string) (bool, error)
+	// ChangePasswordWithNewSession sets the new hash and bumps the
+	// auth version, revokes every session of the user and creates the
+	// new one, in one atomic batch. The update is conditional on the
+	// auth version read by the caller; when it changed in the
+	// meantime the whole batch rolls back and the error is the guard
+	// failure the caller classifies by re-reading the user.
+	ChangePasswordWithNewSession(ctx context.Context, userID string, authVersion int64, passwordHash string, s SessionRow) error
 	CreateSession(ctx context.Context, s SessionRow) error
 	FindSession(ctx context.Context, tokenSHA string) (SessionRow, bool, error)
 	RevokeSession(ctx context.Context, tokenSHA string) error
@@ -88,7 +110,13 @@ type AccountStore interface {
 	FindInviteByTokenHash(ctx context.Context, hash string) (Invite, bool, error)
 	FindInviteByID(ctx context.Context, id string) (Invite, bool, error)
 	ListPendingInvites(ctx context.Context) ([]Invite, error)
-	ConsumeInvite(ctx context.Context, id string) (bool, error)
+	// AcceptInviteWithSession consumes the invite, creates the user
+	// and the session in one atomic batch. The consumption is
+	// conditional on the invite still being unused, unrevoked and
+	// unexpired at nowMS, and is confirmed by the one-row guard; when
+	// the condition was lost the whole batch rolls back, the invite
+	// not included.
+	AcceptInviteWithSession(ctx context.Context, inviteID string, nowMS int64, u User, s SessionRow) error
 	RevokeInvite(ctx context.Context, id string) error
 }
 
@@ -278,6 +306,9 @@ func (a *Auth) sessionRowAndUser(ctx context.Context, req hub.Request) (SessionR
 	if err != nil || !found {
 		return SessionRow{}, User{}, false
 	}
+	if row.AuthVersion != u.AuthVersion {
+		return SessionRow{}, User{}, false
+	}
 	return row, u, true
 }
 
@@ -332,6 +363,7 @@ func (a *Auth) bootstrap(ctx context.Context, req hub.Request) hub.Response {
 		Name:         strings.TrimSpace(b.Name),
 		PasswordHash: hash,
 		Role:         RoleOwner,
+		AuthVersion:  1,
 		CreatedMS:    now.UnixMilli(),
 	}
 	user.ID, err = a.randomID()
@@ -343,6 +375,7 @@ func (a *Auth) bootstrap(ctx context.Context, req hub.Request) hub.Response {
 		return errResponse(503, "unavailable")
 	}
 	row.UserID = user.ID
+	row.AuthVersion = 1
 	if err := a.store.BootstrapOwner(ctx, user, row); err != nil {
 		switch {
 		case errors.Is(err, ErrAlreadyBootstrapped):
@@ -372,11 +405,16 @@ type loginBody struct {
 	Password string `json:"password"`
 }
 
-// login is the POST of the session. An unknown e-mail verifies against
-// the fixed dummy hash, so the time does not reveal whether the e-mail
-// exists; the per-e-mail and the global attempt limits answer 429
-// before any verification, and a success clears the counter of the
-// e-mail.
+// login is the POST of the session. The attempt is reserved in the
+// database before any verification, so the per-e-mail and the global
+// budgets hold between instances and between concurrent requests; an
+// e-mail that does not fit the budget answers 429 before any password
+// check. An unknown e-mail verifies against the fixed dummy hash, so
+// the time does not reveal whether the e-mail exists; the dummy result
+// never authenticates, and the unknown e-mail counts as a failure like
+// the known one. A success clears the counter of the e-mail, and the
+// session is created only while the verified credential version and
+// hash still hold.
 func (a *Auth) login(ctx context.Context, req hub.Request) hub.Response {
 	if !a.checkContentType(req) {
 		return errResponse(415, "unsupported_media_type")
@@ -387,16 +425,11 @@ func (a *Auth) login(ctx context.Context, req hub.Request) hub.Response {
 	}
 	norm := normalizeEmail(b.Email)
 	now := a.now().UnixMilli()
-	since := now - failureWindowMS
-	per, err := a.store.CountEmailFailures(ctx, norm, since)
+	res, err := a.store.ReserveAttempt(ctx, norm, now)
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
-	global, err := a.store.CountGlobalFailures(ctx, since)
-	if err != nil {
-		return errResponse(503, "unavailable")
-	}
-	if per >= perEmailMaxFailures || global >= globalMaxFailures {
+	if !res {
 		return errResponse(429, "rate_limited")
 	}
 	u, found, err := a.store.FindUserByEmailNorm(ctx, norm)
@@ -407,21 +440,29 @@ func (a *Auth) login(ctx context.Context, req hub.Request) hub.Response {
 	if found {
 		hash = u.PasswordHash
 	}
-	if !VerifyPassword(b.Password, hash) {
-		if err := a.store.RecordFailure(ctx, norm, now); err != nil {
-			return errResponse(503, "unavailable")
-		}
+	verified := VerifyPassword(b.Password, hash)
+	if !found || !verified {
+		// The reservation stays as the failure of this attempt, known
+		// or unknown e-mail alike.
 		return errResponse(401, "invalid_credentials")
-	}
-	if err := a.store.ClearFailures(ctx, norm); err != nil {
-		return errResponse(503, "unavailable")
 	}
 	row, cookie, err := NewSession(a.rand, a.key, a.now())
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
 	row.UserID = u.ID
-	if err := a.store.CreateSession(ctx, row); err != nil {
+	row.AuthVersion = u.AuthVersion
+	applied, err := a.store.CreateSessionForUser(ctx, row, u.ID, u.AuthVersion, u.PasswordHash)
+	if err != nil {
+		return errResponse(503, "unavailable")
+	}
+	if !applied {
+		// The credential rotated between the read and the write: the
+		// same 401 as a wrong password, and the reservation stays as
+		// the failure.
+		return errResponse(401, "invalid_credentials")
+	}
+	if err := a.store.ClearFailures(ctx, norm); err != nil {
 		return errResponse(503, "unavailable")
 	}
 	return withCookie(200, SessionCookie(cookie), sessionBody(u))
@@ -455,8 +496,12 @@ type changePasswordBody struct {
 	New     string `json:"new"`
 }
 
-// changePassword checks the current password, applies the new one and
-// revokes every session of the user, issuing a new one for the caller.
+// changePassword checks the current password, applies the new one,
+// bumps the auth version of the credential, revokes every session of
+// the user and issues a new one for the caller. The update is
+// conditional on the auth version the request was authenticated with:
+// when a concurrent change committed in between, nothing is written
+// and the answer is 401 unauthenticated.
 func (a *Auth) changePassword(ctx context.Context, req hub.Request, u User) hub.Response {
 	if !a.checkContentType(req) {
 		return errResponse(415, "unsupported_media_type")
@@ -480,7 +525,14 @@ func (a *Auth) changePassword(ctx context.Context, req hub.Request, u User) hub.
 		return errResponse(503, "unavailable")
 	}
 	row.UserID = u.ID
-	if err := a.store.ChangePasswordWithNewSession(ctx, u.ID, hash, row); err != nil {
+	row.AuthVersion = u.AuthVersion + 1
+	if err := a.store.ChangePasswordWithNewSession(ctx, u.ID, u.AuthVersion, hash, row); err != nil {
+		// The batch failed: the guard lost the race only when a
+		// concurrent change moved the version in between; anything
+		// else is a store failure.
+		if cur, found, rerr := a.store.FindUserByID(ctx, u.ID); rerr == nil && found && cur.AuthVersion != u.AuthVersion {
+			return errResponse(401, "unauthenticated")
+		}
 		return errResponse(503, "unavailable")
 	}
 	return withCookie(204, SessionCookie(cookie), nil)
@@ -610,7 +662,11 @@ type acceptInviteBody struct {
 // acceptInvite creates the member with the e-mail of the invite and
 // consumes the invite. An unknown, malformed, expired, revoked or
 // already-used token answers the same 400 invalid_invite; an e-mail
-// that already has an account answers 409 email_taken.
+// that already has an account answers 409 email_taken. The password
+// hash and the ids come out before any write, and the consumption,
+// the user and the session are one atomic batch conditional on the
+// invite still being unused, unrevoked and unexpired: a failure rolls
+// back everything, the consumption included.
 func (a *Auth) acceptInvite(ctx context.Context, req hub.Request) hub.Response {
 	if !a.checkContentType(req) {
 		return errResponse(415, "unsupported_media_type")
@@ -635,7 +691,8 @@ func (a *Auth) acceptInvite(ctx context.Context, req hub.Request) hub.Response {
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
-	if !found || inv.Used || inv.Revoked || a.now().UnixMilli() >= inv.ExpiresMS {
+	now := a.now()
+	if !found || inv.Used || inv.Revoked || now.UnixMilli() >= inv.ExpiresMS {
 		return errResponse(400, "invalid_invite")
 	}
 	_, taken, err := a.store.FindUserByEmailNorm(ctx, inv.EmailNorm)
@@ -645,24 +702,17 @@ func (a *Auth) acceptInvite(ctx context.Context, req hub.Request) hub.Response {
 	if taken {
 		return errResponse(409, "email_taken")
 	}
-	consumed, err := a.store.ConsumeInvite(ctx, inv.ID)
-	if err != nil {
-		return errResponse(503, "unavailable")
-	}
-	if !consumed {
-		return errResponse(400, "invalid_invite")
-	}
 	hash, err := HashPassword(a.rand, b.Password)
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
-	now := a.now()
 	user := User{
 		Email:        inv.Email,
 		EmailNorm:    inv.EmailNorm,
 		Name:         name,
 		PasswordHash: hash,
 		Role:         inv.Role,
+		AuthVersion:  1,
 		CreatedMS:    now.UnixMilli(),
 	}
 	user.ID, err = a.randomID()
@@ -674,13 +724,19 @@ func (a *Auth) acceptInvite(ctx context.Context, req hub.Request) hub.Response {
 		return errResponse(503, "unavailable")
 	}
 	row.UserID = user.ID
-	if err := a.store.CreateUserWithSession(ctx, user, row); err != nil {
-		switch {
-		case errors.Is(err, ErrEmailTaken):
-			return errResponse(409, "email_taken")
-		default:
-			return errResponse(503, "unavailable")
+	row.AuthVersion = 1
+	if err := a.store.AcceptInviteWithSession(ctx, inv.ID, now.UnixMilli(), user, row); err != nil {
+		// The batch failed: re-read to tell a lost condition (the
+		// invite used, revoked or expired in between) and a taken
+		// e-mail from a store failure; the invite survived the
+		// rollback in every case.
+		if cur, found, rerr := a.store.FindInviteByID(ctx, inv.ID); rerr == nil && found && (cur.Used || cur.Revoked || a.now().UnixMilli() >= cur.ExpiresMS) {
+			return errResponse(400, "invalid_invite")
 		}
+		if _, taken, rerr := a.store.FindUserByEmailNorm(ctx, inv.EmailNorm); rerr == nil && taken {
+			return errResponse(409, "email_taken")
+		}
+		return errResponse(503, "unavailable")
 	}
 	return withCookie(201, SessionCookie(cookie), sessionBody(user))
 }

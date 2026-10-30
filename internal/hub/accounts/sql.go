@@ -63,16 +63,16 @@ func firstErr(errs ...error) error {
 }
 
 // userRow reads one user out of the select columns: id, email,
-// email_norm, name, password_hash, role, created_ms. It reports false
-// with no error when there is no row, and an error when the shape of
-// the row is not the expected one.
+// email_norm, name, password_hash, auth_version, role, created_ms. It
+// reports false with no error when there is no row, and an error when
+// the shape of the row is not the expected one.
 func userRow(res store.Result) (User, bool, error) {
 	if len(res.Rows) == 0 {
 		return User{}, false, nil
 	}
 	row := res.Rows[0]
-	if len(row) != 7 {
-		return User{}, false, fmt.Errorf("accounts: the user row has %d columns, want 7", len(row))
+	if len(row) != 8 {
+		return User{}, false, fmt.Errorf("accounts: the user row has %d columns, want 8", len(row))
 	}
 	id, ok := row[0].(string)
 	if !ok {
@@ -94,26 +94,30 @@ func userRow(res store.Result) (User, bool, error) {
 	if !ok {
 		return User{}, false, fmt.Errorf("accounts: the password hash is not text")
 	}
-	role, ok := row[5].(string)
+	authVersion, ok := row[5].(int64)
+	if !ok {
+		return User{}, false, fmt.Errorf("accounts: the auth version is not an integer")
+	}
+	role, ok := row[6].(string)
 	if !ok {
 		return User{}, false, fmt.Errorf("accounts: the user role is not text")
 	}
-	created, ok := row[6].(int64)
+	created, ok := row[7].(int64)
 	if !ok {
 		return User{}, false, fmt.Errorf("accounts: the user creation is not an integer")
 	}
-	return User{ID: id, Email: email, EmailNorm: norm, Name: name, Role: role, PasswordHash: hash, CreatedMS: created}, true, nil
+	return User{ID: id, Email: email, EmailNorm: norm, Name: name, Role: role, PasswordHash: hash, AuthVersion: authVersion, CreatedMS: created}, true, nil
 }
 
 // sessionRow reads one session out of the select columns: token_sha,
-// user_id, created_ms, expires_ms, revoked.
+// user_id, created_ms, expires_ms, revoked, auth_version.
 func sessionRow(res store.Result) (SessionRow, bool, error) {
 	if len(res.Rows) == 0 {
 		return SessionRow{}, false, nil
 	}
 	row := res.Rows[0]
-	if len(row) != 5 {
-		return SessionRow{}, false, fmt.Errorf("accounts: the session row has %d columns, want 5", len(row))
+	if len(row) != 6 {
+		return SessionRow{}, false, fmt.Errorf("accounts: the session row has %d columns, want 6", len(row))
 	}
 	sha, ok := row[0].(string)
 	if !ok {
@@ -135,7 +139,11 @@ func sessionRow(res store.Result) (SessionRow, bool, error) {
 	if !ok {
 		return SessionRow{}, false, fmt.Errorf("accounts: the session revocation is not an integer")
 	}
-	return SessionRow{TokenSHA: sha, UserID: userID, CreatedMS: created, ExpiresMS: expires, Revoked: revoked == 1}, true, nil
+	authVersion, ok := row[5].(int64)
+	if !ok {
+		return SessionRow{}, false, fmt.Errorf("accounts: the session auth version is not an integer")
+	}
+	return SessionRow{TokenSHA: sha, UserID: userID, CreatedMS: created, ExpiresMS: expires, Revoked: revoked == 1, AuthVersion: authVersion}, true, nil
 }
 
 // inviteRow reads one invite out of the select columns: id, email,
@@ -187,19 +195,21 @@ func inviteRow(res store.Result) (Invite, bool, error) {
 	return Invite{ID: id, Email: email, EmailNorm: norm, Role: role, TokenHash: tokenHash, CreatedMS: created, ExpiresMS: expires, Revoked: revoked == 1, Used: used == 1}, true, nil
 }
 
-const selectUser = `SELECT id, email, email_norm, name, password_hash, role, created_ms FROM users`
-const selectSession = `SELECT token_sha, user_id, created_ms, expires_ms, revoked FROM sessions`
+const selectUser = `SELECT id, email, email_norm, name, password_hash, auth_version, role, created_ms FROM users`
+const selectSession = `SELECT token_sha, user_id, created_ms, expires_ms, revoked, auth_version FROM sessions`
 const selectInvite = `SELECT id, email, email_norm, role, token_hash, created_ms, expires_ms, revoked, used FROM invites`
 
 const insertUsers = `INSERT INTO users (id, email_norm, email, name, password_hash, role, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)`
-const insertSession = `INSERT INTO sessions (token_sha, user_id, created_ms, expires_ms, revoked) VALUES (?, ?, ?, ?, 0)`
+const insertSession = `INSERT INTO sessions (token_sha, user_id, created_ms, expires_ms, revoked, auth_version) VALUES (?, ?, ?, ?, 0, ?)`
+const guardCheck = `INSERT INTO accounts_guard VALUES (changes())`
+const guardClear = `DELETE FROM accounts_guard`
 
 func userArgs(u User) []store.Value {
 	return []store.Value{u.ID, u.EmailNorm, u.Email, u.Name, u.PasswordHash, u.Role, u.CreatedMS}
 }
 
 func sessionArgs(sr SessionRow) []store.Value {
-	return []store.Value{sr.TokenSHA, sr.UserID, sr.CreatedMS, sr.ExpiresMS}
+	return []store.Value{sr.TokenSHA, sr.UserID, sr.CreatedMS, sr.ExpiresMS, sr.AuthVersion}
 }
 
 func (s *SQL) CountUsers(ctx context.Context) (int, error) {
@@ -223,17 +233,6 @@ func (s *SQL) BootstrapOwner(ctx context.Context, u User, sr SessionRow) error {
 	return mapUnique(err)
 }
 
-// CreateUserWithSession creates one user with its first session in one
-// atomic batch; the unique e-mail makes the batch fail, and roll back,
-// when the e-mail is taken.
-func (s *SQL) CreateUserWithSession(ctx context.Context, u User, sr SessionRow) error {
-	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: insertUsers, Args: userArgs(u)},
-		{SQL: insertSession, Args: sessionArgs(sr)},
-	})
-	return mapUnique(err)
-}
-
 func (s *SQL) FindUserByEmailNorm(ctx context.Context, norm string) (User, bool, error) {
 	res, err := s.store.Execute(ctx, store.Stmt{SQL: selectUser + ` WHERE email_norm = ?`, Args: []store.Value{norm}})
 	u, found, rowErr := userRow(res)
@@ -246,15 +245,37 @@ func (s *SQL) FindUserByID(ctx context.Context, id string) (User, bool, error) {
 	return u, found, firstErr(err, rowErr)
 }
 
-// ChangePasswordWithNewSession sets the new hash, revokes every
-// session of the user and creates the new one, in one atomic batch.
-func (s *SQL) ChangePasswordWithNewSession(ctx context.Context, userID, passwordHash string, sr SessionRow) error {
+// ChangePasswordWithNewSession sets the new hash and bumps the auth
+// version, revokes every session of the user and creates the new one,
+// in one atomic batch. The update is conditional on the auth version
+// the caller read; the one-row guard right after it fails, and rolls
+// the batch back, when the version moved in between.
+func (s *SQL) ChangePasswordWithNewSession(ctx context.Context, userID string, authVersion int64, passwordHash string, sr SessionRow) error {
 	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `UPDATE users SET password_hash = ? WHERE id = ?`, Args: []store.Value{passwordHash, userID}},
+		{SQL: `UPDATE users SET password_hash = ?, auth_version = auth_version + 1 WHERE id = ? AND auth_version = ?`, Args: []store.Value{passwordHash, userID, authVersion}},
+		{SQL: guardCheck},
+		{SQL: guardClear},
 		{SQL: `UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0`, Args: []store.Value{userID}},
 		{SQL: insertSession, Args: sessionArgs(sr)},
 	})
 	return mapUnique(err)
+}
+
+// CreateSessionForUser inserts the login session only while the user
+// still carries the verified auth version and password hash: the
+// INSERT … SELECT … WHERE EXISTS is one statement, so a rotation
+// between the read and the write leaves no row and reports false.
+func (s *SQL) CreateSessionForUser(ctx context.Context, sr SessionRow, userID string, authVersion int64, passwordHash string) (bool, error) {
+	res, err := s.store.Execute(ctx, store.Stmt{
+		SQL: `INSERT INTO sessions (token_sha, user_id, created_ms, expires_ms, revoked, auth_version)
+SELECT ?, ?, ?, ?, 0, ?
+WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND auth_version = ? AND password_hash = ?)`,
+		Args: []store.Value{sr.TokenSHA, sr.UserID, sr.CreatedMS, sr.ExpiresMS, sr.AuthVersion, userID, authVersion, passwordHash},
+	})
+	if err != nil {
+		return false, mapUnique(err)
+	}
+	return res.Affected == 1, nil
 }
 
 func (s *SQL) CreateSession(ctx context.Context, sr SessionRow) error {
@@ -274,6 +295,31 @@ func (s *SQL) RevokeSession(ctx context.Context, tokenSHA string) error {
 		Args: []store.Value{tokenSHA},
 	})
 	return mapUnique(err)
+}
+
+// ReserveAttempt reserves one login attempt in one statement: the row
+// enters only while the per-e-mail and the global counts inside the
+// window stay below the limits, so concurrent reservations cannot
+// exceed the budget. The prune in the same batch keeps the table
+// bounded, as the old recording did. It reports whether the attempt
+// was reserved.
+func (s *SQL) ReserveAttempt(ctx context.Context, emailNorm string, atMS int64) (bool, error) {
+	since := atMS - failureWindowMS
+	res, err := s.store.Batch(ctx, []store.Stmt{
+		{SQL: `INSERT INTO login_failures (email_norm, at_ms)
+SELECT ?, ?
+WHERE (SELECT COUNT(*) FROM login_failures WHERE email_norm = ? AND at_ms > ?) < ?
+  AND (SELECT COUNT(*) FROM login_failures WHERE at_ms > ?) < ?`,
+			Args: []store.Value{emailNorm, atMS, emailNorm, since, int64(perEmailMaxFailures), since, int64(globalMaxFailures)}},
+		{SQL: `DELETE FROM login_failures WHERE at_ms <= ?`, Args: []store.Value{since}},
+	})
+	if err != nil {
+		return false, mapUnique(err)
+	}
+	if len(res) == 0 {
+		return false, fmt.Errorf("accounts: the reservation returned no result")
+	}
+	return res[0].Affected == 1, nil
 }
 
 // RecordFailure stores one failed attempt and prunes the failures
@@ -362,17 +408,21 @@ func (s *SQL) ListPendingInvites(ctx context.Context) ([]Invite, error) {
 	return out, nil
 }
 
-func (s *SQL) ConsumeInvite(ctx context.Context, id string) (bool, error) {
-	// The WHERE used = 0 is the guard: two concurrent accepts race on
-	// this single statement, and only the first one reports the row.
-	res, err := s.store.Execute(ctx, store.Stmt{
-		SQL:  `UPDATE invites SET used = 1 WHERE id = ? AND used = 0`,
-		Args: []store.Value{id},
+// AcceptInviteWithSession consumes the invite, creates the user and
+// the session in one atomic batch. The consumption is conditional on
+// the invite still being unused, unrevoked and unexpired, and the
+// one-row guard right after it fails, and rolls the batch back, when
+// the condition was lost in between; the unique e-mail of the user
+// makes the batch fail, and roll back, when the e-mail was taken.
+func (s *SQL) AcceptInviteWithSession(ctx context.Context, inviteID string, nowMS int64, u User, sr SessionRow) error {
+	_, err := s.store.Batch(ctx, []store.Stmt{
+		{SQL: `UPDATE invites SET used = 1 WHERE id = ? AND used = 0 AND revoked = 0 AND expires_ms > ?`, Args: []store.Value{inviteID, nowMS}},
+		{SQL: guardCheck},
+		{SQL: guardClear},
+		{SQL: insertUsers, Args: userArgs(u)},
+		{SQL: insertSession, Args: sessionArgs(sr)},
 	})
-	if err != nil {
-		return false, err
-	}
-	return res.Affected == 1, nil
+	return mapUnique(err)
 }
 
 func (s *SQL) RevokeInvite(ctx context.Context, id string) error {

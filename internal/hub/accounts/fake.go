@@ -8,10 +8,15 @@ import (
 )
 
 // Memory is the in-memory AccountStore of the tests: it mirrors the
-// SQL semantics (the unique e-mail, the hub_meta bootstrap guard, the
-// consume-once invite) with a mutex, so the scenarios of the
-// decision run hermetically, without a database. It is a test double,
-// not a production store.
+// SQL semantics (the unique e-mail, the hub_meta bootstrap guard,
+// the attempt reservation under the two limits, the conditional
+// session create, the auth-version condition of the password change
+// and the atomic invite accept) with a mutex, so the scenarios of
+// the decision run hermetically, without a database. The mutex is the
+// concurrency model of the single-statement guarantees: each guarded
+// operation reads and writes under the same lock, like the database
+// serializes the statements. It is a test double, not a production
+// store.
 type Memory struct {
 	mu           sync.Mutex
 	users        map[string]User // by email_norm
@@ -57,16 +62,35 @@ func (m *Memory) BootstrapOwner(_ context.Context, u User, sr SessionRow) error 
 	return nil
 }
 
-func (m *Memory) CreateUserWithSession(_ context.Context, u User, sr SessionRow) error {
+// ReserveAttempt reserves one attempt while both budgets have room,
+// under the same lock that reads the counts and writes the row: the
+// reservation is one unit of work, like the single SQL statement.
+func (m *Memory) ReserveAttempt(_ context.Context, emailNorm string, atMS int64) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, taken := m.users[u.EmailNorm]; taken {
-		return fmt.Errorf("accounts: %w", ErrEmailTaken)
+	since := atMS - failureWindowMS
+	if countAfter(m.failures[emailNorm], since) >= perEmailMaxFailures {
+		return false, nil
 	}
-	m.users[u.EmailNorm] = u
-	m.usersByID[u.ID] = u
-	m.sessions[sr.TokenSHA] = sr
-	return nil
+	total := 0
+	for _, v := range m.failures {
+		total += countAfter(v, since)
+	}
+	if total >= globalMaxFailures {
+		return false, nil
+	}
+	m.failures[emailNorm] = append(m.failures[emailNorm], atMS)
+	limit := since
+	for k, v := range m.failures {
+		kept := v[:0]
+		for _, at := range v {
+			if at > limit {
+				kept = append(kept, at)
+			}
+		}
+		m.failures[k] = kept
+	}
+	return true, nil
 }
 
 func (m *Memory) FindUserByEmailNorm(_ context.Context, norm string) (User, bool, error) {
@@ -83,14 +107,19 @@ func (m *Memory) FindUserByID(_ context.Context, id string) (User, bool, error) 
 	return u, ok, nil
 }
 
-func (m *Memory) ChangePasswordWithNewSession(_ context.Context, userID, passwordHash string, sr SessionRow) error {
+func (m *Memory) ChangePasswordWithNewSession(_ context.Context, userID string, authVersion int64, passwordHash string, sr SessionRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	u, ok := m.usersByID[userID]
 	if !ok {
 		return fmt.Errorf("accounts: the user is not found")
 	}
+	if u.AuthVersion != authVersion {
+		// The conditional update changed no row: the guard failure.
+		return fmt.Errorf("accounts: the auth version moved")
+	}
 	u.PasswordHash = passwordHash
+	u.AuthVersion++
 	m.usersByID[userID] = u
 	m.users[u.EmailNorm] = u
 	for sha, srw := range m.sessions {
@@ -101,6 +130,22 @@ func (m *Memory) ChangePasswordWithNewSession(_ context.Context, userID, passwor
 	}
 	m.sessions[sr.TokenSHA] = sr
 	return nil
+}
+
+// CreateSessionForUser inserts the session only while the user still
+// carries the verified auth version and password hash, under the same
+// lock that reads them: the condition and the write are one unit of
+// work, like the single conditional statement of the SQL.
+func (m *Memory) CreateSessionForUser(_ context.Context, sr SessionRow, userID string, authVersion int64, passwordHash string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.usersByID[userID]
+	if !ok || u.AuthVersion != authVersion || u.PasswordHash != passwordHash {
+		return false, nil
+	}
+	sr.UserID = userID
+	m.sessions[sr.TokenSHA] = sr
+	return true, nil
 }
 
 func (m *Memory) CreateSession(_ context.Context, sr SessionRow) error {
@@ -228,17 +273,31 @@ func (m *Memory) ListPendingInvites(context.Context) ([]Invite, error) {
 	return out, nil
 }
 
-func (m *Memory) ConsumeInvite(_ context.Context, id string) (bool, error) {
+// AcceptInviteWithSession consumes the invite, creates the user and
+// the session under the same lock that reads the invite: when the
+// invite was used, revoked or expired in between, nothing is written,
+// the consumption not included; when the e-mail is taken, the invite
+// is not consumed either.
+func (m *Memory) AcceptInviteWithSession(_ context.Context, inviteID string, nowMS int64, u User, sr SessionRow) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	inv, ok := m.invites[id]
-	if !ok || inv.Used {
-		return false, nil
+	inv, ok := m.invites[inviteID]
+	if !ok || inv.Used || inv.Revoked || nowMS >= inv.ExpiresMS {
+		// The conditional consumption changed no row: the guard failure.
+		return fmt.Errorf("accounts: the invite condition was lost")
+	}
+	if _, taken := m.users[u.EmailNorm]; taken {
+		return fmt.Errorf("accounts: %w", ErrEmailTaken)
 	}
 	inv.Used = true
-	m.invites[id] = inv
+	m.invites[inviteID] = inv
 	m.invitesByTok[inv.TokenHash] = inv
-	return true, nil
+	u.AuthVersion = 1
+	m.users[u.EmailNorm] = u
+	m.usersByID[u.ID] = u
+	sr.UserID = u.ID
+	m.sessions[sr.TokenSHA] = sr
+	return nil
 }
 
 func (m *Memory) RevokeInvite(_ context.Context, id string) error {

@@ -29,13 +29,16 @@ var b64urlNoPad = base64.RawURLEncoding
 
 // SessionRow is one stored session: the SHA-256 of the 32-byte random
 // id (the id itself lives only in the cookie), the user, the creation
-// and the absolute expiration, and the revocation flag.
+// and the absolute expiration, the revocation flag, and the auth
+// version of the credential the session was created with: a session is
+// live only while that version is the current one of the user.
 type SessionRow struct {
-	TokenSHA  string
-	UserID    string
-	CreatedMS int64
-	ExpiresMS int64
-	Revoked   bool
+	TokenSHA    string
+	UserID      string
+	CreatedMS   int64
+	ExpiresMS   int64
+	Revoked     bool
+	AuthVersion int64
 }
 
 // NewSession builds one session: a 32-byte random id, its SHA-256 for
