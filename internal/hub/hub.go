@@ -7,6 +7,7 @@ package hub
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,11 +19,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/djalmajr/nau/internal/hub/ingest"
 	"github.com/djalmajr/nau/internal/hub/store"
 )
 
 // apiHealthPath is the health endpoint.
 const apiHealthPath = "/api/health"
+
+// apiCronRetentionPath is the retention route of the cron job.
+const apiCronRetentionPath = "/api/cron/retention"
 
 // apiVersionPath is the version endpoint.
 const apiVersionPath = "/api/version"
@@ -81,7 +86,7 @@ func (h Header) Get(name string) string {
 type Handler func(ctx context.Context, req Request) Response
 
 // Deps is the configuration of the core, assembled at startup: the
-// store, the clock and the binary version.
+// store, the clock, the binary version and the retention token.
 type Deps struct {
 	// Store is the hub storage.
 	Store store.Store
@@ -90,6 +95,9 @@ type Deps struct {
 	// Version is the version of the binary, the same value the
 	// `nau version` command prints.
 	Version string
+	// CronToken is the bearer token of the retention route; empty
+	// disables the route.
+	CronToken string
 }
 
 // Server routes the requests to the handlers by exact method and path,
@@ -103,7 +111,8 @@ type Server struct {
 
 // New builds the server with the standard API routes registered. static
 // is the filesystem of the static files outside /api/, or nil to refuse
-// every path outside /api/ with 404.
+// every path outside /api/ with 404. The retention route is registered
+// only when the CronToken is set.
 func New(deps Deps, static fs.FS) *Server {
 	s := &Server{
 		deps:   deps,
@@ -112,6 +121,9 @@ func New(deps Deps, static fs.FS) *Server {
 	}
 	s.Handle("GET", apiHealthPath, s.health)
 	s.Handle("GET", apiVersionPath, s.version)
+	if deps.CronToken != "" {
+		s.Handle("POST", apiCronRetentionPath, s.cronRetention)
+	}
 	return s
 }
 
@@ -257,4 +269,29 @@ func (s *Server) version(ctx context.Context, req Request) Response {
 		Schema  int64  `json:"schema"`
 	}{Version: s.deps.Version, Schema: schema})
 	return Response{Status: 200, Body: b}
+}
+
+// cronRetention runs the retention of the hub state. The bearer token
+// of the request is compared with the CronToken in constant time; a
+// mismatch answers 401 and a store failure 503 without the error.
+func (s *Server) cronRetention(ctx context.Context, req Request) Response {
+	if !s.cronAuthorized(req) {
+		return Response{Status: 401, Body: []byte(`{"error":"unauthorized"}`)}
+	}
+	if err := ingest.Retain(ctx, s.deps.Store, s.deps.Now().UnixMilli()); err != nil {
+		return Response{Status: 503, Body: []byte(`{"error":"unavailable"}`)}
+	}
+	return Response{Status: 204}
+}
+
+// cronAuthorized compares the bearer token of the request with the
+// CronToken in constant time; the header must be exactly
+// "Bearer <token>".
+func (s *Server) cronAuthorized(req Request) bool {
+	const prefix = "Bearer "
+	header := req.Header.Get("Authorization")
+	if !strings.HasPrefix(header, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(s.deps.CronToken)) == 1
 }
