@@ -1,0 +1,186 @@
+{
+  "schema": 1,
+  "soho_version": "v0.3.1",
+  "generated_ms": 1793376000000,
+  "projects": [
+    {
+      "name": "acme/web",
+      "sessions": [
+        {
+          "id": "w1",
+          "agents": [
+            {
+              "terminal": "w1:p1",
+              "name": "orchestrator",
+              "role": "orchestrator",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "working",
+              "reason": null,
+              "task": "Retry declined cards in the checkout",
+              "report_ready": false,
+              "started_ms": 1793372400000,
+              "since_ms": 1793375940000
+            },
+            {
+              "terminal": "w1:p2",
+              "name": "build",
+              "role": "implementer",
+              "kind": "cli-b",
+              "model": "example/model-1",
+              "effort": "high",
+              "state": "working",
+              "reason": null,
+              "task": "Retry declined cards in the checkout worker",
+              "report_ready": false,
+              "started_ms": 1793373000000,
+              "since_ms": 1793375990000
+            },
+            {
+              "terminal": "w1:p3",
+              "name": "review",
+              "role": "reviewer",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "needs_you",
+              "reason": "question",
+              "task": "Review the checkout retry change",
+              "report_ready": false,
+              "started_ms": 1793373100000,
+              "since_ms": 1793375950000
+            },
+            {
+              "terminal": "w1:p4",
+              "name": "build-2",
+              "role": "implementer",
+              "kind": "cli-b",
+              "model": "example/model-1",
+              "effort": "high",
+              "state": "needs_you",
+              "reason": "approval",
+              "task": "Wire the retry queue",
+              "report_ready": false,
+              "started_ms": 1793373200000,
+              "since_ms": 1793375955000
+            },
+            {
+              "terminal": "w1:p5",
+              "name": "planner",
+              "role": "planner",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "needs_you",
+              "reason": "quota",
+              "task": "Plan the checkout rework",
+              "report_ready": false,
+              "started_ms": 1793373300000,
+              "since_ms": 1793375960000
+            },
+            {
+              "terminal": "w1:p6",
+              "name": "scouter",
+              "role": "scouter",
+              "kind": "cli-b",
+              "model": null,
+              "effort": null,
+              "state": "needs_you",
+              "reason": "provider",
+              "task": "Scout the payment stack",
+              "report_ready": false,
+              "started_ms": 1793373400000,
+              "since_ms": 1793375965000
+            },
+            {
+              "terminal": "w1:p7",
+              "name": "researcher",
+              "role": "researcher",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "needs_you",
+              "reason": "not_received",
+              "task": "Research retry strategies",
+              "report_ready": false,
+              "started_ms": 1793373500000,
+              "since_ms": 1793375970000
+            },
+            {
+              "terminal": "w1:p8",
+              "name": "designer",
+              "role": "designer",
+              "kind": "cli-b",
+              "model": null,
+              "effort": null,
+              "state": "needs_you",
+              "reason": "no_report",
+              "task": "Design the retry screen",
+              "report_ready": false,
+              "started_ms": 1793373600000,
+              "since_ms": 1793375975000
+            },
+            {
+              "terminal": "w1:p9",
+              "name": "implementer",
+              "role": "implementer",
+              "kind": "cli-b",
+              "model": "example/model-2",
+              "effort": "medium",
+              "state": "needs_you",
+              "reason": "compact",
+              "task": "Implement the retry worker",
+              "report_ready": false,
+              "started_ms": 1793373700000,
+              "since_ms": 1793375980000
+            },
+            {
+              "terminal": "w1:p10",
+              "name": "review-2",
+              "role": "reviewer",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "done",
+              "reason": null,
+              "task": "Review the retry worker",
+              "report_ready": true,
+              "started_ms": 1793373800000,
+              "since_ms": 1793375985000
+            },
+            {
+              "terminal": "w1:p11",
+              "name": "tasker",
+              "role": "tasker",
+              "kind": "cli-b",
+              "model": null,
+              "effort": null,
+              "state": "idle",
+              "reason": null,
+              "task": null,
+              "report_ready": false,
+              "started_ms": 1793373900000,
+              "since_ms": 1793375990000
+            },
+            {
+              "terminal": "w1:p12",
+              "name": "inspector",
+              "role": "inspector",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "unknown",
+              "reason": null,
+              "task": null,
+              "report_ready": false,
+              "started_ms": 1793374000000,
+              "since_ms": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hidden": { "working": 1, "needs_you": 0, "done": 0, "idle": 2, "unknown": 0 }
+}
