@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "soho_version": "v0.3.1",
+  "generated_ms": 1793376000000,
+  "projects": [
+    {
+      "name": "acme/web",
+      "sessions": [
+        {
+          "id": "w1",
+          "agents": [
+            {
+              "terminal": "w1:p1",
+              "name": "orchestrator",
+              "role": "orchestrator",
+              "kind": "cli-a",
+              "model": null,
+              "effort": null,
+              "state": "working",
+              "reason": null,
+              "task": "Retry declined cards at checkout",
+              "report_ready": false,
+              "started_ms": 1793372400000,
+              "since_ms": 1793375940000
+            },
+            {
+              "terminal": "w1:p2",
+              "name": "build",
+              "role": "implementer",
+              "kind": "cli-b",
+              "model": "example/model-1",
+              "effort": "high",
+              "state": "needs_you",
+              "reason": "approval",
+              "task": "Retry declined cards in the checkout worker",
+              "report_ready": false,
+              "started_ms": 1793373000000,
+              "since_ms": 1793375990000
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "hidden": { "working": 1, "needs_you": 0, "done": 0, "idle": 2, "unknown": 0 }
+}
