@@ -400,7 +400,8 @@ func TestHubServeWebSymlinkOutsideIsNotServed(t *testing.T) {
 		t.Skipf("cannot create symbolic links here: %v", err)
 	}
 	listen, stop := startHubServe(t, map[string]string{
-		hubEnvDBURL: "http://127.0.0.1:1",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, newHubFakeStore(), "--web", web)
 	// The link that escapes the web root is not served, even with an
 	// index available; the one that stays inside is.
@@ -445,8 +446,9 @@ func TestHubServeMigrationFailureDropsServerMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
-		hubEnvDBURL:   srv.URL,
-		hubEnvDBToken: secret,
+		hubEnvDBURL:      srv.URL,
+		hubEnvDBToken:    secret,
+		hubEnvSessionKey: hubTestSessionKey,
 	}, "hub", "serve")
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
