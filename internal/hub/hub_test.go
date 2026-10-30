@@ -500,3 +500,135 @@ func TestCronRetentionWrongMethod(t *testing.T) {
 		t.Fatalf("Allow = %q, want POST", got)
 	}
 }
+
+// paramServer builds a server with one literal and one parameterized
+// route on the same shape, for the named-segment tests.
+func paramServer(t *testing.T) *Server {
+	t.Helper()
+	s := newTestServer(t, &fakeStore{}, nil)
+	var got, method string
+	s.Handle("GET", "/api/things/{id}", func(ctx context.Context, req Request) Response {
+		got = req.PathParam("id")
+		method = req.Method
+		return Response{Status: 200, Body: []byte("got:" + got)}
+	})
+	s.Handle("DELETE", "/api/things/{id}", func(ctx context.Context, req Request) Response {
+		got = req.PathParam("id")
+		return Response{Status: 204}
+	})
+	s.Handle("GET", "/api/things", func(ctx context.Context, req Request) Response {
+		return Response{Status: 200, Body: []byte("list")}
+	})
+	_ = method
+	return s
+}
+
+func TestParamRouteMatchesOneSegment(t *testing.T) {
+	s := paramServer(t)
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/things/42"})
+	if resp.Status != 200 || string(resp.Body) != "got:42" {
+		t.Fatalf("resp = %d %q", resp.Status, resp.Body)
+	}
+	resp = s.Serve(context.Background(), Request{Method: "DELETE", Path: "/api/things/9"})
+	if resp.Status != 204 {
+		t.Fatalf("status = %d, want 204", resp.Status)
+	}
+}
+
+func TestParamRouteDoesNotCrossSegments(t *testing.T) {
+	s := paramServer(t)
+	for _, p := range []string{"/api/things/42/extra", "/api/things", "/api/other/42"} {
+		resp := s.Serve(context.Background(), Request{Method: "GET", Path: p})
+		if p == "/api/things" {
+			if resp.Status != 200 || string(resp.Body) != "list" {
+				t.Fatalf("%s: %d %q, want the literal list", p, resp.Status, resp.Body)
+			}
+			continue
+		}
+		if resp.Status != 404 || string(resp.Body) != `{"error":"not_found"}` {
+			t.Fatalf("%s: %d %q, want 404", p, resp.Status, resp.Body)
+		}
+	}
+}
+
+func TestParamRouteTrailingSlashIsNotTheRoute(t *testing.T) {
+	s := paramServer(t)
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/things/42/"})
+	if resp.Status != 404 {
+		t.Fatalf("status = %d, want 404", resp.Status)
+	}
+}
+
+func TestParamRouteEmptySegmentMatches(t *testing.T) {
+	// A parameter matches any segment, including the empty one; the
+	// hostile input reaches the handler as an empty value and the
+	// resource is not found there.
+	s := newTestServer(t, &fakeStore{}, nil)
+	var got string
+	s.Handle("GET", "/api/x/{id}", func(ctx context.Context, req Request) Response {
+		got = req.PathParam("id")
+		return Response{Status: 200, Body: []byte("x")}
+	})
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/x/"})
+	if resp.Status != 200 || got != "" {
+		t.Fatalf("status = %d, got = %q, want the empty parameter", resp.Status, got)
+	}
+}
+
+func TestParamRoute405CarriesTheAllowOfTheShape(t *testing.T) {
+	s := paramServer(t)
+	resp := s.Serve(context.Background(), Request{Method: "PATCH", Path: "/api/things/7"})
+	if resp.Status != 405 {
+		t.Fatalf("status = %d, want 405", resp.Status)
+	}
+	if allow := resp.Header.Get("Allow"); allow != "DELETE, GET" {
+		t.Fatalf("Allow = %q", allow)
+	}
+	// The literal path and the parameterized shape share nothing: the
+	// literal shape answers its own 405.
+	resp = s.Serve(context.Background(), Request{Method: "POST", Path: "/api/things"})
+	if resp.Status != 405 || resp.Header.Get("Allow") != "GET" {
+		t.Fatalf("status = %d, Allow = %q", resp.Status, resp.Header.Get("Allow"))
+	}
+}
+
+func TestLiteralRouteWinsOverParamRoute(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, nil)
+	s.Handle("GET", "/api/invites/{id}", func(ctx context.Context, req Request) Response {
+		return Response{Status: 200, Body: []byte("param")}
+	})
+	s.Handle("GET", "/api/invites/accept", func(ctx context.Context, req Request) Response {
+		return Response{Status: 200, Body: []byte("literal")}
+	})
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/invites/accept"})
+	if resp.Status != 200 || string(resp.Body) != "literal" {
+		t.Fatalf("resp = %d %q, want the literal route", resp.Status, resp.Body)
+	}
+	resp = s.Serve(context.Background(), Request{Method: "GET", Path: "/api/invites/zzz"})
+	if resp.Status != 200 || string(resp.Body) != "param" {
+		t.Fatalf("resp = %d %q, want the param route", resp.Status, resp.Body)
+	}
+}
+
+func TestMalformedParamPatternRegistersNothing(t *testing.T) {
+	s := newTestServer(t, &fakeStore{}, nil)
+	s.Handle("GET", "/api/bad/{}/x", func(ctx context.Context, req Request) Response {
+		return Response{Status: 200}
+	})
+	s.Handle("GET", "/api/bad/{a b}", func(ctx context.Context, req Request) Response {
+		return Response{Status: 200}
+	})
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/bad/1/2"})
+	if resp.Status != 404 {
+		t.Fatalf("status = %d, want 404", resp.Status)
+	}
+}
+
+func TestQueryDoesNotChangeParamRouting(t *testing.T) {
+	s := paramServer(t)
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/things/42"})
+	other := s.Serve(context.Background(), Request{Method: "GET", Path: "/api/things/42", Query: map[string][]string{"x": {"1"}}})
+	if string(resp.Body) != string(other.Body) || other.Status != 200 {
+		t.Fatalf("query changed the routing: %d %q vs %d %q", other.Status, other.Body, resp.Status, resp.Body)
+	}
+}

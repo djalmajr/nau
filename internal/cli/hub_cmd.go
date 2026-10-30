@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/djalmajr/nau/internal/hub"
+	"github.com/djalmajr/nau/internal/hub/accounts"
 	"github.com/djalmajr/nau/internal/hub/httpserve"
 	"github.com/djalmajr/nau/internal/hub/migrate"
 	"github.com/djalmajr/nau/internal/hub/sqld"
@@ -26,6 +28,8 @@ const (
 	hubEnvDBURL        = "NAU_HUB_DB_URL"
 	hubEnvDBToken      = "NAU_HUB_DB_TOKEN"
 	hubEnvCronToken    = "NAU_HUB_CRON_TOKEN"
+	hubEnvSessionKey   = "NAU_HUB_SESSION_KEY"
+	hubEnvBootstrapTok = "NAU_HUB_BOOTSTRAP_TOKEN"
 	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>]"
 )
 
@@ -146,6 +150,20 @@ func cmdHubServe(args []string, env Env) int {
 		return 2
 	}
 	token := env.Getenv(hubEnvDBToken)
+	// The session key signs the session cookies: it must decode to at
+	// least 32 bytes. The errors name the variable only, never the
+	// value.
+	sessionKeyB64 := env.Getenv(hubEnvSessionKey)
+	if sessionKeyB64 == "" {
+		fail(env, 2, "hub serve: "+hubEnvSessionKey+" is required")
+		return 2
+	}
+	sessionKey, err := base64.StdEncoding.DecodeString(sessionKeyB64)
+	if err != nil || len(sessionKey) < 32 {
+		fail(env, 2, "hub serve: "+hubEnvSessionKey+" must be base64 of at least 32 bytes")
+		return 2
+	}
+	bootstrapToken := env.Getenv(hubEnvBootstrapTok)
 	st, err := newHubStore(dbURL, token)
 	if err != nil {
 		fail(env, 2, "hub serve: "+err.Error())
@@ -160,6 +178,19 @@ func cmdHubServe(args []string, env Env) int {
 		return 4
 	}
 	migCancel()
+	// The accounts are over the same store; the clock and the
+	// randomness are the production ones. A bad session key never
+	// reaches here: New only fails on a key shorter than 32 bytes.
+	auth, err := accounts.New(accounts.Config{
+		Store:          accounts.NewSQL(st),
+		SessionKey:     sessionKey,
+		BootstrapToken: bootstrapToken,
+		Now:            env.Now,
+	})
+	if err != nil {
+		fail(env, 2, "hub serve: "+hubEnvSessionKey+" must be base64 of at least 32 bytes")
+		return 2
+	}
 	ln, err := hubServeListen("tcp", listen)
 	if err != nil {
 		fail(env, 4, "hub serve: cannot listen on "+listen)
@@ -179,12 +210,14 @@ func cmdHubServe(args []string, env Env) int {
 	if v == "dev" {
 		v = devVersion(debug.ReadBuildInfo())
 	}
-	srv := httpserve.NewServer(httpserve.New(hub.New(hub.Deps{
+	srvHub := hub.New(hub.Deps{
 		Store:     st,
 		Now:       env.Now,
 		Version:   v,
 		CronToken: env.Getenv(hubEnvCronToken),
-	}, static)))
+	}, static)
+	auth.Register(srvHub)
+	srv := httpserve.NewServer(httpserve.New(srvHub))
 	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
 
 	ctx, cancel := hubServeContext()
