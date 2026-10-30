@@ -38,6 +38,11 @@ commands:
   capabilities --json               print the bridge capability line
   version                           print the version
   help                              print this usage
+  hub serve [--listen <host:port>] [--web <dir>]
+                                    run the hub server on the given address: the health and
+                                    version API and the static files, with the store in the
+                                    remote database named by NAU_HUB_DB_URL (token in
+                                    NAU_HUB_DB_TOKEN)
 
 exit codes:
   0   success (forwarded commands: whatever soho returned)

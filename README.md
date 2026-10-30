@@ -69,6 +69,7 @@ The binary must be on your `PATH`.
 Every command prints exactly one JSON line on stdout and its diagnostics on stderr, with these exceptions: `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0; `outbox` prints one JSON line per record and then the trailer line; and the forwarded `job` subcommands copy the stdout of `soho job` unchanged, which for `job events` is JSON lines and a trailer line. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, `40`, `41`, `42`, `43`.
 
 - `job <sub> [args]` — forward a dispatcher-facing job subcommand to `soho` (`start`, `status`, `wait`, `events`, `collect`, `amend`, `send`, `ack`, `cancel`, `close`, `list`), applying the contract input limits first.
+- `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`).
 - `wake` — read one job event on stdin, record it in the outbox and attempt one push (configured as the `soho` wake hook).
 - `sync [--job <id>] [--push-only]` — pull new job events for the tracked jobs into the outbox and push the pending records.
 - `push` — push the pending outbox records to the dispatcher.
