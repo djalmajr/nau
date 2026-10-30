@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,7 +50,7 @@ type Client struct {
 func New(baseURL string, token string) (*Client, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
-		return nil, fmt.Errorf("sqld: parse URL: %v", err)
+		return nil, errors.New("sqld: the URL does not parse")
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("sqld: the URL must use http or https")
@@ -90,11 +91,11 @@ func (c *Client) Execute(ctx context.Context, stmt store.Stmt) (store.Result, er
 	}
 	resp := raw[0].Response
 	if resp.Type != "execute" {
-		return store.Result{}, fmt.Errorf("sqld: unexpected response type %q", resp.Type)
+		return store.Result{}, errors.New("sqld: unexpected response type")
 	}
 	var wr wireResult
 	if err := json.Unmarshal(resp.Result, &wr); err != nil {
-		return store.Result{}, fmt.Errorf("sqld: decode execute result: %v", err)
+		return store.Result{}, errors.New("sqld: malformed execute result")
 	}
 	return convertResult(wr)
 }
@@ -130,14 +131,14 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 	}
 	resp := raw[0].Response
 	if resp.Type != "batch" {
-		return nil, fmt.Errorf("sqld: unexpected response type %q", resp.Type)
+		return nil, errors.New("sqld: unexpected response type")
 	}
 	var batch struct {
 		StepResults []json.RawMessage `json:"step_results"`
 		StepErrors  []json.RawMessage `json:"step_errors"`
 	}
 	if err := json.Unmarshal(resp.Result, &batch); err != nil {
-		return nil, fmt.Errorf("sqld: decode batch result: %v", err)
+		return nil, errors.New("sqld: malformed batch result")
 	}
 	// The steps are: BEGIN (0), the n statements (1..n), COMMIT (n+1)
 	// and ROLLBACK (n+2).
@@ -154,7 +155,7 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 		}
 		var we wireError
 		if err := json.Unmarshal(e, &we); err != nil {
-			return nil, fmt.Errorf("sqld: decode batch step error: %v", err)
+			return nil, errors.New("sqld: malformed batch step error")
 		}
 		if i >= 1 && i <= n {
 			return nil, fmt.Errorf("sqld: batch statement %d: server error%s", i, codeSuffix(we.Code))
@@ -168,7 +169,7 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 		}
 		var wr wireResult
 		if err := json.Unmarshal(batch.StepResults[i], &wr); err != nil {
-			return nil, fmt.Errorf("sqld: decode batch step %d: %v", i, err)
+			return nil, fmt.Errorf("sqld: batch step %d: malformed result", i)
 		}
 		res, err := convertResult(wr)
 		if err != nil {
@@ -326,7 +327,7 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("sqld: build request: %v", err)
+		return nil, errors.New("sqld: the request could not be built")
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.Token != "" {
@@ -351,7 +352,7 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	var p wirePipeline
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, fmt.Errorf("sqld: decode response: %v", err)
+		return nil, errors.New("sqld: malformed response")
 	}
 	if len(p.Results) != len(reqs) {
 		return nil, fmt.Errorf("sqld: response has %d results for %d requests", len(p.Results), len(reqs))
@@ -367,7 +368,7 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 			return nil, fmt.Errorf("sqld: request %d: server error%s", i, codeSuffix(code))
 		}
 		if item.Type != "ok" || item.Response == nil {
-			return nil, fmt.Errorf("sqld: request %d: unexpected result type %q", i, item.Type)
+			return nil, fmt.Errorf("sqld: request %d: unexpected result type", i)
 		}
 	}
 	return p.Results, nil
@@ -388,7 +389,7 @@ func convertResult(wr wireResult) (store.Result, error) {
 	if wr.LastInsertRowID != nil {
 		n, err := strconv.ParseInt(*wr.LastInsertRowID, 10, 64)
 		if err != nil {
-			return store.Result{}, fmt.Errorf("sqld: decode last_insert_rowid: %v", err)
+			return store.Result{}, errors.New("sqld: malformed last_insert_rowid")
 		}
 		res.LastInsertRowID = n
 	}
@@ -416,32 +417,32 @@ func decodeValue(wv wireValue) (store.Value, error) {
 	case "integer":
 		var s string
 		if err := json.Unmarshal(wv.Value, &s); err != nil {
-			return nil, fmt.Errorf("sqld: decode integer value: %v", err)
+			return nil, errors.New("sqld: malformed integer value")
 		}
 		n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("sqld: decode integer value: %v", err)
+			return nil, errors.New("sqld: malformed integer value")
 		}
 		return n, nil
 	case "float":
 		var f float64
 		if err := json.Unmarshal(wv.Value, &f); err != nil {
-			return nil, fmt.Errorf("sqld: decode float value: %v", err)
+			return nil, errors.New("sqld: malformed float value")
 		}
 		return f, nil
 	case "text":
 		var s string
 		if err := json.Unmarshal(wv.Value, &s); err != nil {
-			return nil, fmt.Errorf("sqld: decode text value: %v", err)
+			return nil, errors.New("sqld: malformed text value")
 		}
 		return s, nil
 	case "blob":
 		b, err := base64.StdEncoding.DecodeString(wv.Base64)
 		if err != nil {
-			return nil, fmt.Errorf("sqld: decode blob value: %v", err)
+			return nil, errors.New("sqld: malformed blob value")
 		}
 		return b, nil
 	default:
-		return nil, fmt.Errorf("sqld: unknown value type %q", wv.Type)
+		return nil, errors.New("sqld: unknown value type")
 	}
 }

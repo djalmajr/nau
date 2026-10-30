@@ -735,3 +735,37 @@ func bytesOverLimit() []byte {
 	}
 	return b
 }
+
+// TestErrorsCarryNoServerText: every field the server controls (result
+// and response types, value types, values, the row id, malformed
+// results) can echo the bearer token back; none of it reaches the error.
+func TestErrorsCarryNoServerText(t *testing.T) {
+	tok := sentinelToken
+	cases := []struct {
+		name  string
+		items []itemWire
+	}{
+		{"result type", []itemWire{{Type: "ok-" + tok}, okClose()}},
+		{"response type", []itemWire{{Type: "ok", Response: &responseWire{Type: "execute-" + tok, Result: json.RawMessage(`{}`)}}, okClose()}},
+		{"value type", []itemWire{okExecute(`{"cols":[{"name":"p","decltype":null}],"rows":[[{"type":"` + tok + `","value":"x"}]],"affected_row_count":0,"last_insert_rowid":null}`), okClose()}},
+		{"integer value", []itemWire{okExecute(`{"cols":[{"name":"i","decltype":null}],"rows":[[{"type":"integer","value":"` + tok + `"}]],"affected_row_count":0,"last_insert_rowid":null}`), okClose()}},
+		{"float value", []itemWire{okExecute(`{"cols":[{"name":"f","decltype":null}],"rows":[[{"type":"float","value":"` + tok + `"}]],"affected_row_count":0,"last_insert_rowid":null}`), okClose()}},
+		{"blob value", []itemWire{okExecute(`{"cols":[{"name":"b","decltype":null}],"rows":[[{"type":"blob","base64":"` + tok + `!"}]],"affected_row_count":0,"last_insert_rowid":null}`), okClose()}},
+		{"row id", []itemWire{okExecute(`{"cols":[],"rows":[],"affected_row_count":1,"last_insert_rowid":"` + tok + `"}`), okClose()}},
+		{"malformed result", []itemWire{okExecute(`{"cols":"` + tok + `"}`), okClose()}},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeServer(t, func(req *requestWire) []itemWire { return c.items })
+			cl := f.clientFor(t, tok)
+			_, err := cl.Execute(context.Background(), stmtForTest("SELECT 1", nil))
+			if err == nil {
+				t.Fatal("Execute: want an error")
+			}
+			if strings.Contains(err.Error(), tok) {
+				t.Fatalf("the token leaked into the error: %v", err)
+			}
+		})
+	}
+}
