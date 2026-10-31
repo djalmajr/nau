@@ -78,9 +78,12 @@ type HCEvents struct {
 	done chan struct{}
 }
 
-// NewHCEvents builds the waker over runner. Start runs it; it ends when
-// the Start context ends.
+// NewHCEvents builds the waker over runner. The copy it keeps never
+// carries a capture sink: a line of the events stream is a signal, not
+// content, and nothing of the child's stdout may reach the caller's
+// buffers. Start runs it; it ends when the Start context ends.
 func NewHCEvents(runner soho.Runner) *HCEvents {
+	runner.Capture = nil // the events runner keeps no content sink
 	return &HCEvents{
 		Runner:    runner,
 		Reconnect: wakerReconnect,

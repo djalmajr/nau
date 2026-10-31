@@ -2,8 +2,11 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // The health states. last_error always holds the current state when
@@ -53,9 +56,16 @@ func ReadHealth(path string) (Health, error) {
 	return h, nil
 }
 
+// errHealthDirMode marks the failure to set the health directory's
+// mode: best effort on Unix, the file was still written, and the
+// failure is recorded internally by writeHealth instead of stopping
+// the agent.
+var errHealthDirMode = errors.New("agent: the health directory mode could not be applied")
+
 // writeHealth renders the current state and writes it atomically: a
 // temp file in the health file's directory, a sync, and a rename. The
-// directory is created 0700 and the file 0600.
+// directory is created 0700 and the file 0600. A failure to set the
+// directory's mode is recorded internally and does not stop the agent.
 func (st *state) writeHealth() error {
 	h := Health{
 		State:         st.state,
@@ -68,7 +78,16 @@ func (st *state) writeHealth() error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(st.statePath, append(data, '\n'))
+	if err := writeAtomic(st.statePath, append(data, '\n')); err != nil {
+		if errors.Is(err, errHealthDirMode) {
+			// Internal record: the directory mode is best effort, the
+			// write succeeded and the loop goes on.
+			st.dirModeErr = errHealthDirMode.Error()
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // writeAtomic writes data to path through a temp file and a rename, so
@@ -78,9 +97,16 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// MkdirAll does not change the mode of a directory that already
+	// exists; the dedicated health directory is private either way.
+	// Unix only: Windows directories have no Unix mode.
+	var modeErr error
+	if runtime.GOOS != "windows" {
+		modeErr = os.Chmod(dir, 0o700)
+	}
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	tmp := f.Name()
 	defer func() {
@@ -90,21 +116,35 @@ func writeAtomic(path string, data []byte) error {
 	}()
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	if err := f.Close(); err != nil {
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return err
+		return modeErrIfNone(modeErr, err)
 	}
 	tmp = ""
+	return modeErrIfNone(modeErr, nil)
+}
+
+// modeErrIfNone returns the write error when it is not nil, and the
+// recorded directory-mode failure wrapped as its internal category
+// otherwise: the mode failure never hides a real write failure, and a
+// write error is never masked by the best-effort mode.
+func modeErrIfNone(modeErr, err error) error {
+	if err != nil {
+		return err
+	}
+	if modeErr != nil {
+		return fmt.Errorf("%w: %v", errHealthDirMode, modeErr)
+	}
 	return nil
 }

@@ -39,6 +39,8 @@ const (
 	// 5 s, 10 s, 20 s, 40 s, 60 s, 60 s, and so on.
 	backoffStart = 5 * time.Second
 	backoffCap   = 60 * time.Second
+	// retryAfterCap caps a Retry-After wait in any form.
+	retryAfterCap = 60 * time.Second
 	// ingestPath is the hub endpoint the inventory is posted to.
 	ingestPath = "/api/ingest"
 )
@@ -46,6 +48,11 @@ const (
 // ErrRevoked ends Run when the hub answers 401: the machine key was
 // revoked. The message never names the key.
 var ErrRevoked = errors.New("agent: the hub revoked the machine key")
+
+// errHubURLInvalid is the fixed text of every hub URL parse or
+// validation failure: the rejected URL, or a piece of it, never
+// reaches the error.
+var errHubURLInvalid = errors.New("agent: the hub URL is not valid")
 
 // hubFile is the shape of the hub.json that another card writes.
 type hubFile struct {
@@ -118,14 +125,16 @@ type Config struct {
 // checkHubURL reports whether u is a hub URL the agent accepts:
 // https:// anywhere, or http:// on a loopback host only. A URL with
 // embedded user information is refused: the key travels in the
-// Authorization header, never in the URL.
+// Authorization header, never in the URL. Every parse or validation
+// failure returns the same fixed text: the rejected URL, or a piece
+// of it, is never reflected in the error.
 func checkHubURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("agent: hub URL: %v", err)
+		return errHubURLInvalid
 	}
 	if u.User != nil {
-		return errors.New("agent: hub URL must not carry user information; the key travels in the Authorization header")
+		return errHubURLInvalid
 	}
 	switch u.Scheme {
 	case "https":
@@ -144,12 +153,12 @@ func checkHubURL(raw string) error {
 				return nil
 			}
 		}
-		return errors.New("agent: hub URL: http is refused off loopback")
+		return errHubURLInvalid
 	default:
-		return fmt.Errorf("agent: hub URL: scheme %q refused; use https (or http on loopback)", u.Scheme)
+		return errHubURLInvalid
 	}
 	if u.Hostname() == "" {
-		return errors.New("agent: hub URL: the host is empty")
+		return errHubURLInvalid
 	}
 	return nil
 }

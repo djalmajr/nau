@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/djalmajr/nau/internal/inventory"
@@ -44,6 +46,7 @@ type state struct {
 	backoff       time.Duration
 	waitOverride  time.Duration // a Retry-After wait, independent of the backoff
 	statePath     string
+	dirModeErr    string // internal record of a health directory mode failure; never in the health file
 }
 
 // Run drives the loop: it checks the inventory capability, then reads
@@ -64,6 +67,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if httpc == nil {
 		httpc = &http.Client{}
 	}
+	agentTransport(httpc)
 	interval := cfg.Interval
 	if interval == 0 {
 		interval = DefaultInterval
@@ -109,6 +113,7 @@ func Run(ctx context.Context, cfg Config) error {
 		wctx, wcancel := context.WithCancel(ctx)
 		hc := runner
 		hc.Bin = cfg.HCBin
+		hc.Capture = nil // the events stream is contentless: no capture sink on the copy
 		waker = NewHCEvents(hc)
 		waker.Sleep = sleep
 		waker.Start(wctx)
@@ -267,13 +272,73 @@ func (st *state) readInventory(ctx context.Context) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// noRedirect is the transport policy of the agent: the hub endpoint is
+// validated before the request, and a redirect would leave it. The
+// client therefore keeps the first response; a 3xx answer is
+// classified like any other answer and nothing is resent.
+func noRedirect(req *http.Request, via []*http.Request) error {
+	return http.ErrUseLastResponse
+}
+
+// agentTransport applies the agent's transport policy to the client
+// Run uses, whatever client the caller provided.
+func agentTransport(c *http.Client) {
+	c.CheckRedirect = noRedirect
+}
+
+// ingestEndpoint joins the base URL and the ingest path with net/url:
+// the trailing slash of the base path does not leak into the endpoint,
+// so the base works with or without it. A parse failure returns the
+// fixed error: the URL, or a piece of it, never reaches the error.
+func ingestEndpoint(base string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", errHubURLInvalid
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + ingestPath
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+// parseRetryAfter reads the Retry-After header: integer seconds, or an
+// HTTP date compared with the agent's clock. A past date or an invalid
+// value is 0, and the wait is capped at retryAfterCap in any case.
+func parseRetryAfter(ra string, now time.Time) time.Duration {
+	if n, err := strconv.Atoi(ra); err == nil && n >= 0 {
+		d := time.Duration(n) * time.Second
+		if d > retryAfterCap {
+			return retryAfterCap
+		}
+		return d
+	}
+	if when, err := http.ParseTime(ra); err == nil {
+		d := when.Sub(now)
+		if d <= 0 {
+			return 0 // a past date takes the backoff
+		}
+		if d > retryAfterCap {
+			return retryAfterCap
+		}
+		return d
+	}
+	return 0
+}
+
 // send posts the inventory to the hub and maps the answer to the wait
 // and the health state the loop takes from it. It returns ErrRevoked
 // on 401.
 func (st *state) send(ctx context.Context, body []byte) error {
 	sctx, cancel := context.WithTimeout(ctx, sendBound)
 	defer cancel()
-	req, err := http.NewRequestWithContext(sctx, http.MethodPost, st.url+ingestPath, bytes.NewReader(body))
+	endpoint, err := ingestEndpoint(st.url)
+	if err != nil {
+		// The URL validated in Run; this is a fixed category, not the
+		// URL text.
+		st.setState(StateHubUnreachable)
+		st.backoff = st.nextBackoff()
+		return err
+	}
+	req, err := http.NewRequestWithContext(sctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		// The URL validated in Run; this fails on the context.
 		st.setState(StateHubUnreachable)
@@ -307,16 +372,25 @@ func (st *state) send(ctx context.Context, body []byte) error {
 		// one: a 409 has no category of its own.
 		st.backoff = 0
 	case resp.StatusCode == http.StatusTooManyRequests:
-		st.backoff = 0
+		// The 429 progression: the backoff advances 5 s to 60 s
+		// across the refusals and returns to the start only after a
+		// success. An explicit Retry-After waits for that refusal
+		// without touching the progression.
 		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			if n, err := strconv.Atoi(ra); err == nil && n >= 0 {
-				st.waitOverride = time.Duration(n) * time.Second
+			if w := parseRetryAfter(ra, st.now()); w > 0 {
+				st.waitOverride = w
 			}
 		}
 		if st.waitOverride == 0 {
 			st.waitOverride = st.nextBackoff()
 		}
 		st.setState(StateRateLimited)
+	case resp.StatusCode >= 300 && resp.StatusCode <= 399:
+		// The client does not follow redirects (noRedirect): a 3xx
+		// reaches here with the body unposted at the destination.
+		// Nothing is resent, and the answer takes the backoff.
+		st.setState(StateHubUnreachable)
+		st.backoff = st.nextBackoff()
 	default:
 		// 5xx or anything else: back off.
 		st.setState(StateHubUnreachable)
