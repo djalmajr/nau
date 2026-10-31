@@ -225,31 +225,7 @@ func cookieOf(t *testing.T, resp hub.Response) string {
 // on the real sqld: several accounts with different counts, grouped
 // by the right key of each account.
 func TestSQLDDeveloperCounters(t *testing.T) {
-	url := os.Getenv("NAU_TEST_SQLD_URL")
-	if url == "" {
-		t.Skip("set NAU_TEST_SQLD_URL to run the developers counters against a real sqld")
-	}
-	client, err := sqld.New(url, "")
-	if err != nil {
-		t.Fatalf("sqld.New: %v", err)
-	}
-	ctx := context.Background()
-	resetToZero(t, client, ctx)
-	if err := (&migrate.Runner{Store: client, Now: time.Now}).Apply(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	t.Cleanup(func() {
-		stmts := make([]store.Stmt, 0, 9)
-		for _, table := range []string{
-			"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
-			"login_failures", "sessions", "invites", "users",
-		} {
-			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
-		}
-		if _, err := client.Batch(ctx, stmts); err != nil {
-			t.Logf("the cleanup of the rows: %v", err)
-		}
-	})
+	client := hubtest.SQLD(t)
 	s := freshSQLScenario(t, client)
 	// alice has two machines, one of them shared with bob; bob has
 	// one machine, shared with alice and with the owner of the hub.
