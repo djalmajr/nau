@@ -203,8 +203,12 @@ export function useRevokeInvite() {
 /** POST /api/session/password — 204: o usuário é o mesmo, só a senha e a
  *  cookie mudam; nada no cache fica desatualizado. */
 export function useChangePassword() {
+  // A conta da requisição vai junto: um 401 de sessão expirada que chega
+  // depois da troca de conta é da conta anterior, e o handler central o
+  // ignora em vez de derrubar a sessão atual.
+  const userId = useSessionUserId();
   return useMutation({
     mutationFn: ({ current, newPassword }: { current: string; newPassword: string }) =>
-      api.changePassword(current, newPassword),
+      api.changePassword(current, newPassword, { user: userId }),
   });
 }

@@ -407,11 +407,12 @@ export const api = {
     }),
   /** POST /api/session/password — 204 (nova cookie; demais sessões terminam);
    *  401 senha atual errada; 400 weak_password. */
-  changePassword: (current: string, newPassword: string) =>
+  changePassword: (current: string, newPassword: string, options: RequestOptions = {}) =>
     req<void>("/session/password", {
       body: JSON.stringify({ current, new: newPassword }),
       method: "POST",
-    }),
+      signal: options.signal,
+    }, options.user),
   /** GET /api/version — 200 { version }. */
   getVersion: (options: RequestOptions = {}) =>
     req<VersionResponse>("/version", { signal: options.signal }, options.user),
