@@ -226,6 +226,19 @@ func cookieOf(t *testing.T, resp hub.Response) string {
 // by the right key of each account.
 func TestSQLDDeveloperCounters(t *testing.T) {
 	client := hubtest.SQLD(t)
+	// The rows of the fixture go away at the end of the test, before
+	// the helper releases the lock (the cleanups run last in, first
+	// out), so the shared database never keeps them. The test context
+	// is already done when the cleanups run: the delete has its own.
+	t.Cleanup(func() {
+		stmts := make([]store.Stmt, 0, len(sqldMachineTables))
+		for _, table := range sqldMachineTables {
+			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
+		}
+		if _, err := client.Batch(context.Background(), stmts); err != nil {
+			t.Errorf("the cleanup of the rows: %v", err)
+		}
+	})
 	s := freshSQLScenario(t, client)
 	// alice has two machines, one of them shared with bob; bob has
 	// one machine, shared with alice and with the owner of the hub.
