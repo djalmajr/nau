@@ -17,3 +17,10 @@ scripts
 # Web: only the sources enter the build.
 web/node_modules
 web/dist
+
+# Local environment and credential files never enter the build
+# context, in any folder (Vite reads .env.local and .env.*.local).
+**/.env
+**/.env.*
+**/*.pem
+**/*.key

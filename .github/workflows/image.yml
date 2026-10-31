@@ -32,6 +32,14 @@ jobs:
         run: |
           set -euo pipefail
           network="nau-hub-smoke-${GITHUB_RUN_ID}"
+          # Remove the containers and the network on any exit, the
+          # failing ones included; a resource that was never created is
+          # ignored, and the step keeps its own exit status.
+          cleanup() {
+            docker rm -f nau-hub-app nau-hub-sqld >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
           docker network create "$network"
           session_key=$(openssl rand -hex 32)
           docker run -d --name nau-hub-sqld --network "$network" \
@@ -60,5 +68,3 @@ jobs:
           curl -fsS "http://127.0.0.1:${port}/" -o /tmp/index.html
           grep -qi '<!doctype html>' /tmp/index.html
           grep -qi 'id="root"' /tmp/index.html
-          docker rm -f nau-hub-app nau-hub-sqld
-          docker network rm "$network"
