@@ -1,0 +1,70 @@
+name: Image
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Build and smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build the image
+        run: docker build -t nau-hub:smoke --build-arg VERSION="ci-${GITHUB_SHA}" .
+
+      # The image is built only, never pushed. The smoke test runs the
+      # image against a containerized sqld on a private Docker network
+      # with a synthetic session key generated in the job (never a real
+      # secret), and checks /api/health and the served index page.
+      - name: Smoke test against a containerized sqld
+        shell: bash
+        run: |
+          set -euo pipefail
+          network="nau-hub-smoke-${GITHUB_RUN_ID}"
+          # Remove the containers and the network on any exit, the
+          # failing ones included; a resource that was never created is
+          # ignored, and the step keeps its own exit status.
+          cleanup() {
+            docker rm -f nau-hub-app nau-hub-sqld >/dev/null 2>&1 || true
+            docker network rm "$network" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker network create "$network"
+          session_key=$(openssl rand -hex 32)
+          docker run -d --name nau-hub-sqld --network "$network" \
+            ghcr.io/tursodatabase/libsql-server:v0.24.31
+          port=$((20000 + RANDOM % 40000))
+          docker run -d --name nau-hub-app --network "$network" \
+            -e NAU_HUB_DB_URL="http://nau-hub-sqld:8080" \
+            -e NAU_HUB_SESSION_KEY="$session_key" \
+            -p "127.0.0.1:${port}:7440" \
+            nau-hub:smoke
+          ok=""
+          body=""
+          for _ in $(seq 1 60); do
+            if body=$(curl -fsS "http://127.0.0.1:${port}/api/health" 2>/dev/null) \
+              && printf '%s' "$body" | grep -q '"ok":true'; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ -z "$ok" ]; then
+            docker logs nau-hub-app
+            exit 1
+          fi
+          echo "health: $body"
+          curl -fsS "http://127.0.0.1:${port}/" -o /tmp/index.html
+          grep -qi '<!doctype html>' /tmp/index.html
+          grep -qi 'id="root"' /tmp/index.html
