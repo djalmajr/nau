@@ -132,5 +132,6 @@ Every `POST`, `PUT` and `DELETE` under `/api/` needs `Content-Type: application/
 - **`POST /api/invites/accept`:** body `{"token","name","password"}`, without a session. Answers:
   - 201 with the `GET /api/session` body and the cookie;
   - 400 `{"error":"invalid_invite"}`;
+  - 400 `{"error":"weak_password"}` when `password` is not 12 to 128 bytes;
   - 409 `{"error":"email_taken"}`.
 - **A member** calling the first three gets 403 `{"error":"forbidden"}`.

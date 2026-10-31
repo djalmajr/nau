@@ -50,6 +50,16 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
   unauthorizedHandler = handler;
 }
 
+/** Resultado do emparelhamento manual do signal: o signal para o fetch e o
+ *  `dispose` que remove o timer do timeout e o listener no signal do
+ *  chamador. Quem compõe roda o `dispose` no `finally` da requisição,
+ *  depois da leitura do corpo, para sucesso, erro, timeout e cancelamento
+ *  não deixarem timer pendente nem listener registrado. */
+interface RequestSignalHandle {
+  signal: AbortSignal;
+  dispose: () => void;
+}
+
 /** O signal que o fetch usa: o do chamador (TanStack Query) combinado com o
  *  timeout do cliente — o cancelamento do chamador propaga até o fetch
  *  (o `clear()` do logout fecha as requisições em voo) e o timeout continua
@@ -57,61 +67,92 @@ export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): voi
  *  o ambiente jsdom dos testes não expõe `any`); o timer do timeout é
  *  `unref`-ado como o de `AbortSignal.timeout`, para não segurar o processo.
  */
-function requestSignal(caller: AbortSignal | null | undefined): AbortSignal {
-  if (!caller) return AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+function requestSignal(caller: AbortSignal | null | undefined): RequestSignalHandle {
+  if (!caller) {
+    // Sem chamador: o timer é do próprio AbortSignal.timeout, sem listener
+    // nosso para remover.
+    return { dispose: () => {}, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
+  }
   const controller = new AbortController();
   if (caller.aborted) {
     controller.abort(caller.reason);
-    return controller.signal;
+    return { dispose: () => {}, signal: controller.signal };
   }
-  const timer = setTimeout(() => {
+  let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    timer = undefined;
     controller.abort(new DOMException("Timed out", "TimeoutError"));
   }, REQUEST_TIMEOUT_MS);
   (timer as { unref?: () => void }).unref?.();
   const onCallerAbort = () => {
-    clearTimeout(timer);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
     controller.abort(caller.reason);
   };
   caller.addEventListener("abort", onCallerAbort, { once: true });
-  return controller.signal;
+  return {
+    dispose: () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      caller.removeEventListener("abort", onCallerAbort);
+    },
+    signal: controller.signal,
+  };
 }
 
 async function req<T>(path: string, init?: RequestInit, user?: string): Promise<T> {
-  let res: Response;
+  const { dispose, signal } = requestSignal(init?.signal);
   try {
-    res = await fetch(BASE + path, {
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      ...init,
-      signal: requestSignal(init?.signal),
-    });
-  } catch (err) {
-    // Cancelado pelo chamador (ex.: o clear() do logout/401): o erro de
-    // abort sobe como está e a camada TanStack Query trata o cancelamento;
-    // a UI não confunde isso com timeout.
-    if (init?.signal?.aborted) throw err;
-    // Timeout/abort sem chamador → ApiError(408) para virar estado de
-    // erro/retry na UI; erros de rede genuínos (TypeError) sobem inalterados.
-    if (isAbortError(err)) throw new ApiError(408);
-    throw err;
-  }
-  if (!res.ok) {
-    let serverError = "";
+    let res: Response;
     try {
-      const body = (await res.json()) as { error?: unknown };
-      if (typeof body?.error === "string") serverError = body.error;
-    } catch {
-      // non-JSON error body
+      res = await fetch(BASE + path, {
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        ...init,
+        signal,
+      });
+    } catch (err) {
+      // Cancelado pelo chamador (ex.: o clear() do logout/401): o erro de
+      // abort sobe como está e a camada TanStack Query trata o cancelamento;
+      // a UI não confunde isso com timeout.
+      if (init?.signal?.aborted) throw err;
+      // Timeout/abort sem chamador → ApiError(408) para virar estado de
+      // erro/retry na UI; erros de rede genuínos (TypeError) sobem inalterados.
+      if (isAbortError(err)) throw new ApiError(408);
+      throw err;
     }
-    // 401 numa chamada autenticada significa sessão perdida: o handler
-    // central remove a sessão do cache e leva o usuário de volta ao login.
-    // O POST de login é a exceção (acima).
-    const isLoginPost = path === "/session" && String(init?.method ?? "GET").toUpperCase() === "POST";
-    if (res.status === 401 && !isLoginPost) unauthorizedHandler?.(user);
-    throw new ApiError(res.status, serverError);
+    if (!res.ok) {
+      let serverError = "";
+      try {
+        const body = (await res.json()) as { error?: unknown };
+        if (typeof body?.error === "string") serverError = body.error;
+      } catch {
+        // non-JSON error body
+      }
+      // 401 numa chamada autenticada significa sessão perdida: o handler
+      // central remove a sessão do cache e leva o usuário de volta ao login.
+      // Duas respostas são a exceção (o 401 ali é erro de formulário, não
+      // sessão expirada): o POST de login (credencial errada) e a senha atual
+      // errada no POST de troca de senha — e só ela: o contrato responde
+      // `invalid_credentials` nesse caso, enquanto `unauthenticated` é a
+      // sessão expirada/revogada e passa pelo handler central como qualquer
+      // outra rota.
+      const method = String(init?.method ?? "GET").toUpperCase();
+      const isLogin = path === "/session" && method === "POST";
+      const isWrongPassword = path === "/session/password" && serverError === "invalid_credentials";
+      if (res.status === 401 && !isLogin && !isWrongPassword) unauthorizedHandler?.(user);
+      throw new ApiError(res.status, serverError);
+    }
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  } finally {
+    // Depois da leitura do corpo (ou da falha): nenhum caminho deixa timer
+    // pendente nem listener no signal do chamador.
+    dispose();
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 export type SessionRole = "owner" | "member";
@@ -235,6 +276,60 @@ export interface OverviewResponse {
   top_projects: TopProject[];
 }
 
+/** Máquina com os dados da chave (GET /api/machines): as próprias e as
+ *  compartilhadas. `shared_with` vem preenchido só nas próprias. */
+export interface HubMachine {
+  id: string;
+  name: string;
+  developer: Developer;
+  created_ms: number;
+  revoked: boolean;
+  last_seen_ms: number | null;
+  online: boolean;
+  shared_with: Developer[];
+}
+
+export interface MachinesResponse {
+  machines: HubMachine[];
+}
+
+/** Desenvolvedor com as contagens de contabilidade (GET /api/developers). */
+export interface HubDeveloper {
+  id: string;
+  name: string;
+  email: string;
+  machines: number;
+  /** Máquinas que este desenvolvedor compartilha com o usuário. */
+  shares_with_me: number;
+  /** Máquinas que o usuário compartilha com este desenvolvedor. */
+  shared_by_me: number;
+}
+
+export interface DevelopersResponse {
+  developers: HubDeveloper[];
+}
+
+/** Convite pendente (GET/POST /api/invites). O `token` só existe na resposta
+ *  do POST: aparece uma única vez. */
+export interface Invite {
+  id: string;
+  email: string;
+  expires_ms: number;
+}
+
+export interface InvitesResponse {
+  invites: Invite[];
+}
+
+export interface InviteCreated extends Invite {
+  token: string;
+}
+
+/** Versão do hub (GET /api/version). */
+export interface VersionResponse {
+  version: string;
+}
+
 export const api = {
   /** GET /api/session — 200 { user } ou 401 { error: "unauthenticated" }. */
   getSession: (signal?: AbortSignal) => req<SessionResponse>("/session", { signal }),
@@ -257,4 +352,68 @@ export const api = {
   /** GET /api/overview — 200 com contagens, máquinas, espera, 24 h e projetos. */
   getOverview: (options: RequestOptions = {}) =>
     req<OverviewResponse>("/overview", { signal: options.signal }, options.user),
+  /** GET /api/machines — 200 { machines }; as próprias + as compartilhadas. */
+  getMachines: (options: RequestOptions = {}) =>
+    req<MachinesResponse>("/machines", { signal: options.signal }, options.user),
+  /** DELETE /api/machines/{id} — 204 revoga a chave (só o dono; 404 caso contrário). */
+  revokeMachine: (id: string, options: RequestOptions = {}) =>
+    req<void>(`/machines/${encodeURIComponent(id)}`, { method: "DELETE", signal: options.signal }, options.user),
+  /** POST /api/pairings/confirm — 204 vincula o pareamento; 400 código inválido/expirado;
+   *  429 depois de 10 códigos errados em 15 min. O código pode vir com ou sem
+   *  hífen e em qualquer caixa (o servidor normaliza). */
+  confirmPairing: (code: string, options: RequestOptions = {}) =>
+    req<void>("/pairings/confirm", {
+      body: JSON.stringify({ code }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** POST /api/machines/{id}/shares — 201 { developer }; 404 máquina não própria
+   *  ou e-mail sem conta (os dois casos se parecem). */
+  shareMachine: (id: string, email: string, options: RequestOptions = {}) =>
+    req<{ developer: Developer }>(`/machines/${encodeURIComponent(id)}/shares`, {
+      body: JSON.stringify({ email }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** DELETE /api/machines/{id}/shares/{developerId} — 204 encerra o compartilhamento. */
+  unshareMachine: (id: string, developerId: string, options: RequestOptions = {}) =>
+    req<void>(`/machines/${encodeURIComponent(id)}/shares/${encodeURIComponent(developerId)}`, {
+      method: "DELETE",
+      signal: options.signal,
+    }, options.user),
+  /** GET /api/developers — 200 { developers }. */
+  getDevelopers: (options: RequestOptions = {}) =>
+    req<DevelopersResponse>("/developers", { signal: options.signal }, options.user),
+  /** POST /api/invites — 201 { id, email, expires_ms, token } (owner; 403 membro).
+   *  O token aparece só nesta resposta. */
+  createInvite: (email: string, options: RequestOptions = {}) =>
+    req<InviteCreated>("/invites", {
+      body: JSON.stringify({ email, role: "member" }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** GET /api/invites — 200 { invites } (só os pendentes). */
+  getInvites: (options: RequestOptions = {}) =>
+    req<InvitesResponse>("/invites", { signal: options.signal }, options.user),
+  /** DELETE /api/invites/{id} — 204. */
+  revokeInvite: (id: string, options: RequestOptions = {}) =>
+    req<void>(`/invites/${encodeURIComponent(id)}`, { method: "DELETE", signal: options.signal }, options.user),
+  /** POST /api/invites/accept — sem sessão: 201 { user } (+cookie),
+   *  400 convite inválido/expirado, 409 e-mail já usado. */
+  acceptInvite: (token: string, name: string, password: string) =>
+    req<SessionResponse>("/invites/accept", {
+      body: JSON.stringify({ name, password, token }),
+      method: "POST",
+    }),
+  /** POST /api/session/password — 204 (nova cookie; demais sessões terminam);
+   *  401 senha atual errada; 400 weak_password. */
+  changePassword: (current: string, newPassword: string, options: RequestOptions = {}) =>
+    req<void>("/session/password", {
+      body: JSON.stringify({ current, new: newPassword }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** GET /api/version — 200 { version }. */
+  getVersion: (options: RequestOptions = {}) =>
+    req<VersionResponse>("/version", { signal: options.signal }, options.user),
 };

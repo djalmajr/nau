@@ -7,8 +7,13 @@ import type {
   AgentDetailResponse,
   AgentsResponse,
   Developer,
+  DevelopersResponse,
+  HubDeveloper,
+  HubMachine,
+  InvitesResponse,
   Machine,
   OverviewResponse,
+  VersionResponse,
 } from "@/lib/api";
 
 // "Agora" dinâmico: os tempos relativos dos componentes ("há 3 min") ficam
@@ -16,6 +21,7 @@ import type {
 export const NOW_MS = Date.now();
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
 
 export const ANA: Developer = { id: "u1", name: "Ana Exemplo" };
 export const BRUNO: Developer = { id: "u2", name: "Bruno Exemplo" };
@@ -222,3 +228,93 @@ export const OVERVIEW_RESPONSE: OverviewResponse = {
     working: index === 22 ? 3 : index === 11 ? 2 : index === 5 ? 1 : 0,
   })),
 };
+
+// Máquinas (GET /api/machines): as próprias da Ana (laptop-a, laptop-b, pc e
+// a revogada old-laptop) + uma do Bruno compartilhada com ela (desk). O
+// `shared_with` vem só nas próprias, como o contrato manda.
+export const MACHINE_DESK: HubMachine = {
+  created_ms: NOW_MS - 20 * DAY_MS,
+  developer: BRUNO,
+  id: "m4",
+  last_seen_ms: NOW_MS - HOUR_MS,
+  name: "desk",
+  online: true,
+  revoked: false,
+  shared_with: [],
+};
+
+export const MACHINES: HubMachine[] = [
+  {
+    created_ms: NOW_MS - 90 * DAY_MS,
+    developer: ANA,
+    id: "m1",
+    last_seen_ms: NOW_MS - 3 * MINUTE_MS,
+    name: "laptop-a",
+    online: true,
+    revoked: false,
+    shared_with: [BRUNO],
+  },
+  {
+    created_ms: NOW_MS - 60 * DAY_MS,
+    developer: ANA,
+    id: "m2",
+    last_seen_ms: NOW_MS - 10 * MINUTE_MS,
+    name: "laptop-b",
+    online: true,
+    revoked: false,
+    shared_with: [],
+  },
+  {
+    created_ms: NOW_MS - 40 * DAY_MS,
+    developer: ANA,
+    id: "m3",
+    last_seen_ms: NOW_MS - 2 * DAY_MS,
+    name: "pc",
+    online: false,
+    revoked: false,
+    shared_with: [],
+  },
+  {
+    created_ms: NOW_MS - 200 * DAY_MS,
+    developer: ANA,
+    id: "m5",
+    last_seen_ms: NOW_MS - 30 * DAY_MS,
+    name: "old-laptop",
+    online: false,
+    revoked: true,
+    shared_with: [],
+  },
+  MACHINE_DESK,
+];
+
+export const MACHINES_RESPONSE = { machines: MACHINES };
+
+// Desenvolvedores (GET /api/developers): a Ana (u1, a logada) e o Bruno (u2).
+export const DEVELOPERS: HubDeveloper[] = [
+  {
+    email: "ana@example.com",
+    id: "u1",
+    machines: 3,
+    name: "Ana Exemplo",
+    shares_with_me: 1,
+    shared_by_me: 1,
+  },
+  {
+    email: "bruno@example.com",
+    id: "u2",
+    machines: 1,
+    name: "Bruno Exemplo",
+    shares_with_me: 0,
+    shared_by_me: 1,
+  },
+];
+
+export const DEVELOPERS_RESPONSE: DevelopersResponse = { developers: DEVELOPERS };
+
+// Convites pendentes (GET /api/invites). O `token` não existe aqui: só na
+// resposta do POST /api/invites.
+export const INVITES_RESPONSE: InvitesResponse = {
+  invites: [{ email: "carla@example.com", expires_ms: NOW_MS + 7 * DAY_MS, id: "inv1" }],
+};
+
+export const VERSION_RESPONSE: VersionResponse = { version: "0.1.0" };

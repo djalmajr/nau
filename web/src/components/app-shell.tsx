@@ -295,7 +295,7 @@ function UserMenu() {
   );
 }
 
-function LanguageMenu() {
+export function LanguageMenu() {
   const { locale, setLocale, t } = useI18n();
   const selected = LOCALE_OPTIONS.find((option) => option.value === locale) ?? LOCALE_OPTIONS[0];
 
@@ -330,7 +330,7 @@ function LanguageMenu() {
   );
 }
 
-function ThemeMenu() {
+export function ThemeMenu() {
   const { t } = useI18n();
   const { resolvedTheme, setTheme, theme } = useTheme();
   const options: Array<{ label: string; value: ThemePreference }> = [
@@ -368,6 +368,7 @@ function ThemeMenu() {
 function pageTitle(pathname: string, t: (key: TranslationKey) => string): string {
   if (pathname === "/") return t("nav.overview");
   if (pathname.startsWith("/agents")) return t("nav.agents");
+  if (pathname.startsWith("/machines/connect")) return t("connect.title");
   if (pathname.startsWith("/machines")) return t("nav.machines");
   if (pathname.startsWith("/developers")) return t("nav.developers");
   if (pathname.startsWith("/projects")) return t("nav.projects");

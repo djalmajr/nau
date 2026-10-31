@@ -1,10 +1,10 @@
 import * as React from "react";
 import { createRoute, Link } from "@tanstack/react-router";
-import { ArrowLeft, CircleSlash } from "lucide-react";
+import { CircleSlash } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { ReasonPill } from "@/components/agents/reason-pill";
 import { StatePill } from "@/components/agents/state-pill";
-import { PageError, PageLoading } from "@/components/page";
+import { BackBar, PageError, PageLoading } from "@/components/page";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -41,48 +41,25 @@ export function AgentDetailPage() {
         <div className="space-y-5">
           {isPending ? (
             <>
-              <BackBar back={back} t={t} />
+              <BackBar back={back} label={t("agents.back")} />
               <PageLoading />
             </>
           ) : notFound ? (
             <AgentNotFound back={back} t={t} />
           ) : error || !data ? (
             <>
-              <BackBar back={back} t={t} />
+              <BackBar back={back} label={t("agents.back")} />
               <PageError onRetry={() => void refetch()} />
             </>
           ) : (
             <>
-              <BackBar back={back} t={t} />
+              <BackBar back={back} label={t("agents.back")} />
               <AgentDetail data={data} locale={locale} t={t} />
             </>
           )}
         </div>
       </AppShell>
     </RequireSession>
-  );
-}
-
-/** Barra de volta "← Agentes" no topo; leva a /agents com os mesmos
- *  parâmetros (view e filtros) que a URL do detalhe carrega. */
-function BackBar({
-  back,
-  t,
-}: {
-  back: { search: AgentsSearch; to: string };
-  t: ReturnType<typeof useI18n>["t"];
-}) {
-  return (
-    <Link
-      className={cn(
-        "-m-1.5 inline-flex items-center gap-1.5 rounded-md p-1.5 text-sm text-muted-foreground outline-none",
-        "transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
-      )}
-      {...back}
-    >
-      <ArrowLeft aria-hidden className="size-4" />
-      {t("agents.back")}
-    </Link>
   );
 }
 
