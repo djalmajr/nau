@@ -163,15 +163,21 @@ func checkHubURL(raw string) error {
 	return nil
 }
 
-// hostOnly reduces a hub URL to its scheme and host for the health
-// line: no path, no query, no user information.
-func hostOnly(raw string) string {
+// HostOnly reduces a hub URL to its scheme and host for the output
+// lines that must not carry more of the address: the health line and
+// the command output use the same reduction. No path, no query, no
+// user information.
+func HostOnly(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
 	}
 	return u.Scheme + "://" + u.Host
 }
+
+// hostOnly is HostOnly; the loop keeps calling it through the package
+// name in its own files.
+func hostOnly(raw string) string { return HostOnly(raw) }
 
 // realSleep sleeps until d elapses or ctx ends; it is the default Sleep.
 func realSleep(ctx context.Context, d time.Duration) error {

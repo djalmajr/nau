@@ -12,6 +12,12 @@ const usageTemplate = `%s - read-only hub of the coding agents at work: which ag
 usage: %s <command> [args]
 
 commands:
+  agent run [--interval <duration>] [--hc-bin <bin>]
+                                    run the machine agent: read the soho
+                                    inventory on the period (15 s by
+                                    default, 5 s to 30 s) and deliver it to
+                                    the hub from hub.json; the machine key
+                                    stays in the Authorization header
   config get|set|list               manage the machine configuration
                                     set [--if-automatic] <key> <value>
   doctor                            print the status line: the version, the
@@ -35,8 +41,9 @@ exit codes:
   2   bad usage, unknown config key
   3   connect: the pairing expired
   4   hub serve: the database or the listener is unavailable; connect: the
-      hub is unreachable or its answer is not valid (doctor reports the
-      soho backend in its JSON and exits 0 without it)
+      hub is unreachable or its answer is not valid; agent run: the hub
+      revoked the machine key (doctor reports the soho backend in its JSON
+      and exits 0 without it)
   130 connect: interrupted (Ctrl-C) before hub.json was written
 `
 

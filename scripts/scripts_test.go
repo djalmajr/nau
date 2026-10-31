@@ -403,10 +403,201 @@ func TestInstallShHelp(t *testing.T) {
 		t.Fatalf("sh install.sh --help: %v\n%s", sh, out)
 	}
 	text := string(out)
-	for _, opt := range []string{"--ref", "--bin-dir", "--machine-label", "--help"} {
+	for _, opt := range []string{"--ref", "--bin-dir", "--machine-label", "--agent", "--remove-agent", "--agent-dry-run", "--help"} {
 		if !strings.Contains(text, opt) {
 			t.Errorf("install.sh --help does not list %q:\n%s", opt, text)
 		}
+	}
+}
+
+// TestInstallShAgentDryRun: --agent-dry-run prints the plist when a
+// hub.json exists and the refusal notice when it does not, and installs
+// nothing either way (no plist, no log, no bin dir, no go install).
+func TestInstallShAgentDryRun(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	tmp := filepath.Join(root, "temp")
+	backend := filepath.Join(root, "backend")
+	for _, dir := range []string{home, tmp, backend} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stand-in soho on the PATH, so the service PATH resolves it.
+	if err := os.WriteFile(filepath.Join(backend, "soho"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	hubFile := filepath.Join(home, "Library", "Application Support", "nau", "hub.json")
+	plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
+	run := func() (string, int) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, sh, "install.sh", "--agent-dry-run")
+		cmd.WaitDelay = time.Second
+		cmd.Env = []string{
+			"HOME=" + home,
+			"TMPDIR=" + tmp,
+			"PATH=" + strings.Join([]string{backend, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+		}
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		code := 0
+		if err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			code = exit.ExitCode()
+		}
+		return stdout.String() + stderr.String(), code
+	}
+	// Without hub.json: the refusal notice, nothing installed.
+	out, code := run()
+	if code != 0 {
+		t.Fatalf("dry run without hub.json exit=%d: %s", code, out)
+	}
+	if !strings.Contains(out, "hub.json") || !strings.Contains(out, "nau connect") {
+		t.Fatalf("dry run without hub.json lacks the refusal notice: %s", out)
+	}
+	if _, err := os.Stat(plist); !os.IsNotExist(err) {
+		t.Fatalf("dry run without hub.json created the plist: %v", err)
+	}
+	// With a synthetic hub.json: the expected plist, still nothing
+	// installed.
+	if err := os.MkdirAll(filepath.Dir(hubFile), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hubFile, []byte(`{"url":"http://127.0.0.1:17440","machine_id":"machine-a","key":"synthetic"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, code = run()
+	if code != 0 {
+		t.Fatalf("dry run with hub.json exit=%d: %s", code, out)
+	}
+	for _, want := range []string{
+		`<string>djalmajr.nau.agent</string>`,
+		"<string>agent</string>",
+		"<string>run</string>",
+		"<key>KeepAlive</key>",
+		"<key>RunAtLoad</key>",
+		"nau-agent.log",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run plist lacks %q:\n%s", want, out)
+		}
+	}
+	if _, err := os.Stat(plist); !os.IsNotExist(err) {
+		t.Fatalf("dry run with hub.json created the plist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created the LaunchAgents directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "Library", "Logs", "nau-agent.log")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created the log file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".local", "bin")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created the bin directory: %v", err)
+	}
+}
+
+// TestInstallShAgentRefusalWithoutHubFile: with --agent and no hub.json
+// the install completes with a warning pointing at nau connect and
+// creates no service; on a platform without the plist the flag is
+// refused before any step.
+func TestInstallShAgentRefusalWithoutHubFile(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX installer")
+	}
+	if runtime.GOOS != "darwin" {
+		// Refused before the go check.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, sh, "install.sh", "--agent").CombinedOutput()
+		code := 0
+		if err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			code = exit.ExitCode()
+		}
+		if code != 2 || !strings.Contains(string(out), "supported on macOS and Windows only") {
+			t.Fatalf("non-macOS refusal: exit=%d out=%s", code, out)
+		}
+		return
+	}
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau")
+	helper := filepath.Join(buildDir, "helper")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "fixture space")
+	home := filepath.Join(root, "home space")
+	local := filepath.Join(root, "local space")
+	goDir := filepath.Join(root, "go space")
+	backendDir := filepath.Join(root, "backend space")
+	tmp := filepath.Join(root, "temp space")
+	bin := filepath.Join(root, "bin space")
+	for _, dir := range []string{home, local, goDir, backendDir, tmp} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(goDir, "go"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backendDir, "soho"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// No hub.json anywhere: the refusal path.
+	env := []string{
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"APPDATA=" + filepath.Join(home, "appdata"),
+		"LOCALAPPDATA=" + local,
+		"TMPDIR=" + tmp,
+		"TEMP=" + tmp,
+		"TMP=" + tmp,
+		"PATH=" + strings.Join([]string{goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+		"INSTALL_FIXTURE_NAU=" + nau,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, sh, "install.sh", "--bin-dir", bin, "--agent")
+	cmd.WaitDelay = time.Second
+	cmd.Env = env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	if err != nil && ctx.Err() == nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) {
+			t.Fatalf("installer failed: %v\n%s%s", err, stdout.String(), stderr.String())
+		}
+		if exit.ExitCode() != 0 {
+			t.Fatalf("installer exit=%d: %s%s", exit.ExitCode(), stdout.String(), stderr.String())
+		}
+	}
+	output := stdout.String() + stderr.String()
+	if !strings.Contains(stderr.String(), "nau connect") || !strings.Contains(stderr.String(), "hub.json") {
+		t.Fatalf("missing the connect warning on stderr: %s", output)
+	}
+	plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
+	if _, err := os.Stat(plist); !os.IsNotExist(err) {
+		t.Fatalf("the agent service was created without hub.json: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "nau")); err != nil {
+		t.Fatalf("the install did not complete: %v", err)
 	}
 }
 
@@ -435,7 +626,7 @@ func TestInstallPs1Help(t *testing.T) {
 		t.Fatalf("%s install.ps1 -Help: %v\n%s", powershell, err, out)
 	}
 	text := string(out)
-	for _, opt := range []string{"-Ref", "-BinDir", "-MachineLabel", "-Help"} {
+	for _, opt := range []string{"-Ref", "-BinDir", "-MachineLabel", "-Agent", "-RemoveAgent", "-AgentDryRun", "-Help"} {
 		if !strings.Contains(text, opt) {
 			t.Errorf("install.ps1 -Help does not list %q:\n%s", opt, text)
 		}

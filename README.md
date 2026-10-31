@@ -20,6 +20,8 @@ powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.loca
 
 On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues.
 
+On macOS, `--agent` (and `-Agent` in the PowerShell script) installs or rewrites the user service that runs `nau agent run`, and (re)starts it; `--remove-agent` / `-RemoveAgent` stops and removes it, and `--agent-dry-run` / `-AgentDryRun` print the unit it would install and exit. The service is created only when the config directory holds a `hub.json` (written by `nau connect`); without it the script warns and keeps the node usable.
+
 For development, from a checkout of the module `github.com/djalmajr/nau`:
 
 ```text
@@ -39,6 +41,7 @@ The binary must be on your `PATH`.
 
 Every command prints exactly one JSON line on stdout and its diagnostics on stderr; `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, and `130` when `connect` is interrupted before it writes `hub.json`.
 
+- `agent run [--interval <duration>] [--hc-bin <bin>]` — run the machine agent: it reads the soho inventory on the period (default `15s`, `5s` to `30s`) and delivers it to the hub from `hub.json`; the machine key stays in the `Authorization` header. A bad usage or a missing `hub.json` exits `2`; a revoked key exits `4`.
 - `config get|set|list` — manage the machine configuration. `config set [--if-automatic] <key> <value>`.
 - `doctor` — print the status line: the version, the config directory, the machine label and the soho backend block (read-only).
 - `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`); behind a proxy, the client address of the pairing API can be taken from a trusted header named by `NAU_HUB_CLIENT_IP_HEADER` (otherwise the hub uses the connection address, which the CLI overwrites to prevent spoofing).
