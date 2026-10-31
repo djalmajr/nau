@@ -64,14 +64,16 @@ export function LiveChannel() {
   // Última versão aplicada (evento ou leitura da recaída): repetir a mesma
   // versão não invalida de novo.
   const appliedVersion = React.useRef<string | null>(null);
-  // O canal ainda não decidiu na primeira render: a recaída não consulta
-  // antes de o efeito abaixo fixar o status (o status inicial do store é
-  // "offline" e a sessão já pode estar no cache).
-  const [channelDecided, setChannelDecided] = React.useState(false);
+  // A sessão para a qual o canal já decidiu (null: ainda nenhuma). A recaída
+  // só consulta depois de o efeito abaixo fixar o status para a sessão
+  // atual: o status do store pode ser o "offline" de antes (a montagem sem
+  // sessão, a conta anterior), e a render que traz a sessão nova chega antes
+  // do efeito que abre o stream dela.
+  const [decidedFor, setDecidedFor] = React.useState<string | undefined | null>(null);
 
   React.useEffect(() => {
     appliedVersion.current = null;
-    setChannelDecided(true);
+    setDecidedFor(userId);
     if (userId === undefined) {
       // Sem sessão (tela de login, logout, 401): nenhum stream nesta aba.
       setLiveStatus("offline");
@@ -150,7 +152,7 @@ export function LiveChannel() {
   const fallback = useQuery({
     queryKey: LIVE_VERSION_QUERY_KEY(userId ?? "anonymous"),
     queryFn: ({ signal }) => api.getLiveVersion({ signal, user: userId }),
-    enabled: channelDecided && status === "offline" && userId !== undefined,
+    enabled: userId !== undefined && decidedFor === userId && status === "offline",
     refetchInterval: AGENT_REFRESH_MS,
     retry: false,
   });

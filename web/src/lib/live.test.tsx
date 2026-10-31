@@ -13,7 +13,10 @@ import {
   type HubApiState,
 } from "@/test/hub-harness";
 import { SESSION_QUERY_KEY } from "@/lib/session";
-import { liveStatusSnapshot } from "./live-status";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render } from "@testing-library/react";
+import { LiveChannel } from "./live";
+import { liveStatusSnapshot, setLiveStatus } from "./live-status";
 
 // EventSource falso controlado pelo teste: dispara os eventos que um
 // servidor real entregaria (open, error, board) e registra as instâncias.
@@ -246,5 +249,39 @@ describe("canal ao vivo do quadro", () => {
     // A stream da conta nova funciona normalmente para a conta nova.
     act(() => esU2?.dispatch("board", boardData("v-nova")));
     await screen.findByText("Tarefa da conta antiga");
+  });
+});
+
+describe("canal ao vivo na entrada da sessão", () => {
+  afterEach(() => setLiveStatus("offline"));
+
+  // Montado sem sessão (tela de login), o canal fica "offline". Quando a
+  // sessão chega (o login, ou o primeiro GET /api/session), a render que a
+  // traz vem antes do efeito que abre o stream dela: a recaída não pode
+  // consultar /api/live nessa janela, porque o stream ainda vai abrir.
+  it("não consulta /api/live no login a frio enquanto o stream abre", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      calls.push(String(input).split("?")[0]);
+      return new Response(JSON.stringify({ version: "v1" }), {
+        headers: { "Content-Type": "application/json" },
+        status: 200,
+      });
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LiveChannel />
+      </QueryClientProvider>,
+    );
+    await act(async () => {});
+    expect(FakeEventSource.instances).toHaveLength(0);
+
+    await act(async () => {
+      queryClient.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    });
+    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(calls.filter((url) => url === "/api/live")).toHaveLength(0);
   });
 });
