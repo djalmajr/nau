@@ -13,7 +13,7 @@ const (
 	// machineColumns is the select column list of the machines.
 	machineColumns = "id, developer_id, name, key_hash, created_ms, revoked_ms"
 	// pairingColumns is the select column list of the pairings.
-	pairingColumns = "id, code_hash, poll_hash, name, created_ms, expires_ms, approved_by, machine_id, consumed"
+	pairingColumns = "id, code_hash, poll_hash, name, client_hash, created_ms, expires_ms, approved_by, machine_id, consumed"
 	// lastSeenChunk is the chunk size of the IN list of the last-seen
 	// query: far below the variable limit of the database.
 	lastSeenChunk = 500
@@ -21,8 +21,9 @@ const (
 
 // SQL is the MachineStore over the hub storage: one statement per
 // simple operation and one atomic batch per multi-statement operation
-// (the pairing create with the retention, the confirmation, the
-// delivery with its guard, the record with the retention).
+// (the pairing reservation with the retention, the confirm
+// reservation, the delivery with its guard, the delivery reservation
+// with the retention).
 type SQL struct {
 	store store.Store
 }
@@ -88,17 +89,17 @@ func machineRow(res store.Result) (Machine, bool, error) {
 }
 
 // pairingRow reads one pairing out of the select columns: id,
-// code_hash, poll_hash, name, created_ms, expires_ms, approved_by,
-// machine_id, consumed. It reports false with no error when there is
-// no row, and an error when the shape of the row is not the expected
-// one.
+// code_hash, poll_hash, name, client_hash, created_ms, expires_ms,
+// approved_by, machine_id, consumed. It reports false with no error
+// when there is no row, and an error when the shape of the row is not
+// the expected one.
 func pairingRow(res store.Result) (Pairing, bool, error) {
 	if len(res.Rows) == 0 {
 		return Pairing{}, false, nil
 	}
 	row := res.Rows[0]
-	if len(row) != 9 {
-		return Pairing{}, false, fmt.Errorf("machines: the pairing row has %d columns, want 9", len(row))
+	if len(row) != 10 {
+		return Pairing{}, false, fmt.Errorf("machines: the pairing row has %d columns, want 10", len(row))
 	}
 	id, ok := row[0].(string)
 	if !ok {
@@ -116,31 +117,35 @@ func pairingRow(res store.Result) (Pairing, bool, error) {
 	if !ok {
 		return Pairing{}, false, fmt.Errorf("machines: the pairing name is not a string")
 	}
-	createdMS, ok := row[4].(int64)
+	clientHash, ok := row[4].(string)
+	if !ok {
+		return Pairing{}, false, fmt.Errorf("machines: the client hash is not a string")
+	}
+	createdMS, ok := row[5].(int64)
 	if !ok {
 		return Pairing{}, false, fmt.Errorf("machines: the created_ms is not an integer")
 	}
-	expiresMS, ok := row[5].(int64)
+	expiresMS, ok := row[6].(int64)
 	if !ok {
 		return Pairing{}, false, fmt.Errorf("machines: the expires_ms is not an integer")
 	}
 	var approvedBy *string
-	if row[6] != nil {
-		v, ok := row[6].(string)
+	if row[7] != nil {
+		v, ok := row[7].(string)
 		if !ok {
 			return Pairing{}, false, fmt.Errorf("machines: the approved_by is not a string")
 		}
 		approvedBy = &v
 	}
 	var machineID *string
-	if row[7] != nil {
-		v, ok := row[7].(string)
+	if row[8] != nil {
+		v, ok := row[8].(string)
 		if !ok {
 			return Pairing{}, false, fmt.Errorf("machines: the machine_id is not a string")
 		}
 		machineID = &v
 	}
-	consumed, ok := row[8].(int64)
+	consumed, ok := row[9].(int64)
 	if !ok {
 		return Pairing{}, false, fmt.Errorf("machines: the consumed flag is not an integer")
 	}
@@ -149,6 +154,7 @@ func pairingRow(res store.Result) (Pairing, bool, error) {
 		CodeHash:   codeHash,
 		PollHash:   pollHash,
 		Name:       name,
+		ClientHash: clientHash,
 		CreatedMS:  createdMS,
 		ExpiresMS:  expiresMS,
 		ApprovedBy: approvedBy,
@@ -157,16 +163,36 @@ func pairingRow(res store.Result) (Pairing, bool, error) {
 	}, true, nil
 }
 
-func (s *SQL) CreatePairing(ctx context.Context, p Pairing, nowMS int64) error {
-	_, err := s.store.Batch(ctx, []store.Stmt{
-		// The retention: the pairings expired beyond the validity and
-		// the attempts outside the window.
-		{SQL: `DELETE FROM pairings WHERE expires_ms < ?`, Args: []store.Value{nowMS - pairingTTL.Milliseconds()}},
+// ReservePairing inserts the pairing only while the pending
+// (unconsumed and unexpired) pairings are below maxPendingPairings
+// and the client holds fewer than maxPairingsPerClient pairings
+// created in the last pairingCreateWindow: the conditional insert and
+// the expired retention run in one atomic batch, so concurrent
+// reservations cannot exceed the budgets, between the instances of
+// the hub. The prune of the attempts in the same batch keeps the
+// table bounded, as the old recording did. It reports whether the row
+// was inserted.
+func (s *SQL) ReservePairing(ctx context.Context, p Pairing, nowMS int64) (bool, error) {
+	since := nowMS - pairingCreateWindow.Milliseconds()
+	res, err := s.store.Batch(ctx, []store.Stmt{
+		// The expired pairings go away before the decision and do
+		// not count as pending.
+		{SQL: `DELETE FROM pairings WHERE expires_ms <= ?`, Args: []store.Value{nowMS}},
+		{SQL: `INSERT INTO pairings (id, code_hash, poll_hash, name, client_hash, created_ms, expires_ms, approved_by, machine_id, consumed)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 0
+WHERE (SELECT COUNT(*) FROM pairings WHERE consumed = 0 AND expires_ms > ?) < ?
+  AND (SELECT COUNT(*) FROM pairings WHERE client_hash = ? AND created_ms > ?) < ?`,
+			Args: []store.Value{p.ID, p.CodeHash, p.PollHash, p.Name, p.ClientHash, p.CreatedMS, p.ExpiresMS, nullable(p.ApprovedBy), nullable(p.MachineID),
+				nowMS, int64(maxPendingPairings), p.ClientHash, since, int64(maxPairingsPerClient)}},
 		{SQL: `DELETE FROM pairing_attempts WHERE at_ms <= ?`, Args: []store.Value{nowMS - confirmWindow.Milliseconds()}},
-		{SQL: `INSERT INTO pairings (id, code_hash, poll_hash, name, created_ms, expires_ms, approved_by, machine_id, consumed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-			Args: []store.Value{p.ID, p.CodeHash, p.PollHash, p.Name, p.CreatedMS, p.ExpiresMS, nullable(p.ApprovedBy), nullable(p.MachineID)}},
 	})
-	return err
+	if err != nil {
+		return false, err
+	}
+	if len(res) == 0 {
+		return false, fmt.Errorf("machines: the pairing reservation returned no result")
+	}
+	return res[1].Affected == 1, nil
 }
 
 // nullable converts the pointer to the argument the driver
@@ -177,27 +203,6 @@ func nullable(v *string) store.Value {
 		return nil
 	}
 	return *v
-}
-
-func (s *SQL) PendingPairings(ctx context.Context) (int, error) {
-	res, err := s.store.Execute(ctx, store.Stmt{SQL: `SELECT COUNT(*) FROM pairings WHERE consumed = 0`})
-	if err != nil {
-		return 0, err
-	}
-	n, err := intResult(res)
-	return int(n), err
-}
-
-func (s *SQL) PairingsCreatedSince(ctx context.Context, sinceMS int64) (int, error) {
-	res, err := s.store.Execute(ctx, store.Stmt{
-		SQL:  `SELECT COUNT(*) FROM pairings WHERE created_ms > ?`,
-		Args: []store.Value{sinceMS},
-	})
-	if err != nil {
-		return 0, err
-	}
-	n, err := intResult(res)
-	return int(n), err
 }
 
 func (s *SQL) FindPairingByCodeHash(ctx context.Context, codeHash string) (Pairing, bool, error) {
@@ -242,27 +247,39 @@ func (s *SQL) ConfirmPairing(ctx context.Context, pairingID, userID string) (boo
 	return res.Affected == 1, nil
 }
 
-// RecordPairingError stores one wrong confirmation and prunes the
-// attempts outside the window, in one atomic batch, so the table
-// stays bounded.
-func (s *SQL) RecordPairingError(ctx context.Context, userID string, atMS int64) error {
-	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `INSERT INTO pairing_attempts (user_id, at_ms) VALUES (?, ?)`, Args: []store.Value{userID, atMS}},
-		{SQL: `DELETE FROM pairing_attempts WHERE at_ms <= ?`, Args: []store.Value{atMS - confirmWindow.Milliseconds()}},
-	})
-	return err
-}
-
-func (s *SQL) CountPairingErrors(ctx context.Context, userID string, sinceMS int64) (int, error) {
-	res, err := s.store.Execute(ctx, store.Stmt{
-		SQL:  `SELECT COUNT(*) FROM pairing_attempts WHERE user_id = ? AND at_ms > ?`,
-		Args: []store.Value{userID, sinceMS},
+// ReserveConfirmError records one confirm attempt of the user only
+// while the user holds fewer than maxConfirmErrors attempts in the
+// last confirmWindow: the conditional insert and the prune run in one
+// atomic batch, so concurrent attempts cannot exceed the budget,
+// between the instances of the hub. A wrong confirmation keeps the
+// reservation; a correct one clears it with ClearPairingErrors. It
+// reports whether the attempt was recorded.
+func (s *SQL) ReserveConfirmError(ctx context.Context, userID string, atMS int64) (bool, error) {
+	since := atMS - confirmWindow.Milliseconds()
+	res, err := s.store.Batch(ctx, []store.Stmt{
+		{SQL: `INSERT INTO pairing_attempts (user_id, at_ms)
+SELECT ?, ?
+WHERE (SELECT COUNT(*) FROM pairing_attempts WHERE user_id = ? AND at_ms > ?) < ?`,
+			Args: []store.Value{userID, atMS, userID, since, int64(maxConfirmErrors)}},
+		{SQL: `DELETE FROM pairing_attempts WHERE at_ms <= ?`, Args: []store.Value{since}},
 	})
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	n, err := intResult(res)
-	return int(n), err
+	if len(res) == 0 {
+		return false, fmt.Errorf("machines: the confirm reservation returned no result")
+	}
+	return res[0].Affected == 1, nil
+}
+
+// ClearPairingErrors deletes the confirm attempts of the user in the
+// window: the successful confirmation of the code does not keep them.
+func (s *SQL) ClearPairingErrors(ctx context.Context, userID string, atMS int64) error {
+	_, err := s.store.Execute(ctx, store.Stmt{
+		SQL:  `DELETE FROM pairing_attempts WHERE user_id = ? AND at_ms > ?`,
+		Args: []store.Value{userID, atMS - confirmWindow.Milliseconds()},
+	})
+	return err
 }
 
 // DeliverMachine consumes the pairing (exactly once) and stores the
@@ -405,27 +422,28 @@ func inPlaceholders(n int) string {
 	return strings.Repeat("?,", n-1) + "?"
 }
 
-// RecordDelivery stores one accepted delivery and prunes the rows
-// outside the window, in one atomic batch, so the table stays
-// bounded.
-func (s *SQL) RecordDelivery(ctx context.Context, machineID string, atMS int64) error {
-	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `INSERT INTO ingest_deliveries (machine_id, at_ms) VALUES (?, ?)`, Args: []store.Value{machineID, atMS}},
-		{SQL: `DELETE FROM ingest_deliveries WHERE at_ms <= ?`, Args: []store.Value{atMS - deliveryWindow.Milliseconds()}},
-	})
-	return err
-}
-
-func (s *SQL) CountDeliveries(ctx context.Context, machineID string, sinceMS int64) (int, error) {
-	res, err := s.store.Execute(ctx, store.Stmt{
-		SQL:  `SELECT COUNT(*) FROM ingest_deliveries WHERE machine_id = ? AND at_ms > ?`,
-		Args: []store.Value{machineID, sinceMS},
+// ReserveDelivery records one delivery of the machine only while the
+// machine holds fewer than maxDeliveries deliveries in the last
+// deliveryWindow: the conditional insert and the prune run in one
+// atomic batch, so concurrent deliveries cannot exceed the budget,
+// between the instances of the hub. A delivery always counts, applied
+// or refused. It reports whether the delivery was recorded.
+func (s *SQL) ReserveDelivery(ctx context.Context, machineID string, atMS int64) (bool, error) {
+	since := atMS - deliveryWindow.Milliseconds()
+	res, err := s.store.Batch(ctx, []store.Stmt{
+		{SQL: `INSERT INTO ingest_deliveries (machine_id, at_ms)
+SELECT ?, ?
+WHERE (SELECT COUNT(*) FROM ingest_deliveries WHERE machine_id = ? AND at_ms > ?) < ?`,
+			Args: []store.Value{machineID, atMS, machineID, since, int64(maxDeliveries)}},
+		{SQL: `DELETE FROM ingest_deliveries WHERE at_ms <= ?`, Args: []store.Value{since}},
 	})
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	n, err := intResult(res)
-	return int(n), err
+	if len(res) == 0 {
+		return false, fmt.Errorf("machines: the delivery reservation returned no result")
+	}
+	return res[0].Affected == 1, nil
 }
 
 // firstErr returns the first non-nil error.

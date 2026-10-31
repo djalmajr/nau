@@ -294,6 +294,37 @@ func bearer(key string) hub.Header {
 	return h
 }
 
+// clientIP is one deterministic ip of the suites.
+func clientIP(i int) string {
+	return fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+}
+
+// ipHeader is the header the hub serve adapter sets from the
+// RemoteAddr of the connection (without the port): the suites set it
+// the same way.
+func ipHeader(ip string) hub.Header {
+	h := hub.Header{}
+	h.Set(RemoteIPHeader, ip)
+	return h
+}
+
+// withValue returns h with one header added.
+func withValue(h hub.Header, name, value string) hub.Header {
+	h.Set(name, value)
+	return h
+}
+
+// headerValues is the header of one name holding all the values (the
+// hub Set replaces the values, it does not append them).
+func headerValues(name string, values ...string) hub.Header {
+	h := hub.Header{}
+	for _, v := range values {
+		k := strings.ToLower(name)
+		h[k] = append(h[k], v)
+	}
+	return h
+}
+
 // ingestWith delivers one inventory with the machine key.
 func (s *scenario) ingestWith(key string, body []byte) hub.Response {
 	return s.do("POST", "/api/ingest", body, bearer(key), true)
@@ -307,6 +338,11 @@ func runMachinesScenarios(t *testing.T, fresh func(t *testing.T) *scenario) {
 	t.Run("ConfirmRateLimit", func(t *testing.T) { testConfirmRateLimit(t, fresh) })
 	t.Run("PollExpired", func(t *testing.T) { testPollExpired(t, fresh) })
 	t.Run("CreateRateLimits", func(t *testing.T) { testCreateRateLimits(t, fresh) })
+	t.Run("CreateCapacityRace", func(t *testing.T) { testCreateCapacityRace(t, fresh) })
+	t.Run("ExpiredFreesSlots", func(t *testing.T) { testExpiredFreesSlots(t, fresh) })
+	t.Run("ConfirmQuotaRace", func(t *testing.T) { testConfirmQuotaRace(t, fresh) })
+	t.Run("IngestQuotaRace", func(t *testing.T) { testIngestQuotaRace(t, fresh) })
+	t.Run("ClientIP", func(t *testing.T) { testClientIP(t, fresh) })
 	t.Run("RevocationCutsImmediately", func(t *testing.T) { testRevocationCutsImmediately(t, fresh) })
 	t.Run("ForeignUser", func(t *testing.T) { testForeignUser(t, fresh) })
 	t.Run("KeyHasNoRead", func(t *testing.T) { testKeyHasNoRead(t, fresh) })
@@ -472,7 +508,8 @@ func testConfirmErrors(t *testing.T, fresh func(t *testing.T) *scenario) {
 
 // testConfirmRateLimit is the per-user limit of the wrong
 // confirmations: ten in the window, and the eleventh is 429, without
-// affecting the other users.
+// affecting the other users; a correct confirmation clears the quota
+// of the user.
 func testConfirmRateLimit(t *testing.T, fresh func(t *testing.T) *scenario) {
 	s := fresh(t)
 	for i := 0; i < maxConfirmErrors; i++ {
@@ -489,6 +526,31 @@ func testConfirmRateLimit(t *testing.T, fresh func(t *testing.T) *scenario) {
 	r = s.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s.asUser("bob"))
 	if r.Status != 400 {
 		t.Fatalf("the other user: %d %s, want 400", r.Status, r.Body)
+	}
+	// The correct confirmation clears the quota of the user: nine
+	// wrong confirmations, one correct one, and the full budget of
+	// wrong confirmations again.
+	s2 := fresh(t)
+	for i := 0; i < maxConfirmErrors-1; i++ {
+		r := s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s2.asUser("alice"))
+		if r.Status != 400 {
+			t.Fatalf("wrong confirm %d: %d %s, want 400", i+1, r.Status, r.Body)
+		}
+	}
+	_, c := s2.createPairing("laptop", nil)
+	r = s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": c.Code}, s2.asUser("alice"))
+	if r.Status != 204 {
+		t.Fatalf("correct confirm: %d %s, want 204", r.Status, r.Body)
+	}
+	for i := 0; i < maxConfirmErrors; i++ {
+		r := s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s2.asUser("alice"))
+		if r.Status != 400 {
+			t.Fatalf("wrong confirm after the clear %d: %d %s, want 400", i+1, r.Status, r.Body)
+		}
+	}
+	r = s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s2.asUser("alice"))
+	if r.Status != 429 || string(r.Body) != `{"error":"rate_limited"}` {
+		t.Fatalf("wrong confirm after the cleared budget: %d %s, want 429 rate_limited", r.Status, r.Body)
 	}
 }
 
@@ -514,51 +576,272 @@ func testPollExpired(t *testing.T, fresh func(t *testing.T) *scenario) {
 	}
 }
 
-// testCreateRateLimits is the creation limits: the creation rate of
-// the window and the pending pairings of the hub.
+// testCreateRateLimits is the creation limits: the creations of one
+// client in the window (five, the sixth is 429) and the pending bound
+// of the hub (the last admitted holds the bound, the next is 429).
 func testCreateRateLimits(t *testing.T, fresh func(t *testing.T) *scenario) {
 	s := fresh(t)
-	codes := make([]string, 0, maxPairingsCreated)
-	for i := 0; i < maxPairingsCreated; i++ {
-		r, c := s.createPairing("laptop", nil)
+	for i := 0; i < maxPairingsPerClient; i++ {
+		r, _ := s.createPairingWithHeader(ipHeader(clientIP(1)), "laptop")
 		if r.Status != 201 {
 			t.Fatalf("create %d: %d %s, want 201", i+1, r.Status, r.Body)
 		}
-		codes = append(codes, c.Code)
 	}
-	// The codes are unique: the randomness source of the suites must
-	// not collide the codes (the real store enforces the uniqueness).
-	seen := make(map[string]bool, len(codes))
-	for _, code := range codes {
-		if seen[code] {
-			t.Fatalf("the code %s was drawn twice by the randomness source", code)
-		}
-		seen[code] = true
-	}
-	r, _ := s.createPairing("laptop", nil)
+	r, _ := s.createPairingWithHeader(ipHeader(clientIP(1)), "laptop")
 	if r.Status != 429 || string(r.Body) != `{"error":"rate_limited"}` {
-		t.Fatalf("creation above the rate: %d %s, want 429 rate_limited", r.Status, r.Body)
+		t.Fatalf("creation above the per-client limit: %d %s, want 429 rate_limited", r.Status, r.Body)
+	}
+	// The other clients are not affected.
+	r, _ = s.createPairingWithHeader(ipHeader(clientIP(2)), "laptop")
+	if r.Status != 201 {
+		t.Fatalf("the other client: %d %s, want 201", r.Status, r.Body)
+	}
+	// The window slides: after the window the client creates again.
+	s.advance(pairingCreateWindow + time.Second)
+	r, _ = s.createPairingWithHeader(ipHeader(clientIP(1)), "laptop")
+	if r.Status != 201 {
+		t.Fatalf("creation after the window: %d %s, want 201", r.Status, r.Body)
 	}
 	// The pending bound of the hub: the rows are seeded directly on
-	// the store (the handler limit would refuse them), and the
-	// creation of the handler is refused.
+	// the store (the handler limit would refuse them), each with its
+	// own client, and the creation of the handler is refused.
 	s2 := fresh(t)
 	for i := 0; i < maxPendingPairings; i++ {
-		p := Pairing{
-			ID:        fmt.Sprintf("seed-%d", i),
-			CodeHash:  fmt.Sprintf("seed-code-%d", i),
-			PollHash:  fmt.Sprintf("seed-poll-%d", i),
-			Name:      "seed",
-			CreatedMS: s2.nowMS(),
-			ExpiresMS: s2.nowMS() + pairingTTL.Milliseconds(),
-		}
-		if err := s2.store.CreatePairing(s2.ctx, p, s2.nowMS()); err != nil {
-			t.Fatalf("seed %d: %v", i+1, err)
+		ok, err := s2.store.ReservePairing(s2.ctx, Pairing{
+			ID:         fmt.Sprintf("seed-%d", i),
+			CodeHash:   fmt.Sprintf("seed-code-%d", i),
+			PollHash:   fmt.Sprintf("seed-poll-%d", i),
+			Name:       "seed",
+			ClientHash: hashHex([]byte(clientIP(i + 1000))),
+			CreatedMS:  s2.nowMS(),
+			ExpiresMS:  s2.nowMS() + pairingTTL.Milliseconds(),
+		}, s2.nowMS())
+		if err != nil || !ok {
+			t.Fatalf("seed %d: %v (reserved=%v)", i+1, err, ok)
 		}
 	}
-	r, _ = s2.createPairing("laptop", nil)
+	r, _ = s2.createPairingWithHeader(ipHeader(clientIP(99999)), "laptop")
 	if r.Status != 429 || string(r.Body) != `{"error":"rate_limited"}` {
 		t.Fatalf("pending above the bound: %d %s, want 429 rate_limited", r.Status, r.Body)
+	}
+}
+
+// testCreateCapacityRace is the adaptation of the probe of the
+// review: the concurrent creations cannot exceed the pending bound of
+// the hub; the admitted ones hold exactly the bound and the rest is
+// refused with 429. The pool of workers keeps the concurrency of the
+// local database server inside its default limit; the race is at the
+// database level, where the reservation is atomic.
+func testCreateCapacityRace(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	total := maxPendingPairings + 5
+	statuses := make([]int, total)
+	start := make(chan struct{})
+	sem := make(chan struct{}, 100)
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			sem <- struct{}{} // at most 100 requests in flight
+			defer func() { <-sem }()
+			r, _ := s.createPairingWithHeader(ipHeader(clientIP(i)), "laptop")
+			statuses[i] = r.Status
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	var admitted, limited int
+	for _, st := range statuses {
+		switch st {
+		case 201:
+			admitted++
+		case 429:
+			limited++
+		default:
+			t.Fatalf("concurrent create: status %d, want 201 or 429", st)
+		}
+	}
+	if admitted != maxPendingPairings || limited != total-maxPendingPairings {
+		t.Fatalf("concurrent creates: %d admitted, %d refused; want %d admitted and %d refused", admitted, limited, maxPendingPairings, total-maxPendingPairings)
+	}
+}
+
+// testExpiredFreesSlots is the recovery: the pairings that expire do
+// not count as pending — after the validity a new client is admitted
+// again, without manual cleanup of the store.
+func testExpiredFreesSlots(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	// Fill the pending bound with pairings of distinct clients.
+	for i := 0; i < maxPendingPairings; i++ {
+		if r, _ := s.createPairingWithHeader(ipHeader(clientIP(i)), "laptop"); r.Status != 201 {
+			t.Fatalf("seed %d: %d %s, want 201", i+1, r.Status, r.Body)
+		}
+	}
+	// The bound holds while the pairings are live.
+	if r, _ := s.createPairingWithHeader(ipHeader(clientIP(maxPendingPairings+100)), "laptop"); r.Status != 429 {
+		t.Fatalf("create while the bound is full: %d %s, want 429", r.Status, r.Body)
+	}
+	// After the validity the expired pairings go away and free the
+	// slots.
+	s.advance(pairingTTL + time.Second)
+	if r, _ := s.createPairingWithHeader(ipHeader(clientIP(maxPendingPairings+101)), "laptop"); r.Status != 201 {
+		t.Fatalf("create after the expiry: %d %s, want 201", r.Status, r.Body)
+	}
+}
+
+// testConfirmQuotaRace is the adaptation of the probe of the review:
+// the concurrent wrong confirmations of one user cannot exceed the
+// limit; the counted ones hold exactly the limit and the rest is
+// refused with 429.
+func testConfirmQuotaRace(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	total := maxConfirmErrors + 2
+	statuses := make([]int, total)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			statuses[i] = s.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s.asUser("alice")).Status
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	var counted, limited int
+	for _, st := range statuses {
+		switch st {
+		case 400:
+			counted++
+		case 429:
+			limited++
+		default:
+			t.Fatalf("concurrent confirm: status %d, want 400 or 429", st)
+		}
+	}
+	if counted != maxConfirmErrors || limited != total-maxConfirmErrors {
+		t.Fatalf("concurrent confirms: %d counted, %d refused; want %d counted and %d refused", counted, limited, maxConfirmErrors, total-maxConfirmErrors)
+	}
+	// The next attempt of the user is refused while the window holds.
+	if r := s.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": "0000-0000"}, s.asUser("alice")); r.Status != 429 {
+		t.Fatalf("confirm after the race: %d %s, want 429", r.Status, r.Body)
+	}
+}
+
+// testIngestQuotaRace is the adaptation of the probe of the review:
+// the concurrent deliveries of one machine cannot exceed the limit;
+// a delivery always counts, applied or refused.
+func testIngestQuotaRace(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	d, _ := s.deliver(t, "alice", "laptop")
+	total := maxDeliveries + 2
+	// The old generated_ms keeps the real apply of the sqld suite on
+	// the ignored outcome (202); the memory suite applies (204). The
+	// quota is on the deliveries, not on the outcomes.
+	base := s.nowMS() - time.Hour.Milliseconds()
+	statuses := make([]int, total)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			statuses[i] = s.ingestWith(d.Key, validInventoryBody(base+int64(i)*1000)).Status
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	var admitted, limited int
+	for _, st := range statuses {
+		switch st {
+		case 202, 204, 409:
+			// Applied (202/204), or refused by the guard of the
+			// concurrent apply of the same machine in the real store
+			// (409); a refusal still consumes the reserved slot.
+			admitted++
+		case 429:
+			limited++
+		default:
+			t.Fatalf("concurrent delivery: status %d, want 202/204, 409 or 429", st)
+		}
+	}
+	if admitted != maxDeliveries || limited != total-maxDeliveries {
+		t.Fatalf("concurrent deliveries: %d admitted, %d refused; want %d admitted and %d refused", admitted, limited, maxDeliveries, total-maxDeliveries)
+	}
+	// The next delivery of the machine is refused while the window
+	// holds.
+	if r := s.ingestWith(d.Key, validInventoryBody(base+int64(total)*1000)); r.Status != 429 {
+		t.Fatalf("delivery after the race: %d %s, want 429", r.Status, r.Body)
+	}
+}
+
+// testClientIP is the client of the creation limit: when the hub is
+// configured with the trusted header, the ip of the request is the
+// first value of the header when it validates as an ip, and it falls
+// back to the RemoteAddr of the connection when it is absent or
+// invalid. The pairing stores the ip only as the SHA-256 hash.
+func testClientIP(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	// The trusted header: five creations of the ip fit, the sixth is
+	// refused; the other ip is not affected.
+	for i := 0; i < maxPairingsPerClient; i++ {
+		if r, _ := s.createPairingWithHeader(headerValues("X-Test-Client-IP", "203.0.113.7"), "laptop"); r.Status != 201 {
+			t.Fatalf("trusted create %d: %d %s, want 201", i+1, r.Status, r.Body)
+		}
+	}
+	if r, _ := s.createPairingWithHeader(headerValues("X-Test-Client-IP", "203.0.113.7"), "laptop"); r.Status != 429 {
+		t.Fatalf("trusted above the per-client limit: %d %s, want 429", r.Status, r.Body)
+	}
+	if r, _ := s.createPairingWithHeader(headerValues("X-Test-Client-IP", "203.0.113.9"), "laptop"); r.Status != 201 {
+		t.Fatalf("the other ip: %d %s, want 201", r.Status, r.Body)
+	}
+	// The first value of the header is the one that counts: the
+	// second one would still have room.
+	for i := 0; i < maxPairingsPerClient; i++ {
+		if r, _ := s.createPairingWithHeader(headerValues("X-Test-Client-IP", "203.0.113.11", "203.0.113.13"), "laptop"); r.Status != 201 {
+			t.Fatalf("first-value create %d: %d %s, want 201", i+1, r.Status, r.Body)
+		}
+	}
+	if r, _ := s.createPairingWithHeader(headerValues("X-Test-Client-IP", "203.0.113.11", "203.0.113.13"), "laptop"); r.Status != 429 {
+		t.Fatalf("first-value above the per-client limit: %d %s, want 429 (the second value would have room)", r.Status, r.Body)
+	}
+	// An invalid value falls back to the RemoteAddr of the
+	// connection: the two remote ips hold separate buckets.
+	for i := 0; i < maxPairingsPerClient; i++ {
+		if r, _ := s.createPairingWithHeader(withValue(ipHeader("198.51.100.5"), "X-Test-Client-IP", "not-an-ip"), "laptop"); r.Status != 201 {
+			t.Fatalf("fallback create %d: %d %s, want 201", i+1, r.Status, r.Body)
+		}
+	}
+	if r, _ := s.createPairingWithHeader(withValue(ipHeader("198.51.100.5"), "X-Test-Client-IP", "not-an-ip"), "laptop"); r.Status != 429 {
+		t.Fatalf("fallback above the per-client limit: %d %s, want 429", r.Status, r.Body)
+	}
+	if r, _ := s.createPairingWithHeader(withValue(ipHeader("198.51.100.6"), "X-Test-Client-IP", "not-an-ip"), "laptop"); r.Status != 201 {
+		t.Fatalf("the other remote ip: %d %s, want 201", r.Status, r.Body)
+	}
+	// The ip is stored only as the SHA-256 hash (the memory suite
+	// holds the pairings; the SQL suite stores the same column).
+	if s.mem != nil {
+		raw := []string{"203.0.113.7", "203.0.113.9", "203.0.113.11", "203.0.113.13", "198.51.100.5", "198.51.100.6"}
+		s.mem.mu.Lock()
+		found := false
+		for _, p := range s.mem.pairings {
+			if p.ClientHash == hashHex([]byte("203.0.113.7")) {
+				found = true
+			}
+			for _, ip := range raw {
+				if p.ClientHash == ip {
+					t.Fatal("the raw ip is stored in the pairing")
+				}
+			}
+		}
+		s.mem.mu.Unlock()
+		if !found {
+			t.Fatal("the pairing of the trusted ip is not stored by the hash of the ip")
+		}
 	}
 }
 
@@ -807,7 +1090,8 @@ func testIngestOutcomes(t *testing.T, fresh func(t *testing.T) *scenario) {
 }
 
 // testIngestRateLimit is the per-machine limit of the deliveries:
-// thirty in the minute, and the rejected ones do not count.
+// thirty in the minute, and every authenticated delivery counts,
+// applied or refused.
 func testIngestRateLimit(t *testing.T, fresh func(t *testing.T) *scenario) {
 	s := fresh(t)
 	d, _ := s.deliver(t, "alice", "laptop")
@@ -815,25 +1099,30 @@ func testIngestRateLimit(t *testing.T, fresh func(t *testing.T) *scenario) {
 	// apply of the sqld suite applies every one (the fake apply of the
 	// memory suite applies by default).
 	base := s.nowMS()
-	for i := 0; i < maxDeliveries; i++ {
+	for i := 0; i < maxDeliveries-1; i++ {
 		r := s.ingestWith(d.Key, validInventoryBody(base+int64(i+1)*1000))
 		if r.Status != 204 {
 			t.Fatalf("delivery %d: %d %s, want 204", i+1, r.Status, r.Body)
 		}
 	}
-	r := s.ingestWith(d.Key, validInventoryBody(base+int64(maxDeliveries+1)*1000))
-	if r.Status != 429 || string(r.Body) != `{"error":"rate_limited"}` {
+	// A refused delivery counts too: the bad body consumes one slot
+	// of the window.
+	r := s.ingestWith(d.Key, []byte("not json"))
+	if r.Status != 400 || string(r.Body) != `{"error":"bad_inventory"}` {
+		t.Fatalf("bad body: %d %s, want 400 bad_inventory", r.Status, r.Body)
+	}
+	if r := s.ingestWith(d.Key, validInventoryBody(base+int64(maxDeliveries)*1000)); r.Status != 429 || string(r.Body) != `{"error":"rate_limited"}` {
 		t.Fatalf("delivery above the limit: %d %s, want 429 rate_limited", r.Status, r.Body)
 	}
 	// The window slides: the old deliveries leave the window.
 	s.advance(deliveryWindow + time.Second)
-	r = s.ingestWith(d.Key, validInventoryBody(base+int64(maxDeliveries+2)*1000))
+	r = s.ingestWith(d.Key, validInventoryBody(base+int64(maxDeliveries+1)*1000))
 	if r.Status != 204 {
 		t.Fatalf("delivery after the window: %d %s, want 204", r.Status, r.Body)
 	}
 	// The limit is per machine.
 	db, _ := s.deliver(t, "bob", "bobbox")
-	r = s.ingestWith(db.Key, validInventoryBody(base+int64(maxDeliveries+3)*1000))
+	r = s.ingestWith(db.Key, validInventoryBody(base+int64(maxDeliveries+2)*1000))
 	if r.Status != 204 {
 		t.Fatalf("the other machine: %d %s, want 204", r.Status, r.Body)
 	}
@@ -944,13 +1233,23 @@ func testStoreFailures(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if s.mem == nil {
 		t.Skip("the store knobs are of the memory suite")
 	}
-	s.mem.CreateErr = errors.New("boom")
+	// The failure of the reservation of the pairing is a 503.
+	s.mem.ReserveErr = errors.New("boom")
 	r, _ := s.createPairing("laptop", nil)
 	if r.Status != 503 {
 		t.Fatalf("create on the store failure: %d %s, want 503", r.Status, r.Body)
 	}
 	s2 := fresh(t)
 	_, c := s2.createPairing("laptop", nil)
+	// The failure of the reservation of the confirm is a 503, without
+	// proceeding to the lookup.
+	s2.mem.ReserveConfirmErr = errors.New("boom")
+	r = s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": c.Code}, s2.asUser("alice"))
+	if r.Status != 503 {
+		t.Fatalf("confirm on the reservation failure: %d %s, want 503", r.Status, r.Body)
+	}
+	// The failure of the lookup is a 503.
+	s2.mem.ReserveConfirmErr = nil
 	s2.mem.FindPairErr = errors.New("boom")
 	r = s2.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": c.Code}, s2.asUser("alice"))
 	if r.Status != 503 {
@@ -960,29 +1259,38 @@ func testStoreFailures(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if r.Status != 503 {
 		t.Fatalf("poll on the store failure: %d %s, want 503", r.Status, r.Body)
 	}
+	// The failure of the clear of a successful confirm is a 503: the
+	// error is not discarded.
 	s3 := fresh(t)
-	d, _ := s3.deliver(t, "alice", "laptop")
-	s3.mem.RevokeErr = errors.New("boom")
-	r = s3.do("DELETE", "/api/machines/"+d.MachineID, nil, s3.asUser("alice"), true)
+	_, c3 := s3.createPairing("laptop", nil)
+	s3.mem.ClearErr = errors.New("boom")
+	r = s3.doJSON("POST", "/api/pairings/confirm", map[string]string{"code": c3.Code}, s3.asUser("alice"))
+	if r.Status != 503 {
+		t.Fatalf("confirm on the clear failure: %d %s, want 503", r.Status, r.Body)
+	}
+	s4 := fresh(t)
+	d, _ := s4.deliver(t, "alice", "laptop")
+	s4.mem.RevokeErr = errors.New("boom")
+	r = s4.do("DELETE", "/api/machines/"+d.MachineID, nil, s4.asUser("alice"), true)
 	if r.Status != 503 {
 		t.Fatalf("revoke on the store failure: %d %s, want 503", r.Status, r.Body)
 	}
 	// The failure of the lookup of the key is a 401: the answer does
 	// not reveal that the store failed.
-	s4 := fresh(t)
-	dd, _ := s4.deliver(t, "alice", "laptop")
-	s4.mem.FindMachErr = errors.New("boom")
-	r = s4.ingestWith(dd.Key, validInventoryBody(s4.nowMS()))
+	s5 := fresh(t)
+	dd, _ := s5.deliver(t, "alice", "laptop")
+	s5.mem.FindMachErr = errors.New("boom")
+	r = s5.ingestWith(dd.Key, validInventoryBody(s5.nowMS()))
 	if r.Status != 401 {
 		t.Fatalf("ingest on the key lookup failure: %d %s, want 401", r.Status, r.Body)
 	}
-	// The failure of the count of the deliveries is a 503.
-	s5 := fresh(t)
-	de, _ := s5.deliver(t, "alice", "laptop")
-	s5.mem.CountErr = errors.New("boom")
-	r = s5.ingestWith(de.Key, validInventoryBody(s5.nowMS()))
+	// The failure of the reservation of the delivery is a 503.
+	s6 := fresh(t)
+	de, _ := s6.deliver(t, "alice", "laptop")
+	s6.mem.ReserveDelErr = errors.New("boom")
+	r = s6.ingestWith(de.Key, validInventoryBody(s6.nowMS()))
 	if r.Status != 503 {
-		t.Fatalf("ingest on the count failure: %d %s, want 503", r.Status, r.Body)
+		t.Fatalf("ingest on the reservation failure: %d %s, want 503", r.Status, r.Body)
 	}
 }
 
@@ -1002,8 +1310,9 @@ func TestMemoryMachinesScenarios(t *testing.T) {
 		mem := NewMemory()
 		apply := &fakeApply{}
 		svc, err := New(Config{
-			Store:    stubStore{},
-			Machines: mem,
+			Store:          stubStore{},
+			Machines:       mem,
+			ClientIPHeader: "X-Test-Client-IP",
 			SessionUser: func(ctx context.Context, req hub.Request) (accounts.User, bool) {
 				n := req.Header.Get("X-Test-User")
 				u, ok := users[n]

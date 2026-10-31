@@ -44,7 +44,8 @@ var hubZeroTables = []string{
 	"ingest_deliveries", "pairing_attempts", "pairings", "machines",
 	"agent_history", "agents_current", "hidden_counts", "working_hourly",
 	"inventory_snapshots", "login_failures", "sessions", "invites",
-	"users", "pairing_guard", "ingest_guard", "schema_migrations",
+	"users", "pairing_guard", "ingest_guard", "accounts_guard",
+	"schema_migrations",
 	"hub_meta",
 }
 
@@ -161,11 +162,12 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		t.Fatalf("accounts.New: %v", err)
 	}
 	svc, err := New(Config{
-		Store:       client,
-		Machines:    NewSQL(client),
-		SessionUser: auth.SessionUser,
-		Now:         clock.Now,
-		Rand:        &counterReader{},
+		Store:          client,
+		Machines:       NewSQL(client),
+		ClientIPHeader: "X-Test-Client-IP",
+		SessionUser:    auth.SessionUser,
+		Now:            clock.Now,
+		Rand:           &counterReader{},
 	})
 	if err != nil {
 		t.Fatalf("machines.New: %v", err)

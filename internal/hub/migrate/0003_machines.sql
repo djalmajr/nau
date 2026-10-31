@@ -19,6 +19,7 @@ CREATE TABLE pairings (
     code_hash TEXT NOT NULL UNIQUE,
     poll_hash TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
+    client_hash TEXT NOT NULL, -- the SHA-256 of the ip of the connection that created the pairing (the empty string when it is unknown); never the raw ip
     created_ms INTEGER NOT NULL,
     expires_ms INTEGER NOT NULL,
     approved_by TEXT,
@@ -49,3 +50,5 @@ CREATE TABLE pairing_guard (
 CREATE INDEX pairing_attempts_at_idx ON pairing_attempts (at_ms);
 
 CREATE INDEX ingest_deliveries_machine_at_idx ON ingest_deliveries (machine_id, at_ms);
+
+CREATE INDEX pairings_client_created_idx ON pairings (client_hash, created_ms);

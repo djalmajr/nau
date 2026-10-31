@@ -37,11 +37,11 @@ The binary must be on your `PATH`.
 
 ## Commands
 
-Every command prints exactly one JSON line on stdout and its diagnostics on stderr; `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`.
+Every command prints exactly one JSON line on stdout and its diagnostics on stderr; `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, and `130` when `connect` is interrupted before it writes `hub.json`.
 
 - `config get|set|list` — manage the machine configuration. `config set [--if-automatic] <key> <value>`.
 - `doctor` — print the status line: the version, the config directory, the machine label and the soho backend block (read-only).
-- `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`).
+- `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`); behind a proxy, the client address of the pairing API can be taken from a trusted header named by `NAU_HUB_CLIENT_IP_HEADER` (otherwise the hub uses the connection address, which the CLI overwrites to prevent spoofing).
 - `connect <hub-url> [--name <nome>]` — connect this machine to the hub: it requests a pairing, shows the short code on stderr, polls the confirmation and stores the machine key in `hub.json` of the config directory (the name defaults to `machine_label`); the key never reaches the output or a log.
 - `version` — print the version.
 - `help` — print the usage as plain text (not JSON); running `nau` with no arguments does the same.

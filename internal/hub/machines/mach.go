@@ -32,12 +32,15 @@ import (
 const (
 	// pairingTTL is the validity of a pairing.
 	pairingTTL = 10 * time.Minute
-	// pairingCreateWindow is the window of the creation limit.
+	// pairingCreateWindow is the window of the per-client creation
+	// limit.
 	pairingCreateWindow = 10 * time.Minute
-	// maxPendingPairings is the bound of pending pairings of the hub.
-	maxPendingPairings = 100
-	// maxPairingsCreated is the bound of pairings created in the window.
-	maxPairingsCreated = 30
+	// maxPendingPairings is the bound of the pending (unconsumed and
+	// unexpired) pairings of the hub.
+	maxPendingPairings = 1000
+	// maxPairingsPerClient is the bound of pairings one client
+	// creates in the window.
+	maxPairingsPerClient = 5
 	// confirmWindow is the window of the wrong-confirmation limit.
 	confirmWindow = 15 * time.Minute
 	// maxConfirmErrors is the bound of wrong confirmations of a user.
@@ -55,6 +58,15 @@ const (
 	randomIDSize = 16
 )
 
+// RemoteIPHeader is the header the hub serve adapter sets with the
+// ip of the connection (the RemoteAddr without the port): the
+// machines layer reads it as the client of the creation limit when
+// no trusted proxy header is configured or the configured one is
+// absent or invalid. The adapter overwrites the value the client
+// sends, so the header cannot be spoofed to claim a foreign
+// connection.
+const RemoteIPHeader = "X-Nau-Remote-IP"
+
 // Machine is one machine of the hub. KeyHash is the SHA-256 of the
 // random key; the key itself was returned once, at the pairing
 // delivery.
@@ -70,13 +82,16 @@ type Machine struct {
 
 // Pairing is one pairing of a machine: the random code the developer
 // confirms and the random poll token the machine polls. Both are
-// stored only as SHA-256 hashes. ApprovedBy is nil until the
-// confirmation and MachineID is nil until the delivery of the key.
+// stored only as SHA-256 hashes. ClientHash is the SHA-256 of the ip
+// of the connection that created the pairing (never the raw ip).
+// ApprovedBy is nil until the confirmation and MachineID is nil until
+// the delivery of the key.
 type Pairing struct {
 	ID         string
 	CodeHash   string
 	PollHash   string
 	Name       string
+	ClientHash string
 	CreatedMS  int64
 	ExpiresMS  int64
 	ApprovedBy *string
@@ -86,17 +101,19 @@ type Pairing struct {
 
 // MachineStore is the machine-connect storage. Every method is one
 // unit of work on the database; the multi-statement operations (the
-// pairing create with the retention, the confirm, the delivery) are
-// atomic: either everything applies or nothing does.
+// pairing reservation, the confirm reservation, the delivery with its
+// guard, the reservations with the retention) are atomic: either
+// everything applies or nothing does. The reservations answer
+// whether the row entered, so a refused admission is a 429 without
+// a second query.
 type MachineStore interface {
-	// CreatePairing stores one pairing and prunes the rows outside
-	// the retention, in one atomic batch.
-	CreatePairing(ctx context.Context, p Pairing, nowMS int64) error
-	// PendingPairings counts the pairings that were not consumed.
-	PendingPairings(ctx context.Context) (int, error)
-	// PairingsCreatedSince counts the pairings created after the
-	// instant.
-	PairingsCreatedSince(ctx context.Context, sinceMS int64) (int, error)
+	// ReservePairing inserts the pairing only while the pending
+	// (unconsumed and unexpired) pairings are below maxPendingPairings
+	// and the client holds fewer than maxPairingsPerClient pairings
+	// created in the last pairingCreateWindow; it prunes the expired
+	// pairings first, in one atomic batch. It answers whether the row
+	// was inserted.
+	ReservePairing(ctx context.Context, p Pairing, nowMS int64) (bool, error)
 	// FindPairingByCodeHash finds the pairing of a normalized code
 	// hash.
 	FindPairingByCodeHash(ctx context.Context, codeHash string) (Pairing, bool, error)
@@ -108,12 +125,15 @@ type MachineStore interface {
 	// confirmed yet: true when the call confirmed it, false when the
 	// pairing was already confirmed.
 	ConfirmPairing(ctx context.Context, pairingID, userID string) (bool, error)
-	// RecordPairingError stores one wrong confirmation and prunes the
-	// rows outside the window, in one atomic batch.
-	RecordPairingError(ctx context.Context, userID string, atMS int64) error
-	// CountPairingErrors counts the wrong confirmations of the user
-	// after the instant.
-	CountPairingErrors(ctx context.Context, userID string, sinceMS int64) (int, error)
+	// ReserveConfirmError records one confirm attempt of the user only
+	// while the user holds fewer than maxConfirmErrors attempts in the
+	// last confirmWindow; a refused attempt stays the attempt of the
+	// window, and it prunes the rows outside the window, in one
+	// atomic batch. It answers whether the attempt was recorded.
+	ReserveConfirmError(ctx context.Context, userID string, atMS int64) (bool, error)
+	// ClearPairingErrors deletes the confirm attempts of the user in
+	// the window: a successful confirmation does not keep them.
+	ClearPairingErrors(ctx context.Context, userID string, atMS int64) error
 	// DeliverMachine consumes the pairing (exactly once) and stores
 	// the machine in one atomic batch, guarded: true when the call
 	// consumed the pairing, false when it was already consumed.
@@ -134,12 +154,12 @@ type MachineStore interface {
 	// least one inventory snapshot, the received_ms of its last
 	// inventory.
 	LastSeen(ctx context.Context, machineIDs []string) (map[string]int64, error)
-	// RecordDelivery stores one accepted delivery and prunes the rows
-	// outside the window, in one atomic batch.
-	RecordDelivery(ctx context.Context, machineID string, atMS int64) error
-	// CountDeliveries counts the accepted deliveries of a machine
-	// after the instant.
-	CountDeliveries(ctx context.Context, machineID string, sinceMS int64) (int, error)
+	// ReserveDelivery records one delivery of the machine only while
+	// the machine holds fewer than maxDeliveries deliveries in the
+	// last deliveryWindow; a delivery always counts, applied or
+	// refused, and it prunes the rows outside the window, in one
+	// atomic batch. It answers whether the delivery was recorded.
+	ReserveDelivery(ctx context.Context, machineID string, atMS int64) (bool, error)
 }
 
 // SessionUser resolves the signed-in user of a request, or false. The
@@ -151,8 +171,9 @@ type ApplyFunc func(ctx context.Context, st store.Store, machineID string, inv i
 
 // Config is the configuration of the machine connect: the hub store
 // (the deliveries of the inventories apply through it), the machine
-// storage, the session resolver, the time and the randomness, injected
-// so the tests are deterministic.
+// storage, the session resolver, the name of the trusted proxy
+// header that carries the ip of the client, the time and the
+// randomness, injected so the tests are deterministic.
 type Config struct {
 	// Store is the hub store the inventories apply to.
 	Store store.Store
@@ -162,6 +183,11 @@ type Config struct {
 	SessionUser SessionUser
 	// Apply applies one inventory; nil uses ingest.Apply.
 	Apply ApplyFunc
+	// ClientIPHeader is the name of the header the proxy in front of
+	// the hub sets with the ip of the client (the first value, when it
+	// validates as an ip). Empty reads the ip of the connection from
+	// the RemoteAddr header of the hub serve adapter.
+	ClientIPHeader string
 	// Now is the clock.
 	Now func() time.Time
 	// Rand is the randomness source; nil uses crypto/rand.
@@ -172,12 +198,13 @@ type Config struct {
 // machines and the delivery of the inventories, on top of one
 // MachineStore. It holds no state between requests.
 type Service struct {
-	store       store.Store
-	machines    MachineStore
-	sessionUser SessionUser
-	apply       ApplyFunc
-	now         func() time.Time
-	rand        io.Reader
+	store          store.Store
+	machines       MachineStore
+	sessionUser    SessionUser
+	apply          ApplyFunc
+	clientIPHeader string
+	now            func() time.Time
+	rand           io.Reader
 }
 
 // New builds the machine-connect layer. A missing store, machine store
@@ -205,12 +232,13 @@ func New(cfg Config) (*Service, error) {
 		rnd = rand.Reader
 	}
 	return &Service{
-		store:       cfg.Store,
-		machines:    cfg.Machines,
-		sessionUser: cfg.SessionUser,
-		apply:       apply,
-		now:         now,
-		rand:        rnd,
+		store:          cfg.Store,
+		machines:       cfg.Machines,
+		sessionUser:    cfg.SessionUser,
+		apply:          apply,
+		clientIPHeader: cfg.ClientIPHeader,
+		now:            now,
+		rand:           rnd,
 	}, nil
 }
 

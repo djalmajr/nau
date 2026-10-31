@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -31,6 +32,7 @@ const (
 	hubEnvCronToken    = "NAU_HUB_CRON_TOKEN"
 	hubEnvSessionKey   = "NAU_HUB_SESSION_KEY"
 	hubEnvBootstrapTok = "NAU_HUB_BOOTSTRAP_TOKEN"
+	hubEnvClientIPHdr  = "NAU_HUB_CLIENT_IP_HEADER"
 	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>]"
 )
 
@@ -194,12 +196,16 @@ func cmdHubServe(args []string, env Env) int {
 	}
 	// The machine connect is over the same store: the sessions it
 	// reads are the accounts' sessions, and the inventories apply
-	// through the hub store.
+	// through the hub store. The client of the creation limit is the
+	// ip of the connection; when the hub is behind a proxy that sets
+	// the header named by NAU_HUB_CLIENT_IP_HEADER, that header wins
+	// (the first value, when it validates as an ip).
 	mach, err := machines.New(machines.Config{
-		Store:       st,
-		Machines:    machines.NewSQL(st),
-		SessionUser: auth.SessionUser,
-		Now:         env.Now,
+		Store:          st,
+		Machines:       machines.NewSQL(st),
+		SessionUser:    auth.SessionUser,
+		ClientIPHeader: env.Getenv(hubEnvClientIPHdr),
+		Now:            env.Now,
 	})
 	if err != nil {
 		// The configuration is the fixed one: New cannot fail here.
@@ -233,7 +239,19 @@ func cmdHubServe(args []string, env Env) int {
 	}, static)
 	auth.Register(srvHub)
 	mach.Register(srvHub)
-	srv := httpserve.NewServer(httpserve.New(srvHub))
+	// The adapter keeps no state of the connection: this wrapper sets
+	// the ip of the connection (the RemoteAddr without the port) in
+	// the header the machine connect reads as the client of the
+	// creation limit. The adapter overwrites the value the client
+	// sends, so the header cannot be spoofed to claim a foreign
+	// connection.
+	inner := httpserve.New(srvHub)
+	srv := httpserve.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			r.Header.Set(machines.RemoteIPHeader, ip)
+		}
+		inner.ServeHTTP(w, r)
+	}))
 	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
 
 	ctx, cancel := hubServeContext()

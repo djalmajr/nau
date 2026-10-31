@@ -7,10 +7,10 @@ import (
 )
 
 // Memory is the in-memory MachineStore of the tests: it keeps the
-// semantics of the SQL store (the consume-once of the delivery, the
-// confirm-once of the pairing, the retention of the tables) without a
-// database, and it holds the last-seen map the ingest layer would
-// write to the inventory snapshots.
+// semantics of the SQL store (the conditional reservations with the
+// retention, the consume-once of the delivery, the confirm-once of
+// the pairing) without a database, and it holds the last-seen map the
+// ingest layer would write to the inventory snapshots.
 type Memory struct {
 	mu         sync.Mutex
 	pairings   map[string]Pairing
@@ -20,17 +20,18 @@ type Memory struct {
 	lastSeen   map[string]int64
 
 	// The knobs of the store failures the scenario tests exercise.
-	CreateErr    error
-	ConfirmErr   error
-	DeliverErr   error
-	RevokeErr    error
-	ListErr      error
-	CountErr     error
-	RecordErr    error
-	LastSeenErr  error
-	FindPairErr  error
-	FindMachErr  error
-	FindPairErr2 error // the re-read of the delivery disambiguation
+	ReserveErr        error
+	ReserveConfirmErr error
+	ClearErr          error
+	ReserveDelErr     error
+	ConfirmErr        error
+	DeliverErr        error
+	RevokeErr         error
+	ListErr           error
+	LastSeenErr       error
+	FindPairErr       error
+	FindMachErr       error
+	FindPairErr2      error // the re-read of the delivery disambiguation
 }
 
 // NewMemory builds an empty in-memory machine store.
@@ -77,18 +78,39 @@ func (f *Memory) Machines() []Machine {
 	return out
 }
 
-func (f *Memory) CreatePairing(ctx context.Context, p Pairing, nowMS int64) error {
-	if f.CreateErr != nil {
-		return f.CreateErr
+// ReservePairing inserts the pairing only while the pending
+// (unconsumed and unexpired) pairings are below maxPendingPairings
+// and the client holds fewer than maxPairingsPerClient pairings
+// created in the last pairingCreateWindow, under the same lock that
+// reads the counts and writes the row: the reservation is one unit of
+// work, like the single SQL batch. The expired pairings go away
+// before the decision and do not count as pending. It reports
+// whether the pairing was reserved.
+func (f *Memory) ReservePairing(ctx context.Context, p Pairing, nowMS int64) (bool, error) {
+	if f.ReserveErr != nil {
+		return false, f.ReserveErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cutoff := nowMS - pairingTTL.Milliseconds()
 	for id, pp := range f.pairings {
-		if pp.ExpiresMS < cutoff {
+		if pp.ExpiresMS <= nowMS {
 			delete(f.pairings, id)
 		}
 	}
+	since := nowMS - pairingCreateWindow.Milliseconds()
+	pending, created := 0, 0
+	for _, pp := range f.pairings {
+		if !pp.Consumed {
+			pending++
+		}
+		if pp.ClientHash == p.ClientHash && pp.CreatedMS > since {
+			created++
+		}
+	}
+	if pending >= maxPendingPairings || created >= maxPairingsPerClient {
+		return false, nil
+	}
+	f.pairings[p.ID] = p
 	attemptCutoff := nowMS - confirmWindow.Milliseconds()
 	for uid, ts := range f.attempts {
 		kept := ts[:0]
@@ -99,32 +121,7 @@ func (f *Memory) CreatePairing(ctx context.Context, p Pairing, nowMS int64) erro
 		}
 		f.attempts[uid] = kept
 	}
-	f.pairings[p.ID] = p
-	return nil
-}
-
-func (f *Memory) PendingPairings(ctx context.Context) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for _, p := range f.pairings {
-		if !p.Consumed {
-			n++
-		}
-	}
-	return n, nil
-}
-
-func (f *Memory) PairingsCreatedSince(ctx context.Context, sinceMS int64) (int, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for _, p := range f.pairings {
-		if p.CreatedMS > sinceMS {
-			n++
-		}
-	}
-	return n, nil
+	return true, nil
 }
 
 func (f *Memory) findPairing(hashField func(Pairing) string, hash string) (Pairing, bool, error) {
@@ -174,17 +171,43 @@ func (f *Memory) ConfirmPairing(ctx context.Context, pairingID, userID string) (
 	return true, nil
 }
 
-func (f *Memory) RecordPairingError(ctx context.Context, userID string, atMS int64) error {
-	if f.RecordErr != nil {
-		return f.RecordErr
+// ReserveConfirmError records one confirm attempt of the user only
+// while the user holds fewer than maxConfirmErrors attempts in the
+// last confirmWindow, under the same lock that reads the count and
+// writes the row. It reports whether the attempt was recorded.
+func (f *Memory) ReserveConfirmError(ctx context.Context, userID string, atMS int64) (bool, error) {
+	if f.ReserveConfirmErr != nil {
+		return false, f.ReserveConfirmErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	since := atMS - confirmWindow.Milliseconds()
+	if countAfter(f.attempts[userID], since) >= maxConfirmErrors {
+		return false, nil
+	}
 	f.attempts[userID] = append(f.attempts[userID], atMS)
-	cutoff := atMS - confirmWindow.Milliseconds()
 	kept := f.attempts[userID][:0]
 	for _, at := range f.attempts[userID] {
-		if at > cutoff {
+		if at > since {
+			kept = append(kept, at)
+		}
+	}
+	f.attempts[userID] = kept
+	return true, nil
+}
+
+// ClearPairingErrors deletes the confirm attempts of the user in the
+// window: the successful confirmation of the code does not keep them.
+func (f *Memory) ClearPairingErrors(ctx context.Context, userID string, atMS int64) error {
+	if f.ClearErr != nil {
+		return f.ClearErr
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	since := atMS - confirmWindow.Milliseconds()
+	kept := f.attempts[userID][:0]
+	for _, at := range f.attempts[userID] {
+		if at <= since {
 			kept = append(kept, at)
 		}
 	}
@@ -192,19 +215,15 @@ func (f *Memory) RecordPairingError(ctx context.Context, userID string, atMS int
 	return nil
 }
 
-func (f *Memory) CountPairingErrors(ctx context.Context, userID string, sinceMS int64) (int, error) {
-	if f.CountErr != nil {
-		return 0, f.CountErr
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
+// countAfter counts the instants after the cutoff.
+func countAfter(ts []int64, sinceMS int64) int {
 	n := 0
-	for _, at := range f.attempts[userID] {
+	for _, at := range ts {
 		if at > sinceMS {
 			n++
 		}
 	}
-	return n, nil
+	return n
 }
 
 // DeliverMachine consumes the pairing exactly once and stores the
@@ -305,37 +324,30 @@ func (f *Memory) LastSeen(ctx context.Context, machineIDs []string) (map[string]
 	return out, nil
 }
 
-func (f *Memory) RecordDelivery(ctx context.Context, machineID string, atMS int64) error {
-	if f.RecordErr != nil {
-		return f.RecordErr
+// ReserveDelivery records one delivery of the machine only while the
+// machine holds fewer than maxDeliveries deliveries in the last
+// deliveryWindow, under the same lock that reads the count and writes
+// the row. A delivery always counts. It reports whether the delivery
+// was recorded.
+func (f *Memory) ReserveDelivery(ctx context.Context, machineID string, atMS int64) (bool, error) {
+	if f.ReserveDelErr != nil {
+		return false, f.ReserveDelErr
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	since := atMS - deliveryWindow.Milliseconds()
+	if countAfter(f.deliveries[machineID], since) >= maxDeliveries {
+		return false, nil
+	}
 	f.deliveries[machineID] = append(f.deliveries[machineID], atMS)
-	cutoff := atMS - deliveryWindow.Milliseconds()
 	kept := f.deliveries[machineID][:0]
 	for _, at := range f.deliveries[machineID] {
-		if at > cutoff {
+		if at > since {
 			kept = append(kept, at)
 		}
 	}
 	f.deliveries[machineID] = kept
-	return nil
-}
-
-func (f *Memory) CountDeliveries(ctx context.Context, machineID string, sinceMS int64) (int, error) {
-	if f.CountErr != nil {
-		return 0, f.CountErr
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for _, at := range f.deliveries[machineID] {
-		if at > sinceMS {
-			n++
-		}
-	}
-	return n, nil
+	return true, nil
 }
 
 var _ MachineStore = (*Memory)(nil)

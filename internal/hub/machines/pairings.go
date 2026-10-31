@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"unicode/utf8"
 
 	"github.com/djalmajr/nau/internal/hub"
@@ -28,20 +29,6 @@ func (m *Service) createPairing(ctx context.Context, req hub.Request) hub.Respon
 		return badRequest()
 	}
 	nowMS := m.nowMS()
-	created, err := m.machines.PairingsCreatedSince(ctx, nowMS-pairingCreateWindow.Milliseconds())
-	if err != nil {
-		return unavailable()
-	}
-	if created >= maxPairingsCreated {
-		return errResponse(429, "rate_limited")
-	}
-	pending, err := m.machines.PendingPairings(ctx)
-	if err != nil {
-		return unavailable()
-	}
-	if pending >= maxPendingPairings {
-		return errResponse(429, "rate_limited")
-	}
 	code, err := m.drawCode()
 	if err != nil {
 		return unavailable()
@@ -60,14 +47,25 @@ func (m *Service) createPairing(ctx context.Context, req hub.Request) hub.Respon
 		CodeHash:   hashHex([]byte(code)),
 		PollHash:   hashHex(poll),
 		Name:       name,
+		ClientHash: hashHex([]byte(m.clientIP(req.Header))),
 		CreatedMS:  nowMS,
 		ExpiresMS:  expiresMS,
 		ApprovedBy: nil,
 		MachineID:  nil,
 		Consumed:   false,
 	}
-	if err := m.machines.CreatePairing(ctx, p, nowMS); err != nil {
+	// The reservation is atomic in the store: the expired pairings
+	// go away first and do not count as pending, and the row enters
+	// only while the pending bound of the hub and the per-client
+	// budget both have room, between instances and between concurrent
+	// requests. Without a row the answer is 429, and a failure of the
+	// mechanism is a 503, without proceeding.
+	reserved, err := m.machines.ReservePairing(ctx, p, nowMS)
+	if err != nil {
 		return unavailable()
+	}
+	if !reserved {
+		return errResponse(429, "rate_limited")
 	}
 	out, _ := json.Marshal(struct {
 		Code      string `json:"code"`
@@ -85,6 +83,34 @@ func hasControlRune(s string) bool {
 		}
 	}
 	return false
+}
+
+// clientIP is the client of the creation limit: when the hub is
+// configured with the trusted proxy header, the first value of the
+// header when it validates as an ip; otherwise the ip of the
+// connection, the RemoteAddr without the port, that the hub serve
+// adapter sets in the RemoteIPHeader header. An absent or invalid
+// value leaves the client unknown (the empty string), which holds its
+// own per-client budget.
+func (m *Service) clientIP(hdr hub.Header) string {
+	if m.clientIPHeader != "" {
+		if ip := ipOf(hdr.Get(m.clientIPHeader)); ip != "" {
+			return ip
+		}
+	}
+	return ipOf(hdr.Get(RemoteIPHeader))
+}
+
+// ipOf validates the header value as an ip and answers its canonical
+// form, or the empty string.
+func ipOf(v string) string {
+	if v == "" {
+		return ""
+	}
+	if ip := net.ParseIP(v); ip != nil {
+		return ip.String()
+	}
+	return ""
 }
 
 // confirmPairing is the POST /api/pairings/confirm route (session
@@ -105,26 +131,28 @@ func (m *Service) confirmPairing(ctx context.Context, req hub.Request) hub.Respo
 		return badRequest()
 	}
 	nowMS := m.nowMS()
-	// The limit counts the wrong confirmations of the user in the
-	// window; a refused attempt is refused before the lookup.
-	errs, err := m.machines.CountPairingErrors(ctx, u.ID, nowMS-confirmWindow.Milliseconds())
+	// The attempt is reserved in the database before any check, so
+	// the per-user budget holds between instances and between
+	// concurrent requests; a refused attempt is refused before the
+	// lookup. A wrong confirmation keeps the reservation, and a
+	// correct one clears it, after the confirmation.
+	reserved, err := m.machines.ReserveConfirmError(ctx, u.ID, nowMS)
 	if err != nil {
 		return unavailable()
 	}
-	if errs >= maxConfirmErrors {
+	if !reserved {
 		return errResponse(429, "rate_limited")
 	}
 	code := normalizeCode(body.Code)
 	if !validCode(code) {
-		m.recordPairingError(ctx, u.ID, nowMS)
 		return errResponse(400, "invalid_code")
 	}
 	p, found, err := m.machines.FindPairingByCodeHash(ctx, hashHex([]byte(code)))
 	if err != nil {
 		return unavailable()
 	}
+	// The reservation stays as the failure of the attempt.
 	invalid := func() hub.Response {
-		m.recordPairingError(ctx, u.ID, nowMS)
 		return errResponse(400, "invalid_code")
 	}
 	if !found || p.Consumed || p.ExpiresMS <= nowMS || p.ApprovedBy != nil {
@@ -139,13 +167,12 @@ func (m *Service) confirmPairing(ctx context.Context, req hub.Request) hub.Respo
 		// same invalid answer, and the attempt counts.
 		return invalid()
 	}
+	// The correct confirmation clears the quota of the user; a
+	// failure of the mechanism is not discarded.
+	if err := m.machines.ClearPairingErrors(ctx, u.ID, nowMS); err != nil {
+		return unavailable()
+	}
 	return hub.Response{Status: 204}
-}
-
-// recordPairingError stores one wrong confirmation; a store failure
-// there does not change the answer (the attempt still failed).
-func (m *Service) recordPairingError(ctx context.Context, userID string, atMS int64) {
-	_ = m.machines.RecordPairingError(ctx, userID, atMS)
 }
 
 // pollPairing is the POST /api/pairings/poll route (no session): the

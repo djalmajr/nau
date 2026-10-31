@@ -37,6 +37,7 @@ exit codes:
   4   hub serve: the database or the listener is unavailable; connect: the
       hub is unreachable or its answer is not valid (doctor reports the
       soho backend in its JSON and exits 0 without it)
+  130 connect: interrupted (Ctrl-C) before hub.json was written
 `
 
 // usageText renders the usage for the program name of env.

@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +32,19 @@ type fakePairingHub struct {
 }
 
 const fakePairingCode = "7K4P-9M2N"
-const fakePairingKey = "fake-machine-key-for-the-connect-test-000000"
+
+// fakePairingKey is the machine key of the fake hub: the base64url
+// without padding of 32 bytes, the shape of the real key (it is the
+// encoding of 32 fixed bytes, a test value, never a secret).
+const fakePairingKey = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI"
+
+func init() {
+	if b, err := base64.RawURLEncoding.DecodeString(fakePairingKey); err != nil || len(b) != 32 {
+		// The constant is the encoding of 32 bytes: a broken constant
+		// would fail the command validation of the tests.
+		panic("the fake pairing key is not the base64url of 32 bytes")
+	}
+}
 
 func newFakePairingHub(t *testing.T) *fakePairingHub {
 	t.Helper()
@@ -338,6 +352,360 @@ func TestConnectInterrupted(t *testing.T) {
 	code := <-done
 	if code != connectExitInterrupted {
 		t.Fatalf("connect = %d, want %d (the interrupted)", code, connectExitInterrupted)
+	}
+	if out.String() != "" {
+		t.Fatalf("stdout = %q, want nothing", out.String())
+	}
+	if !strings.Contains(errb.String(), "interrupted") {
+		t.Fatalf("stderr = %q, want the interrupted line", errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
+		t.Fatal("hub.json was written, want nothing")
+	}
+}
+
+// ---- the fake transport of the connect tests -------------------------
+
+// connectRecording is one request the fake transport saw: the url,
+// the method, the body and the deadline of the context the client
+// carried.
+type connectRecording struct {
+	url         string
+	method      string
+	body        string
+	deadline    time.Time
+	hasDeadline bool
+}
+
+// fakeConnectTransport is the transport of the connect tests: it
+// answers the scripted response without sockets and records the
+// requests, so the redirect policy and the deadline of the real
+// http.Client of the command are what the tests exercise.
+type fakeConnectTransport struct {
+	mu   sync.Mutex
+	reqs []connectRecording
+	resp func(*http.Request) *http.Response
+}
+
+func (f *fakeConnectTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	_ = req.Body.Close()
+	var dl time.Time
+	var hasDL bool
+	if d, ok := req.Context().Deadline(); ok {
+		dl, hasDL = d, true
+	}
+	f.mu.Lock()
+	f.reqs = append(f.reqs, connectRecording{url: req.URL.String(), method: req.Method, body: string(body), deadline: dl, hasDeadline: hasDL})
+	f.mu.Unlock()
+	return f.resp(req), nil
+}
+
+// fakeConnectResponse builds the scripted response of the fake
+// transport.
+func fakeConnectResponse(req *http.Request, status int, body []byte, loc string) *http.Response {
+	hdr := http.Header{}
+	if loc != "" {
+		hdr.Set("Location", loc)
+	}
+	if len(body) > 0 {
+		hdr.Set("Content-Type", "application/json")
+	}
+	return &http.Response{
+		StatusCode: status,
+		Header:     hdr,
+		Body:       io.NopCloser(bytes.NewReader(body)),
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Request:    req,
+	}
+}
+
+// connectTestHub is the url of the fake transport tests: a https url
+// the usage accepts, and no socket is opened.
+const connectTestHub = "https://127.0.0.1:7440"
+
+// withFakeTransport runs the connect with the fake transport and the
+// injected signal, restoring both.
+func withFakeTransport(t *testing.T, f *fakeConnectTransport, sig func() (context.Context, context.CancelFunc), env Env, args []string) int {
+	t.Helper()
+	oldRT, oldSig := connectRoundTrip, connectSignal
+	connectRoundTrip = f
+	if sig != nil {
+		connectSignal = sig
+	}
+	defer func() { connectRoundTrip, connectSignal = oldRT, oldSig }()
+	return Run(args, env)
+}
+
+// TestConnectRefusesRedirects is the redirect of the connect: the
+// client follows none. A 307 or a 308 to another origin — a remote
+// http or a different origin — is the exit 4, without writing
+// anything and without resending the poll_token to the new
+// destination.
+func TestConnectRefusesRedirects(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		loc    string
+		stage  string // create or poll
+	}{
+		{"create 307 remote http", http.StatusTemporaryRedirect, "http://remote.invalid", "create"},
+		{"poll 307 remote http", http.StatusTemporaryRedirect, "http://remote.invalid", "poll"},
+		{"create 308 other origin", http.StatusPermanentRedirect, "https://other.example", "create"},
+		{"poll 308 other origin", http.StatusPermanentRedirect, "https://other.example", "poll"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			env, out, errb := connectTestEnv(t, cfgDir)
+			f := &fakeConnectTransport{}
+			createBody, _ := json.Marshal(map[string]any{
+				"code":       fakePairingCode,
+				"poll_token": "polltoken0000000000000000000000000001",
+				"expires_ms": 9999999999999,
+			})
+			f.resp = func(req *http.Request) *http.Response {
+				if req.URL.Path == "/api/pairings" {
+					if c.stage == "create" {
+						return fakeConnectResponse(req, c.status, nil, c.loc)
+					}
+					return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+				}
+				return fakeConnectResponse(req, c.status, nil, c.loc)
+			}
+			code := withFakeTransport(t, f, nil, env, []string{"connect", connectTestHub, "--name", "laptop"})
+			if code != 4 {
+				t.Fatalf("connect = %d (stdout %s stderr %s), want 4", code, out.String(), errb.String())
+			}
+			if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
+				t.Fatal("hub.json was written, want nothing")
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			want := 2
+			if c.stage == "create" {
+				want = 1
+			}
+			if len(f.reqs) != want {
+				t.Fatalf("the transport saw %d requests, want %d (no redirect is followed)", len(f.reqs), want)
+			}
+			for i, r := range f.reqs {
+				if !strings.HasPrefix(r.url, connectTestHub) {
+					t.Fatalf("request %d went to %s, want the hub origin", i, r.url)
+				}
+				if strings.Contains(r.url, "remote.invalid") || strings.Contains(r.url, "other.example") {
+					t.Fatalf("request %d reached the redirect destination %s", i, r.url)
+				}
+			}
+			if c.stage == "poll" {
+				// The poll_token went to the hub exactly once and
+				// nowhere else.
+				n := 0
+				for _, r := range f.reqs {
+					if strings.Contains(r.body, "polltoken0000000000000000000000000001") {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Fatalf("the poll_token was sent in %d requests, want 1", n)
+				}
+			}
+		})
+	}
+}
+
+// TestConnectUntrustedResponse is the validation of the hub answer:
+// the code with a terminal control, the code outside the displayed
+// alphabet, the non-positive expires_ms, the key that does not decode
+// to 32 bytes and the machine id outside the shape are the exit 4,
+// without writing anything and without a raw value of the hub on the
+// terminal.
+func TestConnectUntrustedResponse(t *testing.T) {
+	rawKey := base64.RawURLEncoding.EncodeToString(make([]byte, 33)) // 44 letters, 33 bytes
+	cases := []struct {
+		name    string
+		create  map[string]any
+		deliver map[string]any
+		raw     string
+	}{
+		{
+			name:   "code with a terminal control",
+			create: map[string]any{"code": "\u001b[31m7K4P-9M2N", "poll_token": "polltoken0000000000000000000000000001", "expires_ms": 9999999999999},
+			raw:    "\u001b[31m7K4P-9M2N",
+		},
+		{
+			name:   "code outside the alphabet",
+			create: map[string]any{"code": "i000-l000", "poll_token": "polltoken0000000000000000000000000001", "expires_ms": 9999999999999},
+			raw:    "i000-l000",
+		},
+		{
+			name:   "non-positive expires_ms",
+			create: map[string]any{"code": fakePairingCode, "poll_token": "polltoken0000000000000000000000000001", "expires_ms": 0},
+		},
+		{
+			name:    "key that is not 32 bytes",
+			create:  map[string]any{"code": fakePairingCode, "poll_token": "polltoken0000000000000000000000000001", "expires_ms": 9999999999999},
+			deliver: map[string]any{"machine_id": "machine-1", "key": rawKey},
+			raw:     rawKey,
+		},
+		{
+			name:    "machine id outside the shape",
+			create:  map[string]any{"code": fakePairingCode, "poll_token": "polltoken0000000000000000000000000001", "expires_ms": 9999999999999},
+			deliver: map[string]any{"machine_id": "../evil", "key": fakePairingKey},
+			raw:     "../evil",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			env, out, errb := connectTestEnv(t, cfgDir)
+			f := &fakeConnectTransport{}
+			createBody, _ := json.Marshal(c.create)
+			deliverBody, _ := json.Marshal(map[string]any{"machine_id": "machine-1", "key": fakePairingKey})
+			if c.deliver != nil {
+				deliverBody, _ = json.Marshal(c.deliver)
+			}
+			f.resp = func(req *http.Request) *http.Response {
+				if req.URL.Path == "/api/pairings" {
+					return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+				}
+				return fakeConnectResponse(req, http.StatusOK, deliverBody, "")
+			}
+			code := withFakeTransport(t, f, nil, env, []string{"connect", connectTestHub, "--name", "laptop"})
+			if code != 4 {
+				t.Fatalf("connect = %d (stdout %s stderr %s), want 4", code, out.String(), errb.String())
+			}
+			if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
+				t.Fatal("hub.json was written, want nothing")
+			}
+			if c.raw != "" {
+				if strings.Contains(out.String(), c.raw) || strings.Contains(errb.String(), c.raw) {
+					t.Fatalf("the raw value of the hub reached the terminal: stdout %q stderr %q", out.String(), errb.String())
+				}
+			}
+		})
+	}
+}
+
+// TestConnectLocalDeadline is the local deadline of the connect: the
+// command gives up 10 minutes after the start, or sooner when the hub
+// answers a closer validity. The deadline bounds the requests and the
+// wait between the polls, and the exit is the expired one without
+// persisting.
+func TestConnectLocalDeadline(t *testing.T) {
+	cases := []struct {
+		name      string
+		expiresMS int64 // the hub validity, from the start
+	}{
+		{"the local 10 minutes", 24 * time.Hour.Milliseconds()},
+		{"the closer hub validity", 5 * time.Minute.Milliseconds()},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			start := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+			now := start
+			cfgDir := t.TempDir()
+			var out, errb bytes.Buffer
+			env := Env{
+				Stdout:    &out,
+				Stderr:    &errb,
+				Getenv:    func(string) string { return "" },
+				ConfigDir: cfgDir,
+				Now:       func() time.Time { return now },
+				Sleep: func(ctx context.Context, d time.Duration) error {
+					now = now.Add(d)
+					return ctx.Err()
+				},
+			}
+			f := &fakeConnectTransport{}
+			expires := start.Add(time.Duration(c.expiresMS) * time.Millisecond).UnixMilli()
+			createBody, _ := json.Marshal(map[string]any{
+				"code":       fakePairingCode,
+				"poll_token": "polltoken0000000000000000000000000001",
+				"expires_ms": expires,
+			})
+			f.resp = func(req *http.Request) *http.Response {
+				if req.URL.Path == "/api/pairings" {
+					return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+				}
+				return fakeConnectResponse(req, http.StatusAccepted, []byte(`{"status":"pending"}`), "")
+			}
+			t0 := time.Now()
+			code := withFakeTransport(t, f, nil, env, []string{"connect", connectTestHub, "--name", "laptop"})
+			if code != 3 {
+				t.Fatalf("connect = %d (stdout %s stderr %s), want 3 (the expired)", code, out.String(), errb.String())
+			}
+			if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
+				t.Fatal("hub.json was written, want nothing")
+			}
+			// The command gave up at the effective deadline: the
+			// smaller between the local 10 minutes and the hub
+			// validity, with the last sleep of the loop as the only
+			// overshoot.
+			want := connectDeadline
+			if hub := time.Duration(c.expiresMS) * time.Millisecond; hub < want {
+				want = hub
+			}
+			if got := now.Sub(start); got < want || got > want+connectPollInterval {
+				t.Fatalf("the command ran for %s, want about %s (the effective deadline)", got.Round(time.Millisecond), want)
+			}
+			// The poll request runs under a deadline context: each
+			// request is bounded (the per-request timeout of 10 s, the
+			// closer of the two), and the wait between the polls is
+			// bounded by the effective deadline (the exit 3 above).
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			var poll *connectRecording
+			for i := range f.reqs {
+				if f.reqs[i].url == connectTestHub+"/api/pairings/poll" {
+					poll = &f.reqs[i]
+					break
+				}
+			}
+			if poll == nil || !poll.hasDeadline {
+				t.Fatalf("the poll request carried no deadline (requests: %+v)", f.reqs)
+			}
+			if got := poll.deadline.Sub(t0); got > connectDeadline+time.Second {
+				t.Fatalf("the deadline of the poll request is %s after the start, want at most the local deadline", got.Round(time.Millisecond))
+			}
+		})
+	}
+}
+
+// TestConnectCancelBeforePersistence is the Ctrl-C at the response
+// boundary: the cancellation that lands after the 200 of the delivery
+// is read, before the file is published, exits 130 without writing
+// hub.json.
+func TestConnectCancelBeforePersistence(t *testing.T) {
+	cfgDir := t.TempDir()
+	env, out, errb := connectTestEnv(t, cfgDir)
+	var cancelAtBoundary context.CancelFunc
+	sig := func() (context.Context, context.CancelFunc) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelAtBoundary = cancel
+		return ctx, cancel
+	}
+	createBody, _ := json.Marshal(map[string]any{
+		"code":       fakePairingCode,
+		"poll_token": "polltoken0000000000000000000000000001",
+		"expires_ms": 9999999999999,
+	})
+	deliverBody, _ := json.Marshal(map[string]any{"machine_id": "machine-1", "key": fakePairingKey})
+	f := &fakeConnectTransport{}
+	f.resp = func(req *http.Request) *http.Response {
+		if req.URL.Path == "/api/pairings" {
+			return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+		}
+		// The interrupt lands after the response is read, before
+		// the command persists.
+		cancelAtBoundary()
+		return fakeConnectResponse(req, http.StatusOK, deliverBody, "")
+	}
+	code := withFakeTransport(t, f, sig, env, []string{"connect", connectTestHub, "--name", "laptop"})
+	if code != connectExitInterrupted {
+		t.Fatalf("connect = %d (stdout %s), want %d (the interrupted)", code, out.String(), connectExitInterrupted)
 	}
 	if out.String() != "" {
 		t.Fatalf("stdout = %q, want nothing", out.String())
