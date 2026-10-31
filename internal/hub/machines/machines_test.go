@@ -366,6 +366,7 @@ func runMachinesScenarios(t *testing.T, fresh func(t *testing.T) *scenario) {
 	t.Run("NameValidation", func(t *testing.T) { testNameValidation(t, fresh) })
 	t.Run("SharingReads", func(t *testing.T) { testSharingReads(t, fresh) })
 	t.Run("RevokedShareEndsTheRelationship", func(t *testing.T) { testRevokedShareEndsTheRelationship(t, fresh) })
+	t.Run("RevokedOwnMachineInListing", func(t *testing.T) { testRevokedOwnMachineStaysInTheListing(t, fresh) })
 	t.Run("StoreFailures", func(t *testing.T) { testStoreFailures(t, fresh) })
 }
 
@@ -880,11 +881,16 @@ func testRevocationCutsImmediately(t *testing.T, fresh func(t *testing.T) *scena
 	if r.Status != 401 || string(r.Body) != `{"error":"unauthenticated"}` {
 		t.Fatalf("ingest after the revocation: %d %s, want 401 unauthenticated", r.Status, r.Body)
 	}
-	// The revoked machine leaves the listing: the list holds the
-	// non-revoked machines only.
+	// The revoked machine stays in the listing of the owner, with the
+	// seal: the list holds his own revoked machines beyond the
+	// visible ones.
 	r = s.do("GET", "/api/machines", nil, s.asUser("alice"), false)
-	if r.Status != 200 || !strings.Contains(string(r.Body), `"machines":[]`) {
-		t.Fatalf("machines: %d %s, want the empty list", r.Status, r.Body)
+	if r.Status != 200 {
+		t.Fatalf("machines: %d %s, want 200", r.Status, r.Body)
+	}
+	list := parseMachineList(t, r.Body)
+	if len(list.Machines) != 1 || list.Machines[0].ID != d.MachineID || !list.Machines[0].Revoked {
+		t.Fatalf("machines = %s, want the revoked machine with the seal", r.Body)
 	}
 	// The second revocation is 204 (the operation is idempotent).
 	r = s.do("DELETE", "/api/machines/"+d.MachineID, nil, s.asUser("alice"), true)
@@ -1346,13 +1352,14 @@ func TestMemoryMachinesScenarios(t *testing.T) {
 				u, ok := users[n]
 				return u, ok
 			},
-			Apply:    apply.run,
-			Sharing:  sharing,
-			Agents:   reads.agents,
-			Agent:    reads.agent,
-			Overview: reads.overview,
-			Now:      clock.Now,
-			Rand:     &counterReader{},
+			Apply:      apply.run,
+			Sharing:    sharing,
+			Agents:     reads.agents,
+			Agent:      reads.agent,
+			Overview:   reads.overview,
+			OwnRevoked: sharing.ownRevoked,
+			Now:        clock.Now,
+			Rand:       &counterReader{},
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)

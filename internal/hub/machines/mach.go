@@ -183,6 +183,11 @@ type AgentFunc func(ctx context.Context, st store.Store, machineID, terminal str
 // ingest.Overview over the hub store.
 type OverviewFunc func(ctx context.Context, st store.Store, machineIDs []string, nowMS int64) (ingest.OverviewResult, error)
 
+// OwnRevokedFunc reads the developer's own revoked machines, the
+// separate query of the machine listing route; nil uses the query of
+// the visibility over the hub store.
+type OwnRevokedFunc func(ctx context.Context, st store.Store, developerID string, nowMS int64) ([]visibility.Machine, error)
+
 // Config is the configuration of the machine connect: the hub store
 // (the deliveries of the inventories apply through it), the machine
 // storage, the session resolver, the sharing and the reads, the name
@@ -211,6 +216,10 @@ type Config struct {
 	Agent AgentFunc
 	// Overview reads the aggregates; nil uses ingest.Overview.
 	Overview OverviewFunc
+	// OwnRevoked reads the developer's own revoked machines, the
+	// separate query of the machine listing route; nil uses the
+	// query of the visibility over the hub store.
+	OwnRevoked OwnRevokedFunc
 	// Now is the clock.
 	Now func() time.Time
 	// Rand is the randomness source; nil uses crypto/rand.
@@ -231,6 +240,7 @@ type Service struct {
 	agents         AgentsFunc
 	agent          AgentFunc
 	overview       OverviewFunc
+	ownRevoked     OwnRevokedFunc
 	now            func() time.Time
 	rand           io.Reader
 }
@@ -267,6 +277,10 @@ func New(cfg Config) (*Service, error) {
 	if overview == nil {
 		overview = ingest.Overview
 	}
+	ownRevoked := cfg.OwnRevoked
+	if ownRevoked == nil {
+		ownRevoked = visibility.OwnRevokedMachines
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
@@ -285,6 +299,7 @@ func New(cfg Config) (*Service, error) {
 		agents:         agents,
 		agent:          agent,
 		overview:       overview,
+		ownRevoked:     ownRevoked,
 		now:            now,
 		rand:           rnd,
 	}, nil

@@ -129,6 +129,46 @@ func (f *fakeSharing) VisibleMachines(ctx context.Context, developerID string, n
 	return out, nil
 }
 
+// ownRevoked is the in-memory query of the machine listing route: the
+// revoked machines of the developer, in the id order, with the
+// last-seen of the deliveries. They hold no read: the shared_with
+// stays empty, as the revocation ends the grants.
+func (f *fakeSharing) ownRevoked(ctx context.Context, _ store.Store, developerID string, nowMS int64) ([]visibility.Machine, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	all, err := f.mem.ListAllMachines(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]visibility.Machine, 0)
+	for _, mc := range all {
+		if mc.DeveloperID != developerID || mc.RevokedMS == nil {
+			continue
+		}
+		u := f.byID[mc.DeveloperID]
+		m := visibility.Machine{
+			ID:         mc.ID,
+			Name:       mc.Name,
+			Developer:  visibility.Developer{ID: mc.DeveloperID, Name: u.Name},
+			CreatedMS:  mc.CreatedMS,
+			Own:        true,
+			Revoked:    true,
+			SharedWith: []visibility.Developer{},
+		}
+		if last := f.lastSeen(mc.ID); last > 0 {
+			seen := last
+			m.LastSeenMS = &seen
+			m.Online = nowMS-last <= 60000
+		}
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 // UserByEmail is the in-memory grantee lookup.
 func (f *fakeSharing) UserByEmail(_ context.Context, email string) (visibility.Account, bool, error) {
 	f.mu.Lock()
@@ -637,6 +677,35 @@ func parseAgents(t *testing.T, body []byte) agentsBody {
 	return b
 }
 
+// machineListBody is the answer of the machine listing of the
+// scenarios.
+type machineListBody struct {
+	Machines []struct {
+		ID        string `json:"id"`
+		Name      string `json:"name"`
+		Developer struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"developer"`
+		CreatedMS  int64  `json:"created_ms"`
+		Revoked    bool   `json:"revoked"`
+		LastSeenMS *int64 `json:"last_seen_ms"`
+		Online     bool   `json:"online"`
+		SharedWith []struct {
+			ID string `json:"id"`
+		} `json:"shared_with"`
+	} `json:"machines"`
+}
+
+func parseMachineList(t *testing.T, body []byte) machineListBody {
+	t.Helper()
+	var b machineListBody
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatalf("machines body %s: %v", body, err)
+	}
+	return b
+}
+
 // testSharingReads is the sharing and the read routes, per the
 // contract: without a share, the other developer and the owner of the
 // hub see nothing of the machine; with the share, the recipient sees
@@ -1026,6 +1095,115 @@ func testRevokedShareEndsTheRelationship(t *testing.T, fresh func(t *testing.T) 
 		if d.Machines != w {
 			t.Fatalf("machines of %s in the owner listing = %d, want %d (the revoked machine does not count)", d.ID, d.Machines, w)
 		}
+	}
+}
+
+// testRevokedOwnMachineStaysInTheListing is the revocation in the
+// machine listing, per the decision: the owner of the machine sees it
+// in the listing, with the seal and the last-seen he has, beyond the
+// visible ones; the grantee and the owner of the hub do not see it;
+// and the agents of the machine are outside every read route.
+func testRevokedOwnMachineStaysInTheListing(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	d, _ := s.deliver(t, "alice", "laptop")
+	aliceID, bobID := s.users["alice"].ID, s.users["bob"].ID
+	agentID := d.MachineID + ".w1:p1"
+
+	// The share, so the machine grants the read to the grantee.
+	r := s.doJSON("POST", "/api/machines/"+d.MachineID+"/shares", map[string]string{"email": "bob@example.test"}, s.asUser("alice"))
+	if r.Status != 201 {
+		t.Fatalf("share: %d %s, want 201", r.Status, r.Body)
+	}
+
+	// The delivery with the agents, so the last-seen and the agents
+	// exist before the revocation.
+	if r := s.ingestWith(d.Key, sharingInventoryBody(s.nowMS())); r.Status != 204 {
+		t.Fatalf("ingest: %d %s, want 204", r.Status, r.Body)
+	}
+
+	// The revocation.
+	r = s.do("DELETE", "/api/machines/"+d.MachineID, nil, s.asUser("alice"), true)
+	if r.Status != 204 {
+		t.Fatalf("revoke: %d %s, want 204", r.Status, r.Body)
+	}
+
+	// The owner of the machine sees it in the listing, with the seal
+	// and the last-seen of the delivery: the list holds his own
+	// revoked machines beyond the visible ones.
+	r = s.do("GET", "/api/machines", nil, s.asUser("alice"), false)
+	if r.Status != 200 {
+		t.Fatalf("machines of alice: %d %s, want 200", r.Status, r.Body)
+	}
+	list := parseMachineList(t, r.Body)
+	if len(list.Machines) != 1 {
+		t.Fatalf("machines of alice = %s, want only the revoked machine", r.Body)
+	}
+	mc := list.Machines[0]
+	if mc.ID != d.MachineID || mc.Name != "laptop" || mc.Developer.ID != aliceID || mc.Developer.Name != s.users["alice"].Name {
+		t.Fatalf("machine of alice = %s, want the revoked laptop of alice", r.Body)
+	}
+	if !mc.Revoked {
+		t.Fatalf("machine of alice = %s, want the revoked seal", r.Body)
+	}
+	if mc.LastSeenMS == nil || *mc.LastSeenMS != s.nowMS() || !mc.Online {
+		t.Fatalf("machine of alice = %s, want the last-seen of the delivery and the online state", r.Body)
+	}
+	if len(mc.SharedWith) != 0 {
+		t.Fatalf("machine of alice = %s, want no shared_with (the revocation ends the grants)", r.Body)
+	}
+
+	// The grantee and the owner of the hub do not see the machine:
+	// the revocation ends the grants and the machine grants nothing.
+	r = s.do("GET", "/api/machines", nil, s.asUser("bob"), false)
+	if r.Status != 200 || !containsBody(t, r.Body, `"machines":[]`) {
+		t.Fatalf("machines of bob: %d %s, want the empty list", r.Status, r.Body)
+	}
+	r = s.do("GET", "/api/machines", nil, s.asUser("owner"), false)
+	if r.Status != 200 || !containsBody(t, r.Body, `"machines":[]`) {
+		t.Fatalf("machines of the owner: %d %s, want the empty list", r.Status, r.Body)
+	}
+
+	// The agents of the revoked machine are outside every read
+	// route, for the grantee and for the owner of the machine.
+	for _, who := range []string{"bob", "alice"} {
+		r := s.do("GET", "/api/agents", nil, s.asUser(who), false)
+		if r.Status != 200 {
+			t.Fatalf("agents of %s: %d %s, want 200", who, r.Status, r.Body)
+		}
+		if b := parseAgents(t, r.Body); len(b.Agents) != 0 || len(b.Hidden) != 0 {
+			t.Fatalf("agents of %s = %+v, want none of the revoked machine", who, b)
+		}
+		r = s.do("GET", "/api/agents/"+agentID, nil, s.asUser(who), false)
+		if r.Status != 404 || string(r.Body) != `{"error":"not_found"}` {
+			t.Fatalf("detail of %s: %d %s, want the 404 not_found of the invisible machine", who, r.Status, r.Body)
+		}
+		r = s.do("GET", "/api/overview", nil, s.asUser(who), false)
+		if r.Status != 200 {
+			t.Fatalf("overview of %s: %d %s, want 200", who, r.Status, r.Body)
+		}
+		var ov overviewBody
+		if err := json.Unmarshal(r.Body, &ov); err != nil {
+			t.Fatalf("overview body %s: %v", r.Body, err)
+		}
+		if ov.Machines.Online != 0 || ov.Machines.Offline != 0 || len(ov.Working24h) != 24 ||
+			ov.Counts.Working+ov.Counts.NeedsYou+ov.Counts.Done+ov.Counts.Idle+ov.Counts.Unknown != 0 {
+			t.Fatalf("overview of %s = %+v, want the empty answer with 24 hours", who, ov)
+		}
+	}
+
+	// The grantee sees no relation of the revoked machine.
+	r = s.do("GET", "/api/developers", nil, s.asUser("bob"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of bob: %d %s, want 200", r.Status, r.Body)
+	}
+	if devs := parseDevelopers(t, r.Body); len(devs) != 1 || devs[0].ID != bobID {
+		t.Fatalf("developers of bob = %+v, want only bob", devs)
+	}
+
+	// Sharing the revoked machine keeps refusing with the same 404.
+	r = s.doJSON("POST", "/api/machines/"+d.MachineID+"/shares", map[string]string{"email": "bob@example.test"}, s.asUser("alice"))
+	if r.Status != 404 || string(r.Body) != `{"error":"not_found"}` {
+		t.Fatalf("share after the revocation: %d %s, want the 404 of the today's refusal", r.Status, r.Body)
 	}
 }
 
