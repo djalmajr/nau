@@ -781,3 +781,103 @@ func TestConnectExpiryInFlight(t *testing.T) {
 		t.Fatal("hub.json was written, want nothing")
 	}
 }
+
+// TestConnectBaseForms is the base of the hub url, in the three
+// forms: without the trailing slash, with it, and with a path ending
+// in a slash. The command joins the routes on the escaped path of the
+// url, without normalizing it: the create and the poll reach the hub
+// with the single slash of the route, and the stored url is the base
+// as given.
+func TestConnectBaseForms(t *testing.T) {
+	cases := []struct {
+		base   string
+		create string
+		poll   string
+	}{
+		{connectTestHub, connectTestHub + "/api/pairings", connectTestHub + "/api/pairings/poll"},
+		{connectTestHub + "/", connectTestHub + "/api/pairings", connectTestHub + "/api/pairings/poll"},
+		{connectTestHub + "/base/", connectTestHub + "/base/api/pairings", connectTestHub + "/base/api/pairings/poll"},
+	}
+	for _, c := range cases {
+		t.Run(c.base, func(t *testing.T) {
+			cfgDir := t.TempDir()
+			env, out, errb := connectTestEnv(t, cfgDir)
+			f := &fakeConnectTransport{}
+			createBody, _ := json.Marshal(map[string]any{
+				"code":       fakePairingCode,
+				"poll_token": "polltoken0000000000000000000000000001",
+				"expires_ms": 9999999999999,
+			})
+			deliverBody, _ := json.Marshal(map[string]any{"machine_id": "machine-1", "key": fakePairingKey})
+			f.resp = func(req *http.Request) *http.Response {
+				if strings.HasSuffix(req.URL.Path, "/api/pairings") {
+					return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+				}
+				return fakeConnectResponse(req, http.StatusOK, deliverBody, "")
+			}
+			code := withFakeTransport(t, f, nil, env, []string{"connect", c.base, "--name", "laptop"})
+			if code != 0 {
+				t.Fatalf("connect = %d (stdout %s stderr %s), want 0", code, out.String(), errb.String())
+			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if len(f.reqs) != 2 {
+				t.Fatalf("the transport saw %d requests, want 2 (the create and the poll)", len(f.reqs))
+			}
+			if f.reqs[0].url != c.create {
+				t.Fatalf("the create went to %s, want %s (the route with the single slash)", f.reqs[0].url, c.create)
+			}
+			if f.reqs[1].url != c.poll {
+				t.Fatalf("the poll went to %s, want %s (the route with the single slash)", f.reqs[1].url, c.poll)
+			}
+			// The stored url is the base as given, not the joined
+			// route.
+			data, err := os.ReadFile(filepath.Join(cfgDir, "hub.json"))
+			if err != nil {
+				t.Fatalf("read hub.json: %v", err)
+			}
+			var file hubJSONFile
+			if err := json.Unmarshal(data, &file); err != nil {
+				t.Fatalf("hub.json %s: %v", data, err)
+			}
+			if file.URL != c.base {
+				t.Fatalf("the stored url = %q, want the base as given %q", file.URL, c.base)
+			}
+		})
+	}
+}
+
+// TestConnectTrailingSlashBase is the base with the trailing slash
+// against the real router of the fake hub: the reported symptom was
+// the joined //api/pairings, the 404 of the router and the vague
+// "the hub did not accept the pairing". The base with the slash runs
+// the full flow and stores the credential.
+func TestConnectTrailingSlashBase(t *testing.T) {
+	f := newFakePairingHub(t)
+	base := f.server.URL + "/"
+	cfgDir := t.TempDir()
+	env, out, _ := connectTestEnv(t, cfgDir)
+	go func() {
+		<-f.pollEntered
+		f.confirm()
+	}()
+	code := Run([]string{"connect", base, "--name", "laptop"}, env)
+	if code != 0 {
+		t.Fatalf("connect with the trailing slash = %d (stdout %s), want 0 (the hub answered the pairing)", code, out.String())
+	}
+	want := `{"status":"connected","machine_id":"machine-1"}` + "\n"
+	if out.String() != want {
+		t.Fatalf("stdout = %q, want %q", out.String(), want)
+	}
+	data, err := os.ReadFile(filepath.Join(cfgDir, "hub.json"))
+	if err != nil {
+		t.Fatalf("read hub.json: %v", err)
+	}
+	var file hubJSONFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatalf("hub.json %s: %v", data, err)
+	}
+	if file.URL != base || file.MachineID != "machine-1" || file.Key != fakePairingKey {
+		t.Fatalf("hub.json = %+v, want the base as given, the machine id and the key", file)
+	}
+}

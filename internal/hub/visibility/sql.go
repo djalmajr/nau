@@ -54,6 +54,11 @@ const (
 	// through their non-revoked machines (the sharing of a revoked
 	// machine does not count).
 	sqlAccountSharedByMe = `SELECT m.developer_id, COUNT(*) FROM machines m JOIN shares s ON s.machine_id = m.id WHERE m.revoked_ms IS NULL AND m.developer_id IN (`
+	// sqlOwnRevokedMachines lists the ids of the developer's own
+	// revoked machines, in the id order. It is the separate query of
+	// the machine listing route: the rule of VisibleMachines is
+	// unchanged, and the revoked machines grant nothing to anyone.
+	sqlOwnRevokedMachines = `SELECT id FROM machines WHERE developer_id = ? AND revoked_ms IS NOT NULL ORDER BY id`
 )
 
 // VisibleMachines is the rule of the decision: the non-revoked
@@ -160,6 +165,84 @@ func (s *sqlSharing) VisibleMachines(ctx context.Context, developerID string, no
 		out = append(out, mc)
 	}
 	return out, nil
+}
+
+// ownRevokedMachines is the separate query of the machine listing
+// route: the revoked machines of the developer, with the last-seen
+// they have, in the id order. They hold no read: the SharedWith stays
+// empty, as the revocation ends the grants, and the rule of
+// VisibleMachines is unchanged.
+func (s *sqlSharing) ownRevokedMachines(ctx context.Context, developerID string, nowMS int64) ([]Machine, error) {
+	res, err := s.store.Execute(ctx, store.Stmt{
+		SQL:  sqlOwnRevokedMachines,
+		Args: []store.Value{developerID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(res.Rows))
+	for _, row := range res.Rows {
+		ids = append(ids, strOf(row[0]))
+	}
+	if len(ids) == 0 {
+		return []Machine{}, nil
+	}
+	res, err = s.runIn(ctx, sqlMachineMeta, "", ids)
+	if err != nil {
+		return nil, err
+	}
+	type meta struct {
+		id        string
+		name      string
+		createdMS int64
+	}
+	byID := make(map[string]meta, len(ids))
+	for _, row := range res.Rows {
+		byID[strOf(row[0])] = meta{id: strOf(row[0]), name: strOf(row[1]), createdMS: int64Of(row[3])}
+	}
+	res, err = s.runIn(ctx, sqlDevelopers, "", []string{developerID})
+	if err != nil {
+		return nil, err
+	}
+	name := ""
+	for _, row := range res.Rows {
+		name = strOf(row[1])
+	}
+	res, err = s.runIn(ctx, sqlLastSeen, "", ids)
+	if err != nil {
+		return nil, err
+	}
+	lastSeen := make(map[string]int64, len(res.Rows))
+	for _, row := range res.Rows {
+		lastSeen[strOf(row[0])] = int64Of(row[1])
+	}
+	out := make([]Machine, 0, len(ids))
+	for _, id := range ids {
+		m := byID[id]
+		mc := Machine{
+			ID:         id,
+			Name:       m.name,
+			Developer:  Developer{ID: developerID, Name: name},
+			CreatedMS:  m.createdMS,
+			Own:        true,
+			Revoked:    true,
+			SharedWith: []Developer{},
+		}
+		if seen, has := lastSeen[id]; has {
+			mc.LastSeenMS = &seen
+			mc.Online = nowMS-seen <= onlineWindowMS
+		}
+		out = append(out, mc)
+	}
+	return out, nil
+}
+
+// OwnRevokedMachines is the separate query of the machine listing
+// route, over the hub store: the revoked machines of the developer,
+// with the last-seen they have, in the id order. The rule of
+// VisibleMachines is unchanged.
+func OwnRevokedMachines(ctx context.Context, st store.Store, developerID string, nowMS int64) ([]Machine, error) {
+	return (&sqlSharing{store: st}).ownRevokedMachines(ctx, developerID, nowMS)
 }
 
 // UserByEmail is the grantee lookup of the sharing route: the account

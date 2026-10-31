@@ -3,6 +3,7 @@ package machines
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
 	"github.com/djalmajr/nau/internal/hub"
 )
@@ -13,8 +14,9 @@ type developerRef struct {
 	Name string `json:"name"`
 }
 
-// machineItem is the machine of the listing: the user's own machines
-// and the machines shared with the user, never a revoked one.
+// machineItem is the machine of the listing: the user's own machines,
+// the machines shared with the user, and the user's own revoked
+// machines, with the seal.
 type machineItem struct {
 	ID         string       `json:"id"`
 	Name       string       `json:"name"`
@@ -30,18 +32,24 @@ type machineItem struct {
 
 // listMachines is the GET /api/machines route (session required): the
 // non-revoked machines of the signed-in user and the non-revoked
-// machines shared with them; the owner of the hub sees the same rule,
-// not all the machines.
+// machines shared with them, and the user's own revoked machines, with
+// the seal and the last-seen they have; the owner of the hub sees the
+// same rule, not all the machines.
 func (m *Service) listMachines(ctx context.Context, req hub.Request) hub.Response {
 	u, ok := m.sessionUser(ctx, req)
 	if !ok {
 		return errResponse(401, "unauthenticated")
 	}
-	list, err := m.sharing.VisibleMachines(ctx, u.ID, m.nowMS())
+	nowMS := m.nowMS()
+	list, err := m.sharing.VisibleMachines(ctx, u.ID, nowMS)
 	if err != nil {
 		return unavailable()
 	}
-	items := make([]machineItem, 0, len(list))
+	revoked, err := m.ownRevoked(ctx, m.store, u.ID, nowMS)
+	if err != nil {
+		return unavailable()
+	}
+	items := make([]machineItem, 0, len(list)+len(revoked))
 	for _, mc := range list {
 		item := machineItem{
 			ID:         mc.ID,
@@ -61,6 +69,22 @@ func (m *Service) listMachines(ctx context.Context, req hub.Request) hub.Respons
 		}
 		items = append(items, item)
 	}
+	for _, mc := range revoked {
+		// The revoked machine holds no read: the shared_with stays
+		// empty, as the revocation ends the grants.
+		shared := []developerRef{}
+		items = append(items, machineItem{
+			ID:         mc.ID,
+			Name:       mc.Name,
+			Developer:  developerRef{ID: mc.Developer.ID, Name: mc.Developer.Name},
+			CreatedMS:  mc.CreatedMS,
+			Revoked:    true,
+			LastSeenMS: mc.LastSeenMS,
+			Online:     mc.Online,
+			SharedWith: &shared,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	out, _ := json.Marshal(struct {
 		Machines []machineItem `json:"machines"`
 	}{Machines: items})

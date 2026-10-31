@@ -45,6 +45,11 @@ type Machine struct {
 	LastSeenMS *int64
 	Online     bool
 	Own        bool
+	// Revoked is the seal of the listing: true for the own revoked
+	// machines the machine listing route lists, as the separate
+	// query of the route. The rule of VisibleMachines never returns
+	// a revoked machine.
+	Revoked    bool
 	SharedWith []Developer
 }
 

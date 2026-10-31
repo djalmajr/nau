@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/djalmajr/nau/internal/config"
@@ -74,16 +76,36 @@ type hubJSONFile struct {
 // without sockets.
 var connectRoundTrip http.RoundTripper
 
+// hubEndpoint joins the base url of the hub with the path of the
+// route, on the escaped path of the url, without normalizing it, as
+// the agent does with its ingest endpoint: the base with the trailing
+// slash and the base with a path keep the single slash of the route.
+// The parse failures answer the fixed error: the base is the value of
+// the command, validated by the usage before the call.
+func hubEndpoint(base, route string) (string, error) {
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", errors.New("the url of the hub is not valid")
+	}
+	escaped := strings.TrimSuffix(u.EscapedPath(), "/") + route
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", errors.New("the url of the hub is not valid")
+	}
+	u.Path, u.RawPath = decoded, escaped
+	return u.String(), nil
+}
+
 // connectPost is the HTTP call of the command; the tests replace it to
 // run against the fake hub. The client follows no redirect: a 3xx is
 // an error for the caller, and the poll token and the key never travel
 // to another origin.
-var connectPost = func(ctx context.Context, base, path string, body any) (int, []byte, error) {
+var connectPost = func(ctx context.Context, rawURL string, body any) (int, []byte, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return 0, nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+path, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(data))
 	if err != nil {
 		return 0, nil, err
 	}
@@ -185,6 +207,15 @@ func cmdConnect(args []string, env Env) int {
 		fail(env, 2, "connect: the hub url must be https:// or http:// on a loopback host")
 		return 2
 	}
+	// The routes of the hub, joined on the escaped path of the url:
+	// the base with the trailing slash or with a path keeps the
+	// single slash of the route.
+	createURL, err := hubEndpoint(hubURL, "/api/pairings")
+	pollURL, err2 := hubEndpoint(hubURL, "/api/pairings/poll")
+	if err != nil || err2 != nil {
+		fail(env, 2, "connect: the hub url must be https:// or http:// on a loopback host")
+		return 2
+	}
 	if name == "" {
 		cfg, err := config.Load(env.ConfigDir)
 		if err != nil {
@@ -215,7 +246,7 @@ func cmdConnect(args []string, env Env) int {
 
 	// Step 1: request the pairing.
 	reqCtx, cancelReq := bounded()
-	status, body, err := connectPost(reqCtx, hubURL, "/api/pairings", struct {
+	status, body, err := connectPost(reqCtx, createURL, struct {
 		Name string `json:"name"`
 	}{Name: name})
 	cancelReq()
@@ -261,7 +292,7 @@ func cmdConnect(args []string, env Env) int {
 			return 3
 		}
 		reqCtx, cancelReq := bounded()
-		status, body, err = connectPost(reqCtx, hubURL, "/api/pairings/poll", struct {
+		status, body, err = connectPost(reqCtx, pollURL, struct {
 			PollToken string `json:"poll_token"`
 		}{PollToken: created.PollToken})
 		// The cause of a failed poll is read before the cancel: the
