@@ -17,6 +17,7 @@ import (
 	"github.com/djalmajr/nau/internal/hub"
 	"github.com/djalmajr/nau/internal/hub/accounts"
 	"github.com/djalmajr/nau/internal/hub/httpserve"
+	"github.com/djalmajr/nau/internal/hub/live"
 	"github.com/djalmajr/nau/internal/hub/machines"
 	"github.com/djalmajr/nau/internal/hub/migrate"
 	"github.com/djalmajr/nau/internal/hub/sqld"
@@ -212,6 +213,29 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 2, "hub serve: the machine connect is misconfigured")
 		return 2
 	}
+	// The live board is over the same store: the version of each
+	// developer is the hash of what that developer may read, and the
+	// two routes are the polling answer and the events stream.
+	liveBoard, err := live.New(live.Config{
+		Store:       st,
+		SessionUser: auth.SessionUser,
+		Now:         env.Now,
+	})
+	if err != nil {
+		// The configuration is the fixed one: New cannot fail here.
+		fail(env, 2, "hub serve: the live board is misconfigured")
+		return 2
+	}
+	liveEvents, err := httpserve.NewEvents(httpserve.EventsConfig{
+		Version:     liveBoard.Version,
+		SessionUser: auth.SessionUser,
+	})
+	if err != nil {
+		// The configuration is the fixed one: NewEvents cannot fail
+		// here.
+		fail(env, 2, "hub serve: the live events are misconfigured")
+		return 2
+	}
 	ln, err := hubServeListen("tcp", listen)
 	if err != nil {
 		fail(env, 4, "hub serve: cannot listen on "+listen)
@@ -239,13 +263,14 @@ func cmdHubServe(args []string, env Env) int {
 	}, static)
 	auth.Register(srvHub)
 	mach.Register(srvHub)
+	liveBoard.Register(srvHub)
 	// The adapter keeps no state of the connection: this wrapper sets
 	// the ip of the connection (the RemoteAddr without the port) in
 	// the header the machine connect reads as the client of the
 	// creation limit. The adapter drops the value the client sends
 	// before it sets its own, so the header cannot be spoofed to claim
 	// a foreign connection.
-	inner := httpserve.New(srvHub)
+	inner := httpserve.WithEvents(httpserve.New(srvHub), liveEvents)
 	srv := httpserve.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(machines.RemoteIPHeader)
 		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
@@ -265,6 +290,9 @@ func cmdHubServe(args []string, env Env) int {
 	code := 0
 	select {
 	case <-ctx.Done():
+		// The streams end when the server starts to shut down, so a
+		// clean Shutdown does not wait the lifetime of a stream.
+		liveEvents.Stop()
 	case err := <-errCh:
 		// The listener failed before any shutdown: the serving line is
 		// already on stdout, so only stderr says why.
