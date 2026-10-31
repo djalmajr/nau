@@ -129,7 +129,7 @@ func TestDocsReadmeOutputContract(t *testing.T) {
 	for _, want := range []string{
 		"Nau is a read-only hub of the coding agents at work: which agents are working, on which machines, for which developers.",
 		"The hub is under construction; the soho inventory is the only source.",
-		"The exit codes are `0`, `2`, `4`.",
+		"The exit codes are `0`, `2`, `3`, `4`, and `130` when `connect` is interrupted before it writes `hub.json`.",
 	} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("README does not contain %q", want)

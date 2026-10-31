@@ -24,12 +24,20 @@ commands:
                                     version API and the static files, with the store in the
                                     remote database named by NAU_HUB_DB_URL (token in
                                     NAU_HUB_DB_TOKEN)
+  connect <hub-url> [--name <nome>]
+                                    connect this machine to the hub: request a pairing, show
+                                    the code, poll the confirmation and store the machine key
+                                    in hub.json of the config directory (https only, or http
+                                    on a loopback host; the name defaults to machine_label)
 
 exit codes:
   0   success
   2   bad usage, unknown config key
-  4   hub serve: the database or the listener is unavailable (doctor reports
-      the soho backend in its JSON and exits 0 without it)
+  3   connect: the pairing expired
+  4   hub serve: the database or the listener is unavailable; connect: the
+      hub is unreachable or its answer is not valid (doctor reports the
+      soho backend in its JSON and exits 0 without it)
+  130 connect: interrupted (Ctrl-C) before hub.json was written
 `
 
 // usageText renders the usage for the program name of env.
