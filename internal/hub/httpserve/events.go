@@ -161,22 +161,40 @@ func (e *Events) Stop() {
 // ServeHTTP serves one request of the events route. Without a live
 // session it answers 401 in JSON, without opening the stream; above
 // the process limit it answers 503 unavailable and above the per-user
-// limit 429 rate_limited.
+// limit 429 rate_limited. The lifetime and the stop of the server
+// bound the whole request from its first read: the session check of
+// the opening runs under the read timeout too, and a check that does
+// not answer in time is 503 unavailable, not a stream.
 func (e *Events) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), e.lifetime)
+	defer cancel()
+	go func() {
+		select {
+		case <-e.stopped:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	req := hub.Request{
 		Method: r.Method,
 		Path:   r.URL.Path,
 		Query:  r.URL.Query(),
 		Header: headersFrom(r.Header),
 	}
-	u, ok := e.sessionUser(ctx, req)
+	sctx, scancel := context.WithTimeout(ctx, e.readTimeout)
+	u, ok := e.sessionUser(sctx, req)
+	timedOut := sctx.Err() != nil
+	scancel()
 	if !ok {
+		if timedOut {
+			e.writeJSON(w, http.StatusServiceUnavailable, `{"error":"unavailable"}`)
+			return
+		}
 		e.writeJSON(w, http.StatusUnauthorized, `{"error":"unauthenticated"}`)
 		return
 	}
@@ -246,19 +264,10 @@ func (e *Events) release(devID string) {
 // differs from the Last-Event-ID), and then re-reads the version on
 // the poll interval and pings on the ping interval, until the context
 // ends, the server stops, the lifetime is spent or three version
-// reads fail in a row. The lifetime and the stop of the server cancel
-// the context of the reads too, so a read in flight never holds the
-// stream past them.
+// reads fail in a row. The context comes from ServeHTTP, bounded by
+// the lifetime and canceled by the stop of the server, so a read in
+// flight never holds the stream past them.
 func (e *Events) stream(ctx context.Context, w http.ResponseWriter, req hub.Request, devID, lastEventID string) {
-	ctx, cancel := context.WithTimeout(ctx, e.lifetime)
-	defer cancel()
-	go func() {
-		select {
-		case <-e.stopped:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
 	if !e.writeFrame(w, "retry: "+strconv.Itoa(sseRetryMS)+"\n\n") {
 		return
 	}

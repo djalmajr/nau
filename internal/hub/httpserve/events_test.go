@@ -769,3 +769,48 @@ func TestEventsBlockedReadsHitTheReadTimeout(t *testing.T) {
 		t.Fatalf("the stream closed after %d reads, want three timed-out reads in a row", calls)
 	}
 }
+
+// TestEventsBlockedOpeningSessionIs503: the session check of the
+// opening runs under the read timeout, so a session store that does
+// not answer gets 503 unavailable instead of holding the request, and
+// no stream is admitted.
+func TestEventsBlockedOpeningSessionIs503(t *testing.T) {
+	ev, err := NewEvents(EventsConfig{
+		Version: func(ctx context.Context, developerID string) (string, error) { return "v0", nil },
+		SessionUser: func(ctx context.Context, req hub.Request) (accounts.User, bool) {
+			<-ctx.Done()
+			return accounts.User{}, false
+		},
+		Now:         time.Now,
+		Lifetime:    time.Minute,
+		ReadTimeout: 30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewEvents: %v", err)
+	}
+	srv := httptest.NewServer(ev)
+	t.Cleanup(func() {
+		ev.Stop()
+		srv.Close()
+	})
+	start := time.Now()
+	// A client with its own timeout: a regression fails here in 5 s
+	// instead of hanging the suite.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(srv.URL + eventsPath)
+	if err != nil {
+		t.Fatalf("the blocked opening did not answer: %v", err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	body := string(raw)
+	if resp.StatusCode != http.StatusServiceUnavailable || body != `{"error":"unavailable"}` {
+		t.Fatalf("blocked opening session: %d %q, want 503 unavailable", resp.StatusCode, body)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the blocked opening took %s, want the read timeout", took.Round(time.Millisecond))
+	}
+	if n := openSlots(ev); n != 0 {
+		t.Fatalf("open streams = %d, want 0 (nothing admitted)", n)
+	}
+}
