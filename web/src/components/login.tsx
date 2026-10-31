@@ -40,6 +40,9 @@ export function LoginScreen() {
     setError("");
     try {
       const res = await api.login(email.trim(), password);
+      // Limpa qualquer dado de sessão anterior antes da nova: as telas da
+      // conta anterior nunca aparecem sob esta sessão.
+      queryClient.clear();
       // A sessão vira o estado da query antes da navegação, então a rota
       // protegida não pisca o estado de carga.
       queryClient.setQueryData(SESSION_QUERY_KEY, res.user);

@@ -13,7 +13,7 @@ export const SESSION_QUERY_KEY = ["session"] as const;
 export function useSession() {
   return useQuery({
     queryKey: SESSION_QUERY_KEY,
-    queryFn: async () => (await api.getSession()).user,
+    queryFn: ({ signal }) => api.getSession(signal).then((session) => session.user),
     retry: false,
   });
 }
@@ -27,11 +27,20 @@ type GuardRouter = {
 
 /** Tratamento central de sessão perdida: todo 401 (menos o POST de login)
  *  remove a query da sessão do cache e leva o usuário para
- *  /login?next=<destino completo> (caminho + query + fragmento). Chamado
- *  uma vez pelo app (main.tsx) e pelos harnesses de teste. */
+ *  /login?next=<destino completo> (caminho + query + fragmento). Um 401 que
+ *  chegou de uma conta que já não é a sessão vigente (request antigo de outra
+ *  conta, cancelado no clear() do logout mas ainda resolvendo) é ignorado:
+ *  limpar agora derrubaria a conta que acabou de entrar. Chamado uma vez
+ *  pelo app (main.tsx) e pelos harnesses de teste. */
 export function registerUnauthorizedRedirect(queryClient: QueryClient, router: GuardRouter): void {
-  setUnauthorizedHandler(() => {
-    queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY });
+  setUnauthorizedHandler((requestingUser) => {
+    if (requestingUser !== undefined) {
+      const current = queryClient.getQueryData<SessionUser>(SESSION_QUERY_KEY);
+      if (current && current.id !== requestingUser) return;
+    }
+    // Limpa todos os dados autenticados (e não só a sessão): com a sessão
+    // de outra conta, as telas da anterior nunca reaparecem.
+    queryClient.clear();
     const { href, pathname } = router.state.location;
     if (pathname !== "/login") {
       // `next` guarda o destino interno inteiro para o login devolver o

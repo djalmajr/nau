@@ -2,6 +2,7 @@ import { createRouter } from "@tanstack/react-router";
 import { Route as rootRoute } from "./routes/__root";
 import { Route as indexRoute } from "./routes/index";
 import { Route as agentsRoute } from "./routes/agents";
+import { Route as agentDetailRoute } from "./routes/agents-detail";
 import { Route as machinesRoute } from "./routes/machines";
 import { Route as developersRoute } from "./routes/developers";
 import { Route as projectsRoute } from "./routes/projects";
@@ -14,6 +15,7 @@ import { Route as notFoundRoute } from "./routes/not-found";
 const routeTree = rootRoute.addChildren([
   indexRoute,
   agentsRoute,
+  agentDetailRoute,
   machinesRoute,
   developersRoute,
   projectsRoute,

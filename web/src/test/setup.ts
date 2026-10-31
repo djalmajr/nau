@@ -45,11 +45,15 @@ defineStorage("sessionStorage");
 // sidebar consultam prefers-color-scheme / max-width. Função real (não vi.fn)
 // para sobreviver a vi.restoreAllMocks().
 function mediaQueryList(query: string) {
+  // Emula o viewport padrão do jsdom (1024 px): `min-width: 640px` casa
+  // (janela larga — o header guarda a ação da página na linha do título);
+  // `max-width: <767px>` e `prefers-color-scheme: dark` não casam.
+  const matches = /min-width:\s*640px/.test(query);
   return {
     addEventListener: () => {},
     addListener: () => {},
     dispatchEvent: () => false,
-    matches: false,
+    matches,
     media: query,
     onchange: null,
     removeEventListener: () => {},
