@@ -12,8 +12,5 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],
-    // Tolerância a máquina compartilhada: os testes terminam em segundos;
-    // o teto alto evita timeout falso quando o event loop está sob carga.
-    testTimeout: 30_000,
   },
 });

@@ -86,11 +86,14 @@ export function AppShell({
   headerActions,
 }: {
   children: React.ReactNode;
-  /** Ações da página à direita do título no header (ex.: troca Board | Lista). */
+  /** Ações da página à direita do título no header (ex.: troca Board | Lista).
+   *  Abaixo de 640 px saem da linha do header e vão para a linha própria
+   *  logo abaixo, antes dos filtros. */
   headerActions?: React.ReactNode;
 }) {
   const { t } = useI18n();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const narrow = useIsNarrow();
 
   return (
     <SidebarProvider>
@@ -137,7 +140,11 @@ export function AppShell({
         </SidebarContent>
       </Sidebar>
 
-      {/* h-svh + overflow-hidden: o header fica fixo e SÓ o main rola */}
+      {/* h-svh + overflow-hidden: o header fica fixo e SÓ o main rola. Abaixo
+          de 640 px a ação da página sai da linha do header (vai para a linha
+          própria logo abaixo, antes dos filtros); os controles globais
+          (pílula, tema, idioma e conta) ficam sempre na linha de cima,
+          visíveis até 320 px, e o título truncando impede overflow. */}
       <SidebarInset className="h-svh overflow-hidden">
         <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger label={t("sidebar.toggle")} />
@@ -153,8 +160,8 @@ export function AppShell({
               </span>
             )}
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            {headerActions}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {!narrow ? headerActions : null}
             <div className="flex items-center gap-1.5">
               <LiveStatusPill />
               <ThemeMenu />
@@ -163,6 +170,11 @@ export function AppShell({
             </div>
           </div>
         </header>
+        {narrow && headerActions ? (
+          <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2">
+            {headerActions}
+          </div>
+        ) : null}
         <ScrollArea className="min-h-0 flex-1">
           <main className="p-4">{children}</main>
         </ScrollArea>
@@ -171,8 +183,26 @@ export function AppShell({
   );
 }
 
+/** Abaixo do breakpoint `sm` (640 px) do Tailwind: a ação da página sai da
+ *  linha do header. O stub de matchMedia dos testes emula o viewport de 1024 px
+ *  do jsdom (`min-width: 640px` casa), então os testes veem o header largo.
+ */
+function useIsNarrow(): boolean {
+  const [narrow, setNarrow] = React.useState(false);
+  React.useEffect(() => {
+    const media = window.matchMedia("(min-width: 640px)");
+    const update = () => setNarrow(!media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
+}
+
 /** Pílula de conexão em tempo real. Nesta base o hook sempre devolve
- *  "offline"; o canal ao vivo chega num card seguinte. */
+ *  "offline"; o canal ao vivo chega num card seguinte. Abaixo de 640 px
+ *  compacta para só o ponto (o rótulo fica na árvore acessível, via
+ *  sr-only), para o header caber em 320 px sem esconder os demais controles. */
 function LiveStatusPill() {
   const { t } = useI18n();
   const status = useLiveStatus();
@@ -181,6 +211,7 @@ function LiveStatusPill() {
   return (
     <Badge
       className={cn(
+        "shrink-0",
         status === "live" && "border-transparent bg-primary/15 text-primary",
         status === "reconnecting" && "border-transparent bg-secondary text-secondary-foreground",
         status === "offline" && "text-muted-foreground",
@@ -196,7 +227,8 @@ function LiveStatusPill() {
           status === "offline" && "bg-muted-foreground/50",
         )}
       />
-      {label}
+      <span className="hidden sm:inline">{label}</span>
+      <span className="sr-only sm:hidden">{label}</span>
     </Badge>
   );
 }

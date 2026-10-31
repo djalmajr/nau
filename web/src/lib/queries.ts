@@ -1,6 +1,9 @@
 // Queries TanStack Query dos endpoints de leitura do hub. O tempo real
 // chega num card seguinte; por enquanto a atualização periódica de 15 s
 // mantém as telas vivas (a pílula do header continua "offline").
+// O `signal` da query vai até o fetch (lib/api) e a id do usuário, que já
+// está na chave, vai junto na chamada: o 401 atrasado de uma conta anterior
+// é cancelado no clear() e/ou ignorado pelo handler central.
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
 import { useSession } from "./session";
@@ -30,7 +33,7 @@ export function useAgents() {
   const userId = useSessionUserId();
   return useQuery({
     queryKey: AGENTS_QUERY_KEY(userId ?? "anonymous"),
-    queryFn: () => api.getAgents(),
+    queryFn: ({ signal }) => api.getAgents({ signal, user: userId }),
     refetchInterval: AGENT_REFRESH_MS,
     enabled: userId !== undefined,
   });
@@ -41,7 +44,7 @@ export function useAgent(id: string) {
   const userId = useSessionUserId();
   return useQuery({
     queryKey: AGENT_QUERY_KEY(userId ?? "anonymous", id),
-    queryFn: () => api.getAgent(id),
+    queryFn: ({ signal }) => api.getAgent(id, { signal, user: userId }),
     refetchInterval: AGENT_REFRESH_MS,
     enabled: userId !== undefined,
   });
@@ -52,7 +55,7 @@ export function useOverview() {
   const userId = useSessionUserId();
   return useQuery({
     queryKey: OVERVIEW_QUERY_KEY(userId ?? "anonymous"),
-    queryFn: () => api.getOverview(),
+    queryFn: ({ signal }) => api.getOverview({ signal, user: userId }),
     refetchInterval: AGENT_REFRESH_MS,
     enabled: userId !== undefined,
   });

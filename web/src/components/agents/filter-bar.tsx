@@ -91,18 +91,22 @@ export function FilterBar({
         options={projects}
         value={value.project}
       />
-      <div className="relative">
+      {/* A busca ocupa a largura disponível (sem sair do viewport em 320/
+          375 px) e no máximo 320 px — a mesma escala (80) do w-80 anterior:
+          em 1366 continua na linha dos selects e em 800/640/375/320 vai para
+          a linha própria, inteira. O placeholder curto ("Tarefa ou agente")
+          cabe nos dois idiomas, inclusive na fonte de 16 px do breakpoint
+          móvel; o nome acessível continua o rótulo completo (aria-label). */}
+      <div className="relative w-80 max-w-full">
         <Search
           aria-hidden
           className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
         />
-        {/* w-80: o placeholder inteiro cabe nos dois idiomas a partir de
-            800 px (medido com o método da revisão). */}
         <Input
           aria-label={t("filters.search")}
-          className="h-8 w-80 pl-8"
+          className="h-8 w-full pl-8"
           onChange={(event) => onChange({ q: event.currentTarget.value })}
-          placeholder={t("filters.search")}
+          placeholder={t("filters.searchPlaceholder")}
           type="search"
           value={value.q}
         />

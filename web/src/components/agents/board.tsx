@@ -8,7 +8,8 @@ import { HiddenAgentsCard } from "./hidden-card";
 /** Board de agentes: quatro colunas (Precisa de você, Trabalhando,
  *  Concluído, Ocioso) com título e contagem; cartões do mais antigo para o
  *  mais novo; cartão de ocultos no fim da coluna; os `unknown` ficam numa
- *  faixa abaixo, só quando há algum. Em telas estreitas as colunas viram
+ *  faixa abaixo, quando há algum visível ou oculto (a faixa mostra a
+ *  contagem oculta como as colunas). Em telas estreitas as colunas viram
  *  uma pilha vertical. */
 export function BoardView({
   agents,
@@ -23,6 +24,7 @@ export function BoardView({
   const byState = agentsByState(agents);
   const hiddenByState = hiddenTotalByState(hidden);
   const unknown = byState.get("unknown") ?? [];
+  const hiddenUnknown = hiddenByState.unknown;
 
   return (
     <div className="space-y-4">
@@ -56,7 +58,7 @@ export function BoardView({
         })}
       </div>
 
-      {unknown.length > 0 ? (
+      {unknown.length > 0 || hiddenUnknown > 0 ? (
         <section aria-label={t("board.unknownTitle")} className="rounded-xl border bg-muted/20 p-2" data-testid="unknown-band">
           <header className="flex items-center justify-between gap-2 px-1 pb-2">
             <h3 className="text-sm font-medium">{t("board.unknownTitle")}</h3>
@@ -68,6 +70,7 @@ export function BoardView({
             {unknown.map((agent) => (
               <AgentCard agent={agent} key={agent.id} search={search} />
             ))}
+            {hiddenUnknown > 0 ? <HiddenAgentsCard count={hiddenUnknown} /> : null}
           </div>
         </section>
       ) : null}
