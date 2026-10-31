@@ -601,6 +601,165 @@ func TestInstallShAgentRefusalWithoutHubFile(t *testing.T) {
 	}
 }
 
+// TestInstallShAgentRestartOnRerun: a re-run without --agent restarts
+// the agent service when the plist exists (so the machine never runs
+// the old binary) and waits for its fresh health file; without the
+// plist it creates no service state and calls launchctl nothing.
+// launchctl is a fixture: it records its calls and, on a (re)start,
+// writes the fresh health file after a short sleep, so the mtime test
+// of the health check is deterministic at second granularity.
+func TestInstallShAgentRestartOnRerun(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau")
+	helper := filepath.Join(buildDir, "helper")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "fixture space")
+	home := filepath.Join(root, "home space")
+	fakeBin := filepath.Join(root, "fake space")
+	goDir := filepath.Join(root, "go space")
+	backendDir := filepath.Join(root, "backend space")
+	tmp := filepath.Join(root, "temp space")
+	bin := filepath.Join(root, "bin space")
+	for _, dir := range []string{home, fakeBin, goDir, backendDir, tmp, bin} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(goDir, "go"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backendDir, "soho"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(tmp, "launchctl.trace")
+	stateFile := filepath.Join(home, "Library", "Application Support", "nau", "agent-state.json")
+	launchctl := `#!/bin/sh
+echo "launchctl $*" >> "$FAKE_LAUNCHCTL_TRACE"
+case "$1" in
+print)
+    exit 0
+    ;;
+kickstart | bootstrap)
+    sleep 1.1
+    [ -n "$FAKE_LAUNCHCTL_STATE" ] && { mkdir -p "$(dirname -- "$FAKE_LAUNCHCTL_STATE")"; date > "$FAKE_LAUNCHCTL_STATE"; }
+    exit 0
+    ;;
+*)
+    exit 0
+    ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "launchctl"), []byte(launchctl), 0700); err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		"HOME=" + home,
+		"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+		"APPDATA=" + filepath.Join(home, "appdata"),
+		"LOCALAPPDATA=" + filepath.Join(home, "local"),
+		"TMPDIR=" + tmp,
+		"TEMP=" + tmp,
+		"TMP=" + tmp,
+		"PATH=" + strings.Join([]string{fakeBin, goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+		"INSTALL_FIXTURE_NAU=" + nau,
+		"FAKE_LAUNCHCTL_TRACE=" + trace,
+		"FAKE_LAUNCHCTL_STATE=" + stateFile,
+	}
+	run := func() string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, sh, "install.sh", "--bin-dir", bin)
+		cmd.WaitDelay = time.Second
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("installer did not finish within %s: %s", installerRunBound, out)
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("installer failed: %v\n%s", err, out)
+			}
+			if exit.ExitCode() != 0 {
+				t.Fatalf("installer exit=%d: %s", exit.ExitCode(), out)
+			}
+		}
+		return out
+	}
+	plistDir := filepath.Join(home, "Library", "LaunchAgents")
+	plist := filepath.Join(plistDir, "djalmajr.nau.agent.plist")
+	plistContent := []byte("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>djalmajr.nau.agent</string></dict></plist>\n")
+	// With the plist present: the re-run without the flag restarts the
+	// service over the fresh binary and waits for its fresh health.
+	if err := os.MkdirAll(plistDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plist, plistContent, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := run()
+	traceData, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatalf("launchctl was never called (the service was not restarted): %v\n%s", err, out)
+	}
+	if !strings.Contains(string(traceData), "kickstart -k gui/") || !strings.Contains(string(traceData), "djalmajr.nau.agent") {
+		t.Fatalf("the restart is missing from the launchctl trace:\n%s", traceData)
+	}
+	if !strings.Contains(out, "nau install: agent running") {
+		t.Fatalf("the fresh health wait did not report the agent running:\n%s", out)
+	}
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("the fresh health file did not appear after the restart: %v", err)
+	}
+	after, err := os.ReadFile(plist)
+	if err != nil || !bytes.Equal(after, plistContent) {
+		t.Fatalf("the restart rewrote the plist: %v\n%s", err, after)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "nau")); err != nil {
+		t.Fatalf("the install did not complete: %v", err)
+	}
+	// Without the plist: the re-run installs the binary and creates no
+	// service state, calling launchctl nothing.
+	if err := os.RemoveAll(plistDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(home, "Library", "Application Support")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(trace); err != nil {
+		t.Fatal(err)
+	}
+	out = run()
+	if _, err := os.Stat(trace); !os.IsNotExist(err) {
+		t.Fatalf("launchctl was called without an installed service:\n%s%s", trace, out)
+	}
+	if _, err := os.Stat(plist); !os.IsNotExist(err) {
+		t.Fatalf("the re-run without the flag created the plist: %v", err)
+	}
+	if _, err := os.Stat(plistDir); !os.IsNotExist(err) {
+		t.Fatalf("the re-run without the flag created the LaunchAgents directory: %v", err)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("the re-run without the flag wrote the health file: %v", err)
+	}
+	if !strings.Contains(out, "nau install: installed") {
+		t.Fatalf("the install did not complete:\n%s", out)
+	}
+}
+
 func TestInstallPs1Parses(t *testing.T) {
 	powershell := powershellAvailable(t)
 	// Parse the script with the PowerShell parser and fail when the

@@ -189,7 +189,9 @@ func TestAgentRunStartLine(t *testing.T) {
 }
 
 // TestAgentRunRevokedKey: a 401 from the hub ends the run with 4 and
-// the revoked motivo, and the health file says revoked.
+// the revoked motivo on stderr; after the start line nothing more
+// goes to stdout, so stdout keeps the single start line, and the
+// health file says revoked.
 func TestAgentRunRevokedKey(t *testing.T) {
 	srv, _ := newFakeHub(t, http.StatusUnauthorized)
 	exe, _ := installFakeSoho(t, fakeSohoRules()...)
@@ -202,8 +204,13 @@ func TestAgentRunRevokedKey(t *testing.T) {
 	if exit := join(); exit != 4 {
 		t.Fatalf("exit = %d on a revoked key, want 4; stdout %q", exit, out.String())
 	}
-	if !strings.Contains(out.String(), `"status":"4"`) || !strings.Contains(out.String(), `"motivo":"revoked"`) {
-		t.Errorf("stdout lacks the revoked error line: %q", out.String())
+	// One line on stdout: the start line, nothing after.
+	if got := out.String(); got != startLine(srv.URL, agentTestMachineID) {
+		t.Errorf("stdout = %q, want only the start line", got)
+	}
+	// The revoked motivo is on stderr only.
+	if !strings.Contains(errb.String(), "revoked") {
+		t.Errorf("stderr lacks the revoked motivo: %q", errb.String())
 	}
 	if strings.Contains(out.String(), agentTestKey) {
 		t.Fatalf("stdout carries the machine key:\n%s", out.String())
@@ -230,6 +237,9 @@ func TestAgentRunMissingHubFile(t *testing.T) {
 		{name: "empty key", hub: `{"url":"http://127.0.0.1:17440","machine_id":"m","key":""}`},
 		{name: "http off loopback", hub: `{"url":"http://other.example:17440","machine_id":"m","key":"k"}`},
 		{name: "bad json", hub: `{`},
+		{name: "machine id with a control character", hub: `{"url":"http://127.0.0.1:17440","machine_id":"m\x01","key":"k"}`},
+		{name: "machine id with a space", hub: `{"url":"http://127.0.0.1:17440","machine_id":"m 1","key":"k"}`},
+		{name: "machine id too long", hub: `{"url":"http://127.0.0.1:17440","machine_id":"` + strings.Repeat("m", 65) + `","key":"k"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfgDir := t.TempDir()
@@ -338,5 +348,185 @@ func TestAgentRunUsesConfigSoho(t *testing.T) {
 	}
 	if cfg.HerdrSohoBin != exe {
 		t.Errorf("effective backend = %q, want the configured fake %q", cfg.HerdrSohoBin, exe)
+	}
+}
+
+// TestStartLineJSONSerialization: the start line serializer is
+// json.Marshal over the struct, not a formatted literal: a C0 control
+// character in the hub host — which a %q literal would escape as an
+// invalid \x escape, the defect the review proved — stays a valid JSON
+// line, and the fields come back as they went in.
+func TestStartLineJSONSerialization(t *testing.T) {
+	line := agentStartLineJSON("https://h\x01b.example:8443", agentTestMachineID)
+	if !json.Valid([]byte(line)) {
+		t.Fatalf("the start line is not valid JSON for a C0 host: %q", line)
+	}
+	var got struct {
+		Status    string `json:"status"`
+		Hub       string `json:"hub"`
+		MachineID string `json:"machine_id"`
+	}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("the start line does not unmarshal: %v", err)
+	}
+	if got.Status != "running" || got.Hub != "https://h\x01b.example:8443" || got.MachineID != agentTestMachineID {
+		t.Fatalf("the start line fields = %+v", got)
+	}
+}
+
+// TestReviewStartLineValidJSON: the review probe, adapted. A machine_id
+// outside the accepted format is refused before the start line: exit
+// 2, the connect direction, the value not repeated, and the stdout
+// line is JSON. A valid machine_id with a non-ASCII hub host produces
+// a start line that is valid JSON: the line is serialized with
+// json.Marshal, so it is never a Go %q literal.
+func TestReviewStartLineValidJSON(t *testing.T) {
+	runWithCanceledContext := func(t *testing.T, d, url, machineID string) (int, *syncBuf, *syncBuf) {
+		t.Helper()
+		setSohoConfig(t, d, "/missing-review-fixture", "")
+		writeHubFile(t, d, url, machineID, agentTestKey)
+		var out, errb syncBuf
+		env := agentTestEnv(t, d, &out, &errb)
+		old := agentRunContext
+		defer func() { agentRunContext = old }()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		agentRunContext = func() (context.Context, context.CancelFunc) { return ctx, cancel }
+		code := Run([]string{"agent", "run"}, env)
+		return code, &out, &errb
+	}
+	t.Run("hostile machine id", func(t *testing.T) {
+		code, out, errb := runWithCanceledContext(t, t.TempDir(), "http://127.0.0.1:17440", "machine-"+string(rune(1)))
+		line := ""
+		if s := strings.TrimSpace(out.String()); s != "" {
+			line = strings.Split(s, "\n")[0]
+		}
+		valid := json.Valid([]byte(line))
+		t.Logf("start_line exit=%d valid_json=%t key_in_output=%t", code, valid, strings.Contains(out.String()+errb.String(), agentTestKey))
+		if code != 2 || !valid {
+			t.Fatalf("hostile machine_id: exit=%d valid_json=%t, want the refusal (2) and a JSON line", code, valid)
+		}
+		if !strings.Contains(out.String(), "nau connect") {
+			t.Errorf("the refusal lacks the connect direction: %q", out.String())
+		}
+		if strings.Contains(out.String()+errb.String(), agentTestKey) || strings.Contains(out.String()+errb.String(), string(rune(1))) {
+			t.Errorf("the rejected machine_id or the key was repeated: %q", out.String()+errb.String())
+		}
+	})
+	t.Run("non-ASCII hub host", func(t *testing.T) {
+		code, out, errb := runWithCanceledContext(t, t.TempDir(), "https://hübu.example:8443", agentTestMachineID)
+		line := ""
+		if s := strings.TrimSpace(out.String()); s != "" {
+			line = strings.Split(s, "\n")[0]
+		}
+		valid := json.Valid([]byte(line))
+		t.Logf("start_line exit=%d valid_json=%t key_in_output=%t", code, valid, strings.Contains(out.String()+errb.String(), agentTestKey))
+		if code != 0 || !valid {
+			t.Fatalf("exit=%d valid_json=%t, want 0 and a valid JSON start line: %q", code, valid, line)
+		}
+		if strings.Contains(out.String()+errb.String(), agentTestKey) {
+			t.Errorf("the key reached an output surface: %q", out.String()+errb.String())
+		}
+	})
+	t.Run("C1 control character in the hub host", func(t *testing.T) {
+		// A C1 control character (U+0085) is accepted in an https host:
+		// json.Marshal keeps the line valid JSON (the character is
+		// outside the C0 range), where a %q literal would emit an
+		// invalid \x escape.
+		code, out, errb := runWithCanceledContext(t, t.TempDir(), "https://h\x85b.example:8443", agentTestMachineID)
+		line := ""
+		if s := strings.TrimSpace(out.String()); s != "" {
+			line = strings.Split(s, "\n")[0]
+		}
+		valid := json.Valid([]byte(line))
+		t.Logf("start_line exit=%d valid_json=%t key_in_output=%t", code, valid, strings.Contains(out.String()+errb.String(), agentTestKey))
+		if code != 0 || !valid {
+			t.Fatalf("exit=%d valid_json=%t, want 0 and a valid JSON start line: %q", code, valid, line)
+		}
+		if strings.Contains(out.String()+errb.String(), agentTestKey) {
+			t.Errorf("the key reached an output surface: %q", out.String()+errb.String())
+		}
+	})
+}
+
+// TestReviewRevokedSingleStdoutLine: the review probe, adapted. The
+// full observed state of startup, 401 and termination: exit 4, one
+// stdout line (the start line), the revoked motivo on stderr and no
+// key on any surface.
+func TestReviewRevokedSingleStdoutLine(t *testing.T) {
+	srv, _ := newFakeHub(t, http.StatusUnauthorized)
+	exe, _ := installFakeSoho(t, fakeSohoRules()...)
+	d := t.TempDir()
+	setSohoConfig(t, d, exe, "")
+	writeHubFile(t, d, srv.URL, agentTestMachineID, agentTestKey)
+	var out, errb syncBuf
+	env := agentTestEnv(t, d, &out, &errb)
+	cancel, join := runAgentCommand(t, env, "run")
+	defer cancel()
+	code := join()
+	count := len(strings.Split(strings.TrimSpace(out.String()), "\n"))
+	t.Logf("revoked exit=%d stdout_lines=%d key_in_output=%t", code, count, strings.Contains(out.String()+errb.String(), agentTestKey))
+	if code != 4 || count != 1 {
+		t.Fatalf("runtime revocation emitted an extra stdout JSON line after the startup line: exit=%d stdout=%q", code, out.String())
+	}
+	if out.String() != startLine(srv.URL, agentTestMachineID) {
+		t.Errorf("stdout = %q, want only the start line", out.String())
+	}
+	if !strings.Contains(errb.String(), "revoked") {
+		t.Errorf("stderr lacks the revoked motivo: %q", errb.String())
+	}
+	h, err := agent.ReadHealth(filepath.Join(d, "agent-state.json"))
+	if err != nil {
+		t.Fatalf("parse the health file: %v", err)
+	}
+	if h.State != agent.StateRevoked {
+		t.Errorf("health state = %q, want revoked", h.State)
+	}
+}
+
+// TestReviewDoctorMalformedFiles: the review probe, adapted. A
+// malformed optional agent file (a truncated hub.json or
+// agent-state.json) keeps the doctor at exit 0 with a valid JSON line.
+func TestReviewDoctorMalformedFiles(t *testing.T) {
+	for _, n := range []string{"hub.json", "agent-state.json"} {
+		d := t.TempDir()
+		if e := os.WriteFile(filepath.Join(d, n), []byte("{"), 0600); e != nil {
+			t.Fatal(e)
+		}
+		out, _, code := runDoctor(t, d, false)
+		t.Logf("malformed file=%s exit=%d valid_json=%t", n, code, json.Valid([]byte(out)))
+		if code != 0 || !json.Valid([]byte(out)) {
+			t.Fatalf("malformed optional agent file broke doctor: exit=%d out=%q", code, out)
+		}
+	}
+}
+
+// TestAgentRunHealthWriteFailure: when the health file cannot be
+// written, the run ends with 4 and its motivo on stderr only: stdout
+// keeps the single start line, like the revocation.
+func TestAgentRunHealthWriteFailure(t *testing.T) {
+	exe, _ := installFakeSoho(t, fakeSohoRules()...)
+	cfgDir := t.TempDir()
+	setSohoConfig(t, cfgDir, exe, "")
+	writeHubFile(t, cfgDir, "http://127.0.0.1:17440", agentTestMachineID, agentTestKey)
+	// A directory at the health file path: the atomic rename cannot
+	// land, so the first health write fails.
+	if err := os.Mkdir(filepath.Join(cfgDir, "agent-state.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb syncBuf
+	env := agentTestEnv(t, cfgDir, &out, &errb)
+	_, join := runAgentCommand(t, env, "run")
+	if exit := join(); exit != 4 {
+		t.Fatalf("exit = %d on a health write failure, want 4; stdout %q", exit, out.String())
+	}
+	if got := out.String(); got != startLine("http://127.0.0.1:17440", agentTestMachineID) {
+		t.Errorf("stdout = %q, want only the start line", got)
+	}
+	if !strings.Contains(errb.String(), "agent run:") {
+		t.Errorf("stderr lacks the health write motivo: %q", errb.String())
+	}
+	if strings.Contains(out.String()+errb.String(), agentTestKey) {
+		t.Fatalf("the key reached an output surface: %q", out.String()+errb.String())
 	}
 }

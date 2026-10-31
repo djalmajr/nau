@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/djalmajr/nau/internal/soho"
@@ -54,6 +55,14 @@ var ErrRevoked = errors.New("agent: the hub revoked the machine key")
 // reaches the error.
 var errHubURLInvalid = errors.New("agent: the hub URL is not valid")
 
+// errMachineIDInvalid is the fixed text of the machine id refusal:
+// the rejected id never reaches the error.
+var errMachineIDInvalid = errors.New("agent: hub file: the machine id is not valid")
+
+// machineIDPattern is the format the machine id accepts, the same the
+// connect flow validates: one to 64 characters of [A-Za-z0-9_-].
+var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
 // hubFile is the shape of the hub.json that another card writes.
 type hubFile struct {
 	URL       string `json:"url"`
@@ -63,9 +72,10 @@ type hubFile struct {
 
 // LoadHubFile reads the machine's hub file and returns the agent
 // configuration it holds: the hub URL, the machine id and the key.
-// Empty fields are refused, and the URL must be https://, or http://
-// on loopback only. The Runner, StatePath, clock, sleep, client and
-// interval come from the caller.
+// Empty fields are refused, the machine id must match the accepted
+// format and the URL must be https://, or http:// on loopback only.
+// The Runner, StatePath, clock, sleep, client and interval come from
+// the caller.
 func LoadHubFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -77,6 +87,9 @@ func LoadHubFile(path string) (Config, error) {
 	}
 	if f.URL == "" || f.MachineID == "" || f.Key == "" {
 		return Config{}, errors.New("agent: hub file: url, machine_id and key are required")
+	}
+	if !machineIDPattern.MatchString(f.MachineID) {
+		return Config{}, errMachineIDInvalid
 	}
 	if err := checkHubURL(f.URL); err != nil {
 		return Config{}, err

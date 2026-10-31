@@ -66,12 +66,41 @@ func parseAgentFlags(args []string) (agentFlags, bool) {
 	return f, true
 }
 
+// agentStartLine is the single JSON stdout line the agent run prints
+// before the loop: the status, the hub reduced to its scheme and host
+// and the machine id. It never carries the key.
+type agentStartLine struct {
+	Status    string `json:"status"`
+	Hub       string `json:"hub"`
+	MachineID string `json:"machine_id"`
+}
+
+// agentStartLineJSON serializes the start line the way the doctor
+// serializes its line: json.Marshal over the struct, never a
+// formatted literal, so the line is always valid JSON.
+func agentStartLineJSON(hub, machineID string) string {
+	return mustJSON(agentStartLine{
+		Status:    "running",
+		Hub:       hub,
+		MachineID: machineID,
+	})
+}
+
+// agentFailStderr writes the error diagnostic to stderr only: after
+// the start line the agent run keeps stdout at one line, so the JSON
+// error line fail would print is out.
+func agentFailStderr(env Env, motivo string) {
+	_, _ = fmt.Fprintf(env.Stderr, "%s: %s\n", env.program(), motivo)
+}
+
 // cmdAgent implements `agent`: run is the per-machine agent loop. It
 // reads hub.json from the config dir, runs the soho backend the doctor
 // resolves, and writes the health file on every change. It prints one
-// JSON start line (never the key), nothing else on stdout while it
-// runs, exits 0 on a terminal signal, 2 on a bad usage or a missing or
-// invalid hub file, and 4 when the hub revokes the machine key.
+// JSON start line (never the key) and nothing else on stdout: after
+// the line, the revocation and the health write failure go to stderr
+// only. It exits 0 on a terminal signal, 2 on a bad usage or a missing
+// or invalid hub file, and 4 when the hub revokes the machine key or
+// the health file cannot be written.
 func cmdAgent(args []string, env Env) int {
 	if len(args) == 0 || args[0] != "run" {
 		badUsage(env, agentUsage)
@@ -105,9 +134,8 @@ func cmdAgent(args []string, env Env) int {
 	runner := soho.Runner{Bin: cfg.HerdrSohoBin, Environ: childEnviron(env)}
 	// The start line goes out before the loop starts: the key never
 	// leaves the Authorization header, and the hub is reduced to its
-	// scheme and host.
-	_, _ = fmt.Fprintf(env.Stdout, `{"status":"running","hub":%q,"machine_id":%q}`+"\n",
-		agent.HostOnly(hubCfg.HubURL), hubCfg.MachineID)
+	// scheme and host. It is one JSON line, serialized as JSON.
+	_, _ = fmt.Fprintf(env.Stdout, "%s\n", agentStartLineJSON(agent.HostOnly(hubCfg.HubURL), hubCfg.MachineID))
 	acfg := agent.Config{
 		HubURL:    hubCfg.HubURL,
 		MachineID: hubCfg.MachineID,
@@ -122,8 +150,10 @@ func cmdAgent(args []string, env Env) int {
 	ctx, cancel := agentRunContext()
 	defer cancel()
 	if err := agent.Run(ctx, acfg); err != nil {
+		// After the start line, stdout is finished: the motivo goes to
+		// stderr only, so the run's stdout stays one line.
 		if errors.Is(err, agent.ErrRevoked) {
-			fail(env, 4, "revoked")
+			agentFailStderr(env, "revoked")
 			return 4
 		}
 		if ctx.Err() != nil {
@@ -132,7 +162,7 @@ func cmdAgent(args []string, env Env) int {
 		}
 		// The other Run errors are the health file failing to be
 		// written; the loop errors are states, not returns.
-		fail(env, 4, "agent run: "+err.Error())
+		agentFailStderr(env, "agent run: "+err.Error())
 		return 4
 	}
 	return 0

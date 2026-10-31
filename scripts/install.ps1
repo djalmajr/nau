@@ -3,7 +3,9 @@
 # Pin an automatic backend selection to its absolute path on each install.
 #
 # On Windows, -Agent installs (or rewrites) the nau agent scheduled
-# task and (re)starts it; the task is created only when hub.json exists.
+# task and (re)starts it; the task is created only when hub.json
+# exists. A re-run without -Agent restarts the service when the task
+# already exists, so the machine never runs the old binary.
 #
 # Prerequisites: Go 1.26 or newer on the PATH. The script never prints
 # environment variables or configuration contents.
@@ -220,6 +222,13 @@ function Register-AgentTask {
     Register-ScheduledTask -TaskName $AgentTaskName -TaskPath $AgentTaskPath -InputObject $task -Force | Out-Null
 }
 
+# Whether the agent task is registered (the no-flag re-run restarts
+# the service only when it already exists).
+function Test-AgentTaskExists {
+    $task = Get-ScheduledTask -TaskName $AgentTaskName -TaskPath $AgentTaskPath -ErrorAction SilentlyContinue
+    return ($null -ne $task)
+}
+
 # Restart the agent service, in order: write the wrapper, register (or
 # replace) the task, stop the task (which kills the running agent),
 # start the task, and wait for a fresh health file under a wall deadline
@@ -228,6 +237,14 @@ function Register-AgentTask {
 function Restart-AgentTask {
     Write-AgentWrapper
     Register-AgentTask
+    Restart-AgentService
+}
+
+# Stop the task, start it and wait for a fresh health file under a wall
+# deadline of 20 s: the restart over a fresh binary, without touching
+# the wrapper or the task definition. Used by -Agent and by the no-flag
+# re-run that finds the task already installed.
+function Restart-AgentService {
     Stop-ScheduledTask -TaskName $AgentTaskName -TaskPath $AgentTaskPath -ErrorAction SilentlyContinue
     $since = Get-Date
     Start-ScheduledTask -TaskName $AgentTaskName -TaskPath $AgentTaskPath
@@ -389,8 +406,11 @@ try {
     # nau agent service: -Agent registers (or replaces) the task and
     # (re)starts it, but only when the config directory holds a hub.json;
     # without it, warn to run nau connect first and keep the node usable.
-    # This only happens after a successful swap: a failed go install
-    # never touches the service.
+    # A no-flag re-run restarts the service when the task already exists,
+    # so the machine never runs the old binary: the wait for the fresh
+    # health file (20 s) applies to that restart as well. This only
+    # happens after a successful swap: a failed go install never touches
+    # the service.
     if ($Agent) {
         if (-not (Test-Path -LiteralPath (Get-AgentHubFile))) {
             Write-Host ('nau install: no hub.json in ' + (Get-AgentConfigDir) + '; run nau connect <hub-url> first; the agent service was not installed')
@@ -398,6 +418,9 @@ try {
         else {
             Restart-AgentTask
         }
+    }
+    elseif (Test-AgentTaskExists) {
+        Restart-AgentService
     }
 
     # Warn, without failing, when the bin dir is not on the PATH.

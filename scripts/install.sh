@@ -4,7 +4,9 @@
 # Pin an automatic backend selection to its absolute path on each install.
 #
 # On macOS, --agent installs (or rewrites) the nau agent LaunchAgent and
-# (re)starts it; the service is created only when hub.json exists.
+# (re)starts it; the service is created only when hub.json exists. A
+# re-run without --agent restarts the service when the plist already
+# exists, so the machine never runs the old binary.
 #
 # Prerequisites: Go 1.26 or newer on the PATH. The script never prints
 # environment variables or configuration contents.
@@ -354,8 +356,11 @@ NAU="$BIN_DIR/nau"
 # nau agent service (macOS only): with --agent, install (or rewrite)
 # the LaunchAgent and (re)start it, but only when the config directory
 # holds a hub.json; without it, warn to run nau connect first and keep
-# the node usable. This only happens after a successful swap: a failed
-# go install never touches the service.
+# the node usable. Without --agent, an existing plist is restarted over
+# the fresh binary, so the machine never runs the old binary: the wait
+# for the fresh health file (20 s) applies to that restart as well.
+# This only happens after a successful swap: a failed go install never
+# touches the service.
 if [ "$OS" = "Darwin" ] && [ "$AGENT" -eq 1 ]; then
     if [ ! -f "$HUB_FILE" ]; then
         echo "nau install: no hub.json in $HUB_FILE; run nau connect <hub-url> first; the agent service was not installed" >&2
@@ -363,6 +368,8 @@ if [ "$OS" = "Darwin" ] && [ "$AGENT" -eq 1 ]; then
         ABS_BIN_DIR="$(abs_bin_dir)"
         agent_install_service
     fi
+elif [ "$OS" = "Darwin" ] && [ -f "$AGENT_PLIST" ]; then
+    agent_restart_service 0
 fi
 
 # Set machine_label only when it is still empty; never print the value.
