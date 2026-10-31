@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,9 +112,10 @@ func resetSchema(t *testing.T, c store.Store) {
 }
 
 // DropAll drops every table of the database except the lock table and
-// the internal tables of SQLite, with the foreign keys off. It expects
-// the caller to hold the lock: it is the way a test that checks the
-// migrations themselves gets an empty database after the SQLD reset.
+// the internal tables of SQLite, whatever the foreign keys between
+// them. It expects the caller to hold the lock: it is the way a test
+// that checks the migrations themselves gets an empty database after
+// the SQLD reset.
 func DropAll(t *testing.T, st store.Store) {
 	t.Helper()
 	if err := dropAll(st, t.Context()); err != nil {
@@ -121,44 +123,86 @@ func DropAll(t *testing.T, st store.Store) {
 	}
 }
 
-// dropAll is the shared implementation of the reset: it runs the
-// PRAGMA before and after the batch because the PRAGMA is a no-op
-// inside a transaction, and the order of the known tables keeps the
-// children first. The remainder (tables that are not of the hub, like
-// the scratch table of the client tests) is dropped after the known
-// ones.
+// maxDropPasses bounds the passes of dropAll: each pass drops at least
+// one table or the reset gives up, so the bound only guards against a
+// database that keeps growing under the reset.
+const maxDropPasses = 64
+
+// dropAll is the shared implementation of the reset. PRAGMA
+// foreign_keys is per connection and the client opens one per call, so
+// the foreign keys stay on: the drop goes in passes instead, one
+// statement per table, the known tables of the hub first (children
+// before parents) and the rest after them. A table whose drop the
+// foreign keys block (a parent whose children still hold rows) is
+// retried on the next pass, once its children are gone. A pass that
+// drops nothing ends the reset with the last error.
 func dropAll(st store.Store, ctx context.Context) error {
-	if _, err := st.Execute(ctx, store.Stmt{SQL: `PRAGMA foreign_keys = OFF`}); err != nil {
-		return fmt.Errorf("foreign keys off: %w", err)
+	for pass := 0; pass < maxDropPasses; pass++ {
+		names, err := dropOrder(ctx, st)
+		if err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			return nil
+		}
+		dropped := 0
+		var lastErr error
+		for _, name := range names {
+			if _, err := st.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + quoteIdent(name)}); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				lastErr = fmt.Errorf("drop %s: %w", name, err)
+				continue
+			}
+			dropped++
+		}
+		if dropped == 0 {
+			return fmt.Errorf("drop the tables: no table could be dropped: %w", lastErr)
+		}
 	}
+	return fmt.Errorf("drop the tables: still tables left after %d passes", maxDropPasses)
+}
+
+// quoteIdent quotes a table name for SQL, doubling the quotes inside.
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// dropOrder lists the tables to drop, the lock table and the internal
+// ones left out: the known tables of the hub in their order, then the
+// others in the order of the listing.
+func dropOrder(ctx context.Context, st store.Store) ([]string, error) {
 	res, err := st.Execute(ctx, store.Stmt{
 		SQL: `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != 'hubtest_lock'`,
 	})
 	if err != nil {
-		return fmt.Errorf("list the tables: %w", err)
+		return nil, fmt.Errorf("list the tables: %w", err)
 	}
-	known := make(map[string]bool, len(hubTables))
-	var stmts []store.Stmt
-	for _, name := range hubTables {
-		known[name] = true
-		stmts = append(stmts, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + name})
-	}
+	present := make(map[string]bool, len(res.Rows))
+	var listed []string
 	for _, row := range res.Rows {
 		name, ok := row[0].(string)
-		if !ok || known[name] {
+		if !ok {
 			continue
 		}
-		stmts = append(stmts, store.Stmt{SQL: `DROP TABLE IF EXISTS "` + name + `"`, Args: nil})
+		present[name] = true
+		listed = append(listed, name)
 	}
-	if _, err := st.Batch(ctx, stmts); err != nil {
-		on, _ := st.Execute(ctx, store.Stmt{SQL: `PRAGMA foreign_keys = ON`})
-		_ = on
-		return fmt.Errorf("drop the tables: %w", err)
+	known := make(map[string]bool, len(hubTables))
+	var names []string
+	for _, name := range hubTables {
+		known[name] = true
+		if present[name] {
+			names = append(names, name)
+		}
 	}
-	if _, err := st.Execute(ctx, store.Stmt{SQL: `PRAGMA foreign_keys = ON`}); err != nil {
-		return fmt.Errorf("foreign keys on: %w", err)
+	for _, name := range listed {
+		if !known[name] {
+			names = append(names, name)
+		}
 	}
-	return nil
+	return names, nil
 }
 
 // newOwner builds the identity of this process in the lock row: the
