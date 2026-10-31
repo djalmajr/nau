@@ -425,20 +425,20 @@ const psTaskSchedulerPreamble = `function Trace-Task {
     param([string]$What)
     Add-Content -LiteralPath $env:NAU_TASKS_TRACE -Value $What -Encoding ascii
 }
-[CmdletBinding()]
 function Get-ScheduledTask {
+    [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath)
     Trace-Task ('get ' + $TaskName)
     if (Test-Path -LiteralPath $env:NAU_TASKS_PRESENT) { return @{ TaskName = $TaskName } }
     return $null
 }
-[CmdletBinding()]
 function Stop-ScheduledTask {
+    [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath)
     Trace-Task ('stop ' + $TaskName)
 }
-[CmdletBinding()]
 function Start-ScheduledTask {
+    [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath)
     Trace-Task ('start ' + $TaskName)
     Start-Sleep -Milliseconds 1100
@@ -446,43 +446,43 @@ function Start-ScheduledTask {
     [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($state))
     [System.IO.File]::WriteAllText($state, '{}')
 }
-[CmdletBinding()]
 function Register-ScheduledTask {
+    [CmdletBinding()]
     param([string]$TaskName, [string]$TaskPath, $InputObject, [switch]$Force)
     Trace-Task ('register ' + $TaskName)
     return $InputObject
 }
-[CmdletBinding(SupportsShouldProcess = $true)]
 function Unregister-ScheduledTask {
+    [CmdletBinding(SupportsShouldProcess = $true)]
     param([string]$TaskName, [string]$TaskPath)
     Trace-Task ('unregister ' + $TaskName)
 }
-[CmdletBinding()]
 function New-ScheduledTaskPrincipal {
+    [CmdletBinding()]
     param([string]$UserId, [string]$LogonType, [string]$RunLevel)
     Trace-Task 'new-principal'
     return @{ Principal = $UserId }
 }
-[CmdletBinding()]
 function New-ScheduledTaskTrigger {
+    [CmdletBinding()]
     param([switch]$AtLogOn, [string]$User, [switch]$Once, [datetime]$At, [timespan]$RepetitionInterval)
     Trace-Task 'new-trigger'
     return @{ Trigger = $true }
 }
-[CmdletBinding()]
 function New-ScheduledTaskSettingsSet {
+    [CmdletBinding()]
     param([string]$MultipleInstances, [timespan]$ExecutionTimeLimit, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries)
     Trace-Task 'new-settings'
     return @{ Settings = $true }
 }
-[CmdletBinding()]
 function New-ScheduledTaskAction {
+    [CmdletBinding()]
     param([string]$Execute, [string]$Argument)
     Trace-Task 'new-action'
     return @{ Action = $Execute }
 }
-[CmdletBinding()]
 function New-ScheduledTask {
+    [CmdletBinding()]
     param($Settings, $Trigger, $Action, $Principal)
     Trace-Task 'new-task'
     return @{ Task = $true }
@@ -926,6 +926,23 @@ func TestInstallPs1Parses(t *testing.T) {
 	out, err := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s parse install.ps1: %v\n%s", powershell, err, out)
+	}
+	// The Task Scheduler fixtures every installer test runs first must
+	// parse too: a broken preamble would fail those tests before they
+	// reach the installer. The preamble travels in an environment
+	// variable, so no quoting of it is needed in the command.
+	parsePreamble := strings.Join([]string{
+		"$errors = $null",
+		"[void][System.Management.Automation.Language.Parser]::ParseInput($env:NAU_TEST_PS_PREAMBLE, [ref]$null, [ref]$errors)",
+		"if ($errors.Count -gt 0) {",
+		"    foreach ($e in $errors) { Write-Output $e }",
+		"    exit 1",
+		"}",
+	}, "\n")
+	cmd := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", parsePreamble)
+	cmd.Env = append(os.Environ(), "NAU_TEST_PS_PREAMBLE="+psTaskSchedulerPreamble)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%s parse the Task Scheduler fixtures: %v\n%s", powershell, err, out)
 	}
 }
 
