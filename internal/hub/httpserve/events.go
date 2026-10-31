@@ -30,6 +30,7 @@ const (
 	defaultPingInterval       = 15 * time.Second
 	defaultStreamLifetime     = 10 * time.Minute
 	defaultStreamWriteTimeout = 30 * time.Second
+	defaultStreamReadTimeout  = 10 * time.Second
 	defaultMaxOpenStreams     = 256
 	defaultMaxStreamsPerUser  = 8
 )
@@ -61,6 +62,10 @@ type EventsConfig struct {
 	MaxStreams int
 	// MaxPerUser is the limit of open streams of one user.
 	MaxPerUser int
+	// ReadTimeout bounds one poll: the session check and the version
+	// read. A read that does not answer in time counts as a failed
+	// read, so a stuck database never holds a stream.
+	ReadTimeout time.Duration
 }
 
 // Events is the GET /api/events stream: it opens one Server-Sent
@@ -77,6 +82,7 @@ type Events struct {
 	ping          time.Duration
 	lifetime      time.Duration
 	writeDeadline time.Duration
+	readTimeout   time.Duration
 	maxStreams    int
 	maxPerUser    int
 
@@ -121,6 +127,10 @@ func NewEvents(cfg EventsConfig) (*Events, error) {
 	if maxStreams <= 0 {
 		maxStreams = defaultMaxOpenStreams
 	}
+	readTimeout := cfg.ReadTimeout
+	if readTimeout <= 0 {
+		readTimeout = defaultStreamReadTimeout
+	}
 	maxPerUser := cfg.MaxPerUser
 	if maxPerUser <= 0 {
 		maxPerUser = defaultMaxStreamsPerUser
@@ -133,6 +143,7 @@ func NewEvents(cfg EventsConfig) (*Events, error) {
 		ping:          ping,
 		lifetime:      lifetime,
 		writeDeadline: writeDeadline,
+		readTimeout:   readTimeout,
 		maxStreams:    maxStreams,
 		maxPerUser:    maxPerUser,
 		perUser:       map[string]int{},
@@ -235,8 +246,19 @@ func (e *Events) release(devID string) {
 // differs from the Last-Event-ID), and then re-reads the version on
 // the poll interval and pings on the ping interval, until the context
 // ends, the server stops, the lifetime is spent or three version
-// reads fail in a row.
+// reads fail in a row. The lifetime and the stop of the server cancel
+// the context of the reads too, so a read in flight never holds the
+// stream past them.
 func (e *Events) stream(ctx context.Context, w http.ResponseWriter, req hub.Request, devID, lastEventID string) {
+	ctx, cancel := context.WithTimeout(ctx, e.lifetime)
+	defer cancel()
+	go func() {
+		select {
+		case <-e.stopped:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	if !e.writeFrame(w, "retry: "+strconv.Itoa(sseRetryMS)+"\n\n") {
 		return
 	}
@@ -249,15 +271,9 @@ func (e *Events) stream(ctx context.Context, w http.ResponseWriter, req hub.Requ
 	defer poll.Stop()
 	ping := time.NewTicker(e.ping)
 	defer ping.Stop()
-	lifetime := time.NewTimer(e.lifetime)
-	defer lifetime.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-e.stopped:
-			return
-		case <-lifetime.C:
 			return
 		case <-poll.C:
 			if !e.pollOnce(ctx, w, req, devID, &lastSent, &consecutive) {
@@ -279,17 +295,22 @@ func (e *Events) stream(ctx context.Context, w http.ResponseWriter, req hub.Requ
 // a session that dies in between the read and the write never sees
 // the event.
 func (e *Events) pollOnce(ctx context.Context, w http.ResponseWriter, req hub.Request, devID string, lastSent *string, consecutive *int) bool {
-	if _, ok := e.sessionUser(ctx, req); !ok {
+	rctx, rcancel := context.WithTimeout(ctx, e.readTimeout)
+	defer rcancel()
+	if _, ok := e.sessionUser(rctx, req); !ok {
 		return false
 	}
-	v, err := e.version(ctx, devID)
+	v, err := e.version(rctx, devID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
 		*consecutive++
 		return *consecutive < 3
 	}
 	*consecutive = 0
 	if v != *lastSent {
-		if _, ok := e.sessionUser(ctx, req); !ok {
+		if _, ok := e.sessionUser(rctx, req); !ok {
 			return false
 		}
 		if !e.writeEvent(w, v) {

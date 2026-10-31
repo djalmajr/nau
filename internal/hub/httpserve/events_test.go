@@ -668,3 +668,104 @@ func TestEventsNewRefusesMisconfiguration(t *testing.T) {
 		t.Fatal("a missing session resolver must fail")
 	}
 }
+
+// newBlockedEventsTest is an events server whose version read never
+// answers on its own: it returns only when its context ends, like a
+// database that keeps the connection open without replying.
+func newBlockedEventsTest(t *testing.T, lifetime, readTimeout time.Duration) *eventsTest {
+	t.Helper()
+	fx := &streamFixture{ver: "v0", sessionOK: true}
+	blocked := func(ctx context.Context, developerID string) (string, error) {
+		fx.mu.Lock()
+		fx.versionCalls++
+		fx.mu.Unlock()
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	ev, err := NewEvents(EventsConfig{
+		Version:       blocked,
+		SessionUser:   fx.sessionUser,
+		Now:           time.Now,
+		Poll:          10 * time.Millisecond,
+		Ping:          time.Second,
+		Lifetime:      lifetime,
+		WriteDeadline: 5 * time.Second,
+		ReadTimeout:   readTimeout,
+		MaxStreams:    4,
+		MaxPerUser:    4,
+	})
+	if err != nil {
+		t.Fatalf("NewEvents: %v", err)
+	}
+	srv := httptest.NewServer(ev)
+	t.Cleanup(func() {
+		ev.Stop()
+		srv.Close()
+	})
+	return &eventsTest{srv: srv, fx: fx, ev: ev}
+}
+
+// openSlots reads the open-stream counter of the process.
+func openSlots(ev *Events) int {
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	return ev.open
+}
+
+// waitNoSlots waits for the stream's slot to be released after its
+// handler returns.
+func waitNoSlots(t *testing.T, ev *Events) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for openSlots(ev) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("open streams = %d after the stream ended, want 0", openSlots(ev))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestEventsBlockedReadEndsAtTheLifetime: a version read that never
+// answers does not hold the stream past its lifetime.
+func TestEventsBlockedReadEndsAtTheLifetime(t *testing.T) {
+	e := newBlockedEventsTest(t, 100*time.Millisecond, time.Minute)
+	resp := openStream(t, e.srv.URL+eventsPath, map[string]string{"Last-Event-ID": "v0"})
+	body := readStreamBody(t, sseReader(resp))
+	resp.Body.Close()
+	if !strings.Contains(body, "retry: 3000") || strings.Contains(body, "event: board") {
+		t.Fatalf("the blocked stream body = %q, want only the opening", body)
+	}
+	waitNoSlots(t, e.ev)
+}
+
+// TestEventsBlockedReadEndsAtStop: a version read that never answers
+// does not hold the stream once the server begins to stop.
+func TestEventsBlockedReadEndsAtStop(t *testing.T) {
+	e := newBlockedEventsTest(t, time.Minute, time.Minute)
+	resp := openStream(t, e.srv.URL+eventsPath, map[string]string{"Last-Event-ID": "v0"})
+	r := sseReader(resp)
+	if fr, ok := readSSE(t, r); !ok || fr.retry != "3000" {
+		t.Fatalf("the opening frame = %+v", fr)
+	}
+	e.ev.Stop()
+	_ = readStreamBody(t, r)
+	resp.Body.Close()
+	waitNoSlots(t, e.ev)
+}
+
+// TestEventsBlockedReadsHitTheReadTimeout: each poll is bounded by the
+// read timeout, so three stuck reads in a row close the stream long
+// before its lifetime.
+func TestEventsBlockedReadsHitTheReadTimeout(t *testing.T) {
+	e := newBlockedEventsTest(t, time.Minute, 30*time.Millisecond)
+	resp := openStream(t, e.srv.URL+eventsPath, map[string]string{"Last-Event-ID": "v0"})
+	_ = readStreamBody(t, sseReader(resp))
+	resp.Body.Close()
+	waitNoSlots(t, e.ev)
+	e.fx.mu.Lock()
+	calls := e.fx.versionCalls
+	e.fx.mu.Unlock()
+	if calls < 3 {
+		t.Fatalf("the stream closed after %d reads, want three timed-out reads in a row", calls)
+	}
+}
