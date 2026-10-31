@@ -59,6 +59,26 @@ go build ./cmd/nau
 
 The project is Go, with the web UI in `web/` built by Bun (never at runtime); well-established, maintained community libraries are used when a dependency is justified, following normal engineering and security best practices. Tests are hermetic (no network beyond loopback, injected clocks) and must not hang.
 
+## Container image
+
+The hub ships as a container image. Building it from the repository root bundles the `nau` binary and the web interface, which the hub itself serves at `/`:
+
+```text
+docker build -t nau-hub:<tag> .
+```
+
+The image runs as a non-root user on `gcr.io/distroless/static-debian12:nonroot`, listens on port `7440`, and starts `nau hub serve --listen 0.0.0.0:7440 --web /srv/web`; the cluster runs the health probes against `/api/health`, so the image carries no `HEALTHCHECK`.
+
+The secrets always come from the environment, never from the image. The environment surface of the hub is:
+
+- `NAU_HUB_DB_URL` — the URL of the sqld database the hub reads and writes.
+- `NAU_HUB_DB_TOKEN` — the token for that database.
+- `NAU_HUB_SESSION_KEY` — the key that signs the session cookies.
+- `NAU_HUB_BOOTSTRAP_TOKEN` — the token that bootstraps the first account.
+- `NAU_HUB_CRON_TOKEN` — the token that authorizes the cron routes.
+
+Today `hub serve` reads `NAU_HUB_DB_URL` and `NAU_HUB_DB_TOKEN` from that list; the remaining variables are read by the hub's account and cron surfaces as they land.
+
 ## Status
 
 The hub is under construction; the soho inventory is the only source.
