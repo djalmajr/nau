@@ -24,6 +24,7 @@ import type {
   VersionResponse,
 } from "@/lib/api";
 import { I18nProvider } from "@/lib/i18n";
+import { LiveChannel } from "@/lib/live";
 import { SESSION_QUERY_KEY, registerUnauthorizedRedirect } from "@/lib/session";
 import { ThemeProvider } from "@/lib/theme";
 import { AccessPage } from "@/routes/access";
@@ -82,6 +83,9 @@ export interface HubApiState {
   pairingFail?: number;
   /** Usuário da sessão (GET /api/session). */
   sessionUser: SessionUser;
+  /** Status do GET /api/session quando definido (ex.: 401 — o caminho real
+   *  do logout: o refetch depois do DELETE responde 401). */
+  sessionFail?: number;
   /** Status do POST /api/session/password quando definido (ex.: 401, 400). */
   passwordFail?: number;
   developers: DevelopersResponse | null;
@@ -92,6 +96,9 @@ export interface HubApiState {
   /** Status do DELETE /api/invites/{id} quando definido. */
   revokeInviteFail?: number;
   version: VersionResponse | null;
+  /** GET /api/live — a versão do quadro que a recaída do canal ao vivo
+   *  consulta quando o stream não abre. */
+  liveVersion: string;
   /** Comportamento do POST /api/invites/accept: `inviteAcceptFail` (ex.:
    *  400, 409) tem precedência; senão 201 com `sessionUser`. */
   inviteAcceptFail?: number;
@@ -118,8 +125,10 @@ export function defaultHubState(
     pairingFail: undefined,
     passwordFail: undefined,
     revokeInviteFail: undefined,
+    sessionFail: undefined,
     sessionUser: TEST_USER,
     version: VERSION_RESPONSE,
+    liveVersion: "v0",
   });
   return {
     ...base,
@@ -152,6 +161,9 @@ export function fakeHubFetch(state: HubApiState) {
 
     if (url === "/api/session") {
       if (method === "DELETE") return noContent();
+      if (state.sessionFail !== undefined) {
+        return jsonResponse(state.sessionFail, { error: "unauthenticated" });
+      }
       if (method === "POST") return jsonResponse(200, { user: state.sessionUser });
       return jsonResponse(200, { user: state.sessionUser });
     }
@@ -276,6 +288,9 @@ export function fakeHubFetch(state: HubApiState) {
     if (url === "/api/version") {
       return state.version ? jsonResponse(200, state.version) : jsonResponse(500, { error: "boom" });
     }
+    if (url === "/api/live") {
+      return jsonResponse(200, { version: state.liveVersion });
+    }
     return jsonResponse(404, { error: "not_found" });
   };
 }
@@ -302,6 +317,8 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
         <I18nProvider>
           <ThemeProvider>
             <TooltipProvider delay={0}>
+              {/* Canal ao vivo do quadro (mesmo papel que na raiz do app). */}
+              <LiveChannel />
               <Outlet />
             </TooltipProvider>
           </ThemeProvider>
@@ -340,6 +357,13 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
   const accessRoute = createRoute({ component: AccessPage, getParentRoute: () => rootRoute, path: "/access" });
   const settingsRoute = createRoute({ component: SettingsPage, getParentRoute: () => rootRoute, path: "/settings" });
   const inviteRoute = createRoute({ component: InviteScreen, getParentRoute: () => rootRoute, path: "/invite" });
+  // Rota de login mínima: o logout real (AppShell) e o 401 central navegam
+  // para /login — sem a rota o router do harness não tem destino.
+  const loginRoute = createRoute({
+    component: () => <div data-testid="login-screen">login</div>,
+    getParentRoute: () => rootRoute,
+    path: "/login",
+  });
   const router = createRouter({
     history: createMemoryHistory({ initialEntries: [initial] }),
     routeTree: rootRoute.addChildren([
@@ -354,6 +378,7 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
       accessRoute,
       settingsRoute,
       inviteRoute,
+      loginRoute,
     ]),
   });
   registerUnauthorizedRedirect(queryClient, router);
