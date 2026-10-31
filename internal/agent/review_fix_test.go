@@ -37,8 +37,7 @@ func reviewResp(r *http.Request, status int, h http.Header) *http.Response {
 // Run applies (agentTransport), so the probes exercise the policy the
 // agent runs with.
 func reviewState(rt reviewRT) *state {
-	c := &http.Client{Transport: rt}
-	agentTransport(c)
+	c := agentTransport(&http.Client{Transport: rt})
 	return &state{
 		now:      func() time.Time { return testStart },
 		http:     c,

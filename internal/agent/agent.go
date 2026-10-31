@@ -67,7 +67,7 @@ func Run(ctx context.Context, cfg Config) error {
 	if httpc == nil {
 		httpc = &http.Client{}
 	}
-	agentTransport(httpc)
+	httpc = agentTransport(httpc)
 	interval := cfg.Interval
 	if interval == 0 {
 		interval = DefaultInterval
@@ -280,24 +280,27 @@ func noRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
-// agentTransport applies the agent's transport policy to the client
-// Run uses, whatever client the caller provided.
-func agentTransport(c *http.Client) {
-	c.CheckRedirect = noRedirect
+// agentTransport returns a copy of the client with the agent's
+// transport policy: the caller's client, shared or not, keeps its own
+// redirect policy, and two runs never write the same client.
+func agentTransport(c *http.Client) *http.Client {
+	cp := *c
+	cp.CheckRedirect = noRedirect
+	return &cp
 }
 
-// ingestEndpoint joins the base URL and the ingest path with net/url:
-// the trailing slash of the base path does not leak into the endpoint,
-// so the base works with or without it. A parse failure returns the
-// fixed error: the URL, or a piece of it, never reaches the error.
+// ingestEndpoint joins the base URL and the ingest path with net/url,
+// over the escaped base path: the trailing slash of the base does not
+// leak into the endpoint, and an encoded separator of the base (a %2F)
+// stays encoded instead of becoming a real one. A parse failure
+// returns the fixed error: the URL, or a piece of it, never reaches
+// the error.
 func ingestEndpoint(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", errHubURLInvalid
 	}
-	u.Path = strings.TrimSuffix(u.Path, "/") + ingestPath
-	u.RawPath = ""
-	return u.String(), nil
+	return u.JoinPath(strings.TrimPrefix(ingestPath, "/")).String(), nil
 }
 
 // parseRetryAfter reads the Retry-After header: integer seconds, or an
