@@ -6,59 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/djalmajr/nau/internal/hub/migrate"
-	"github.com/djalmajr/nau/internal/hub/sqld"
+	"github.com/djalmajr/nau/internal/hub/hubtest"
 	"github.com/djalmajr/nau/internal/hub/store"
 	"github.com/djalmajr/nau/internal/inventory"
 )
 
-// realIngestStore builds the client of the real sqld: it drops the
-// tables of a previous run and applies the migrations from zero. It
-// skips when the URL is not set (the test must not run in CI).
-func realIngestStore(t *testing.T) store.Store {
-	t.Helper()
-	u := os.Getenv("NAU_TEST_SQLD_URL")
-	if u == "" {
-		t.Skip("NAU_TEST_SQLD_URL is not set")
-	}
-	c, err := sqld.New(u, os.Getenv("NAU_TEST_SQLD_TOKEN"))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	// The tables of every migration, the children of the foreign keys
-	// first (the sessions and the machines reference the users), so
-	// the reset is re-runnable on a shared database no matter what
-	// the previous packages left behind.
-	for _, name := range []string{
-		"sessions", "machines",
-		"pairings", "pairing_attempts", "ingest_deliveries", "shares",
-		"agent_history", "agents_current", "hidden_counts", "working_hourly",
-		"inventory_snapshots", "login_failures", "invites",
-		"users",
-		"pairing_guard", "ingest_guard", "accounts_guard",
-		"schema_migrations", "hub_meta",
-	} {
-		if _, err := c.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + name}); err != nil {
-			t.Fatalf("drop %s: %v", name, err)
-		}
-	}
-	r := &migrate.Runner{Store: c, Now: time.Now}
-	if err := r.Apply(ctx); err != nil {
-		t.Fatalf("Apply the migrations: %v", err)
-	}
-	return c
-}
-
 // TestSQLDApplyAndQueries: the Apply rules and the queries against the
 // real sqld, the inventories coming from the strict reader.
 func TestSQLDApplyAndQueries(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -218,7 +177,7 @@ func TestSQLDApplyAndQueries(t *testing.T) {
 // TestSQLDRetainBoundaries: the row at the exact boundary stays, the
 // one older than it goes.
 func TestSQLDRetainBoundaries(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const now int64 = 1794067200000 // on the hour
@@ -290,7 +249,7 @@ func (p *pauseRealBatch) Batch(ctx context.Context, v []store.Stmt) ([]store.Res
 // state is the newer inventory and its history has no row of the
 // older one.
 func TestSQLDConcurrentApplyKeepsTheNewer(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const g int64 = 1793376000000
@@ -342,7 +301,7 @@ func TestSQLDConcurrentApplyKeepsTheNewer(t *testing.T) {
 // join counts each machine once, and the aggregates sum over the
 // chunks.
 func TestSQLDLargeMachineList(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	const n = 1200
@@ -453,7 +412,7 @@ func (a *alwaysMovingSQL) Batch(ctx context.Context, stmts []store.Stmt) ([]stor
 // ErrConflict. The guard failing on every attempt still retries and
 // conflicts on the third.
 func TestSQLDKeepsTheOriginalErrorWhenTheGuardIsIntact(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	const g int64 = 1793376000000
@@ -517,7 +476,7 @@ func TestSQLDKeepsTheOriginalErrorWhenTheGuardIsIntact(t *testing.T) {
 // the loser retries, applies when it carries the newer version and
 // returns Applied: false when it carries the equal one.
 func TestSQLDConcurrentFirstIngestOfANewMachine(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	const g int64 = 1793376000000
@@ -630,7 +589,7 @@ func (w *failingSnapshotWrite) Batch(ctx context.Context, stmts []store.Stmt) ([
 // is a failure injection of the fixture, not a claim about production
 // triggers.
 func TestSQLDKeepsTheOriginalErrorOnTheSnapshotWrite(t *testing.T) {
-	st := realIngestStore(t)
+	st := hubtest.SQLD(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	const g int64 = 1793376000000

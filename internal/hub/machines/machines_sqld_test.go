@@ -7,15 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/djalmajr/nau/internal/hub"
 	"github.com/djalmajr/nau/internal/hub/accounts"
-	"github.com/djalmajr/nau/internal/hub/migrate"
-	"github.com/djalmajr/nau/internal/hub/sqld"
+	"github.com/djalmajr/nau/internal/hub/hubtest"
 	"github.com/djalmajr/nau/internal/hub/store"
 )
 
@@ -37,114 +34,39 @@ var sqldMachineTables = []string{
 	"users", "accounts_guard", "hub_meta",
 }
 
-// hubZeroTables is the order of every table the hub migrations create:
-// the children first, so the foreign keys never block the delete or
-// the drop of a parent.
-var hubZeroTables = []string{
-	"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
-	"agent_history", "agents_current", "hidden_counts", "working_hourly",
-	"inventory_snapshots", "login_failures", "sessions", "invites",
-	"users", "pairing_guard", "ingest_guard", "accounts_guard",
-	"schema_migrations",
-	"hub_meta",
-}
-
-// resetToZero brings the shared database to the pristine state: it
-// deletes the rows and drops the tables of every migration (the
-// children first, so the foreign keys never block) and leaves no
-// schema. The suite re-applies the migrations from zero, so the test
-// is re-runnable no matter what the previous packages left behind.
-func resetToZero(t *testing.T, client *sqld.Client, ctx context.Context) {
-	t.Helper()
-	res, err := client.Execute(ctx, store.Stmt{SQL: `SELECT name FROM sqlite_master WHERE type = 'table'`})
-	if err != nil {
-		t.Fatalf("list the tables: %v", err)
-	}
-	exists := make(map[string]bool, len(res.Rows))
-	for _, row := range res.Rows {
-		if name, ok := row[0].(string); ok {
-			exists[name] = true
-		}
-	}
-	var stmts []store.Stmt
-	for _, table := range hubZeroTables {
-		if exists[table] {
-			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
-		}
-	}
-	for _, table := range hubZeroTables {
-		if exists[table] {
-			stmts = append(stmts, store.Stmt{SQL: "DROP TABLE " + table})
-		}
-	}
-	if len(stmts) == 0 {
-		return
-	}
-	if _, err := client.Batch(ctx, stmts); err != nil {
-		t.Fatalf("zero reset: %v", err)
-	}
-}
-
 // TestSQLDMachinesScenarios runs the whole scenario suite over the SQL
 // implementation against a real sqld, named by NAU_TEST_SQLD_URL, with
 // the real accounts (the sessions are the signed cookies) and the real
-// ingest.Apply. The migrations are applied first; each scenario
-// empties the tables so it starts from the empty state. The test is
-// re-runnable on the same database. The tagged tests of the hub
-// packages share the instance's default database and one of them
-// reinitializes the schema, so run the tagged suite with -p 1 (the
-// packages sequential).
+// ingest.Apply. The helper takes the lock of the shared database,
+// reinitializes the schema and holds the lock for the whole test, so
+// the scenarios run on a fresh schema and the tagged suites run
+// without -p 1. Each scenario empties the tables so it starts from
+// the empty state. The test is re-runnable on the same database.
 func TestSQLDMachinesScenarios(t *testing.T) {
-	url := os.Getenv("NAU_TEST_SQLD_URL")
-	if url == "" {
-		t.Skip("set NAU_TEST_SQLD_URL to run the machines scenarios against a real sqld")
-	}
-	client, err := sqld.New(url, "")
-	if err != nil {
-		t.Fatalf("sqld.New: %v", err)
-	}
+	st := hubtest.SQLD(t)
 	ctx := context.Background()
-	resetToZero(t, client, ctx)
-	if err := (&migrate.Runner{Store: client, Now: time.Now}).Apply(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	// The rows of the account and machine tables go away at the end
-	// (the tables stay: the migrations are one-way), so the dropAll
-	// of the sqld integration test sees the empty state.
-	t.Cleanup(func() {
-		stmts := make([]store.Stmt, 0, 8)
-		for _, table := range []string{
-			"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
-			"login_failures", "sessions", "invites", "users",
-		} {
-			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
-		}
-		if _, err := client.Batch(ctx, stmts); err != nil {
-			t.Logf("the cleanup of the rows: %v", err)
-		}
-	})
 	// The machine tables of the migration 0003.
-	res, err := client.Execute(ctx, store.Stmt{SQL: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('machines', 'pairings', 'pairing_attempts', 'ingest_deliveries', 'pairing_guard') ORDER BY name`})
+	res, err := st.Execute(ctx, store.Stmt{SQL: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('machines', 'pairings', 'pairing_attempts', 'ingest_deliveries', 'pairing_guard') ORDER BY name`})
 	if err != nil {
 		t.Fatalf("list the machine tables: %v", err)
 	}
 	if len(res.Rows) != 5 {
 		t.Fatalf("the machine tables = %d, want 5", len(res.Rows))
 	}
-	runMachinesScenarios(t, func(t *testing.T) *scenario { return freshSQLScenario(t, client) })
+	runMachinesScenarios(t, func(t *testing.T) *scenario { return freshSQLScenario(t, st) })
 }
 
 // freshSQLScenario empties the tables, builds the real layers over the
 // fake clock and creates the users (the bootstrap owner and the two
 // members, through the real invites).
-func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
+func freshSQLScenario(t *testing.T, st store.Store) *scenario {
 	t.Helper()
 	ctx := context.Background()
 	stmts := make([]store.Stmt, 0, len(sqldMachineTables))
 	for _, table := range sqldMachineTables {
 		stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
 	}
-	if _, err := client.Batch(ctx, stmts); err != nil {
+	if _, err := st.Batch(ctx, stmts); err != nil {
 		t.Fatalf("fresh scenario: %v", err)
 	}
 	clock := newFakeClock()
@@ -153,7 +75,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		t.Fatalf("the session key of the suite: %v", err)
 	}
 	auth, err := accounts.New(accounts.Config{
-		Store:          accounts.NewSQL(client),
+		Store:          accounts.NewSQL(st),
 		SessionKey:     sessionKey,
 		BootstrapToken: testBootstrapToken,
 		Now:            clock.Now,
@@ -162,8 +84,8 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		t.Fatalf("accounts.New: %v", err)
 	}
 	svc, err := New(Config{
-		Store:          client,
-		Machines:       NewSQL(client),
+		Store:          st,
+		Machines:       NewSQL(st),
 		ClientIPHeader: "X-Test-Client-IP",
 		SessionUser:    auth.SessionUser,
 		Now:            clock.Now,
@@ -172,7 +94,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 	if err != nil {
 		t.Fatalf("machines.New: %v", err)
 	}
-	srv := hub.New(hub.Deps{Store: client, Now: clock.Now, Version: "dev"}, nil)
+	srv := hub.New(hub.Deps{Store: st, Now: clock.Now, Version: "dev"}, nil)
 	auth.Register(srv)
 	svc.Register(srv)
 
@@ -195,7 +117,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		t:       t,
 		ctx:     ctx,
 		srv:     srv,
-		store:   NewSQL(client),
+		store:   NewSQL(st),
 		clock:   clock,
 		users:   users,
 		cookies: cookies,
