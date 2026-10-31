@@ -80,6 +80,14 @@ The secrets always come from the environment, never from the image. The environm
 
 Today `hub serve` reads `NAU_HUB_DB_URL` and `NAU_HUB_DB_TOKEN` from that list; the remaining variables are read by the hub's account and cron surfaces as they land.
 
+The tagged integration suites of the hub packages run against a real sqld named by `NAU_TEST_SQLD_URL` and skip when it is empty:
+
+```text
+NAU_TEST_SQLD_URL=<url> go test -tags sqld ./internal/hub/...
+```
+
+They share the instance's default database and serialize themselves: the helper in `internal/hub/hubtest` takes a per-database lock, reinitializes the schema for each suite and holds the lock for the whole test, so the suites run without `-p 1`.
+
 ## Status
 
 The hub is under construction; the soho inventory is the only source.

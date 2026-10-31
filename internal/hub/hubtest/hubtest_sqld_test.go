@@ -1,0 +1,89 @@
+//go:build sqld
+
+package hubtest
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/djalmajr/nau/internal/hub/store"
+)
+
+// TestSQLDResetDropsTablesWhateverTheForeignKeys seeds tables the hub
+// does not know, linked by foreign keys with rows that reference each
+// other: an extra child of users, and an extra parent created before
+// its child, so the listing returns the parent first. The reset still
+// drops every table and applies the migrations again.
+func TestSQLDResetDropsTablesWhateverTheForeignKeys(t *testing.T) {
+	st := SQLD(t)
+	ctx := t.Context()
+	now := time.Now().UnixMilli()
+	seed := []store.Stmt{
+		{SQL: `INSERT INTO users (id, email_norm, email, name, password_hash, role, created_ms) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			Args: []store.Value{"u-reset", "ana@example.test", "ana@example.test", "Ana Exemplo", "not-a-hash", "member", now}},
+		{SQL: `CREATE TABLE zz_extra_child_of_users (id INTEGER PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id))`},
+		{SQL: `INSERT INTO zz_extra_child_of_users (id, user_id) VALUES (1, 'u-reset')`},
+		{SQL: `CREATE TABLE "a ""parent""" (id INTEGER PRIMARY KEY)`},
+		{SQL: `CREATE TABLE b_child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES "a ""parent"""(id))`},
+		{SQL: `INSERT INTO "a ""parent""" (id) VALUES (1)`},
+		{SQL: `INSERT INTO b_child (id, parent_id) VALUES (1, 1)`},
+	}
+	for i, stmt := range seed {
+		if _, err := st.Execute(ctx, stmt); err != nil {
+			t.Fatalf("seed statement %d: %v", i, err)
+		}
+	}
+
+	resetSchema(t, st)
+
+	res, err := st.Execute(ctx, store.Stmt{SQL: `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('zz_extra_child_of_users', 'a "parent"', 'b_child')`})
+	if err != nil {
+		t.Fatalf("list the extra tables: %v", err)
+	}
+	if len(res.Rows) != 0 {
+		t.Fatalf("extra tables left after the reset: %v", res.Rows)
+	}
+	res, err = st.Execute(ctx, store.Stmt{SQL: `SELECT COUNT(*) FROM users`})
+	if err != nil {
+		t.Fatalf("the users table after the reset: %v", err)
+	}
+	if n, _ := res.Rows[0][0].(int64); n != 0 {
+		t.Fatalf("users after the reset = %v, want an empty table from the migrations", res.Rows[0][0])
+	}
+}
+
+// TestSQLDResetEndsEmptyOnTheLastPass seeds a chain of maxDropPasses
+// tables, each a child of the previous one with a linked row, created
+// parent first: every pass drops only the last child, so the last
+// table falls on the last allowed pass. The reset must report the
+// empty database as a success.
+func TestSQLDResetEndsEmptyOnTheLastPass(t *testing.T) {
+	st := SQLD(t)
+	ctx := t.Context()
+	DropAll(t, st)
+	var stmts []store.Stmt
+	for i := 0; i < maxDropPasses; i++ {
+		name := fmt.Sprintf("chain_%02d", i)
+		create := fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY`, name)
+		insert := fmt.Sprintf(`INSERT INTO %s VALUES (1`, name)
+		if i > 0 {
+			create += fmt.Sprintf(`, parent_id INTEGER REFERENCES chain_%02d(id)`, i-1)
+			insert += `, 1`
+		}
+		stmts = append(stmts, store.Stmt{SQL: create + `)`}, store.Stmt{SQL: insert + `)`})
+	}
+	if _, err := st.Batch(ctx, stmts); err != nil {
+		t.Fatalf("seed the chain: %v", err)
+	}
+	if err := dropAll(st, ctx); err != nil {
+		t.Fatalf("drop the chain of %d tables: %v", maxDropPasses, err)
+	}
+	res, err := st.Execute(ctx, store.Stmt{SQL: `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'chain_%'`})
+	if err != nil {
+		t.Fatalf("count the chain tables: %v", err)
+	}
+	if n, _ := res.Rows[0][0].(int64); n != 0 {
+		t.Fatalf("chain tables left = %v, want 0", res.Rows[0][0])
+	}
+}
