@@ -66,6 +66,17 @@ type doctorLine struct {
 		Bin     string `json:"bin"`
 		Version string `json:"version"`
 	} `json:"herdr_soho"`
+	Agent struct {
+		Connected bool    `json:"connected"`
+		Hub       *string `json:"hub"`
+		MachineID *string `json:"machine_id"`
+		Health    *struct {
+			State         string `json:"state"`
+			LastOKMS      int64  `json:"last_ok_ms"`
+			LastAttemptMS int64  `json:"last_attempt_ms"`
+			LastError     string `json:"last_error"`
+		} `json:"health"`
+	} `json:"agent"`
 }
 
 // TestDoctorFound: a found backend that answers --version, with a set
@@ -269,5 +280,110 @@ func TestDoctorBadUsage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"status":"2"`) {
 		t.Errorf("stdout %q lacks the exit-2 line", out.String())
+	}
+}
+
+// TestDoctorAgentNotConnected: without hub.json and without a health
+// file the agent block is disconnected with nulls.
+func TestDoctorAgentNotConnected(t *testing.T) {
+	cfgDir := t.TempDir()
+	stdout, stderr, exit := runDoctor(t, cfgDir, false)
+	if exit != 0 {
+		t.Fatalf("doctor exit = %d, stderr %q", exit, stderr)
+	}
+	if !strings.Contains(stdout, `"agent":{"connected":false,"hub":null,"machine_id":null,"health":null}`) {
+		t.Errorf("doctor stdout lacks the disconnected agent block:\n%s", stdout)
+	}
+}
+
+// TestDoctorAgentConnectedWithHealth: a valid hub.json and a saved
+// health file give the connected agent block with the scheme-and-host
+// hub and the four health fields, and the key never reaches the line.
+func TestDoctorAgentConnectedWithHealth(t *testing.T) {
+	const hubKey = "sekret-doctor-agent-key"
+	cfgDir := t.TempDir()
+	hub := `{"url":"http://127.0.0.1:17440","machine_id":"machine-m1","key":"` + hubKey + `"}` + "\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "hub.json"), []byte(hub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	health := `{"state":"ok","last_ok_ms":1700000000000,"last_attempt_ms":1700000000010,"last_error":"","hub":"http://127.0.0.1:17440"}` + "\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "agent-state.json"), []byte(health), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit := runDoctor(t, cfgDir, false)
+	if exit != 0 {
+		t.Fatalf("doctor exit = %d, stderr %q", exit, stderr)
+	}
+	var line doctorLine
+	if err := json.Unmarshal([]byte(stdout), &line); err != nil {
+		t.Fatalf("doctor stdout %q is not a JSON line: %v", stdout, err)
+	}
+	if !line.Agent.Connected {
+		t.Errorf("agent.connected = false, want true: %q", stdout)
+	}
+	if line.Agent.Hub == nil || *line.Agent.Hub != "http://127.0.0.1:17440" {
+		t.Errorf("agent.hub = %v, want the scheme and host", line.Agent.Hub)
+	}
+	if line.Agent.MachineID == nil || *line.Agent.MachineID != "machine-m1" {
+		t.Errorf("agent.machine_id = %v, want machine-m1", line.Agent.MachineID)
+	}
+	if line.Agent.Health == nil {
+		t.Fatalf("agent.health = null, want the saved health: %q", stdout)
+	}
+	if line.Agent.Health.State != "ok" || line.Agent.Health.LastOKMS != 1700000000000 ||
+		line.Agent.Health.LastAttemptMS != 1700000000010 || line.Agent.Health.LastError != "" {
+		t.Errorf("agent.health = %+v, want the saved health", *line.Agent.Health)
+	}
+	if strings.Contains(stdout, hubKey) {
+		t.Fatalf("doctor stdout carries the machine key:\n%s", stdout)
+	}
+	if stderr != "" {
+		t.Errorf("doctor stderr = %q, want empty", stderr)
+	}
+}
+
+// TestDoctorAgentHealthWithoutConnection: a saved health file without
+// a valid hub.json still reports the health, disconnected.
+func TestDoctorAgentHealthWithoutConnection(t *testing.T) {
+	cfgDir := t.TempDir()
+	health := `{"state":"hub_unreachable","last_ok_ms":0,"last_attempt_ms":1700000000020,"last_error":"hub_unreachable","hub":"https://hub.example"}` + "\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "agent-state.json"), []byte(health), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit := runDoctor(t, cfgDir, false)
+	if exit != 0 {
+		t.Fatalf("doctor exit = %d, stderr %q", exit, stderr)
+	}
+	var line doctorLine
+	if err := json.Unmarshal([]byte(stdout), &line); err != nil {
+		t.Fatalf("doctor stdout %q is not a JSON line: %v", stdout, err)
+	}
+	if line.Agent.Connected || line.Agent.Hub != nil || line.Agent.MachineID != nil {
+		t.Errorf("agent = %+v, want disconnected with nulls", line.Agent)
+	}
+	if line.Agent.Health == nil || line.Agent.Health.State != "hub_unreachable" ||
+		line.Agent.Health.LastAttemptMS != 1700000000020 || line.Agent.Health.LastError != "hub_unreachable" {
+		t.Errorf("agent.health = %+v, want the saved health", line.Agent.Health)
+	}
+}
+
+// TestDoctorAgentInvalidHubFile: a hub.json with an empty field is not
+// a connection.
+func TestDoctorAgentInvalidHubFile(t *testing.T) {
+	cfgDir := t.TempDir()
+	hub := `{"url":"http://127.0.0.1:17440","machine_id":"machine-m1","key":""}` + "\n"
+	if err := os.WriteFile(filepath.Join(cfgDir, "hub.json"), []byte(hub), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit := runDoctor(t, cfgDir, false)
+	if exit != 0 {
+		t.Fatalf("doctor exit = %d, stderr %q", exit, stderr)
+	}
+	var line doctorLine
+	if err := json.Unmarshal([]byte(stdout), &line); err != nil {
+		t.Fatalf("doctor stdout %q is not a JSON line: %v", stdout, err)
+	}
+	if line.Agent.Connected || line.Agent.Hub != nil || line.Agent.MachineID != nil {
+		t.Errorf("agent = %+v, want disconnected for an invalid hub file", line.Agent)
 	}
 }

@@ -1,8 +1,8 @@
 // Package cli implements the nau command line: the command table
-// with the NAU_NOWRITE read-only gating and the shared output
-// conventions (one JSON line on stdout, diagnostics on stderr, errors as
-// {"status":"<code>","motivo":"<text>"}), with the commands config,
-// doctor, version and help.
+// (config, doctor, hub, agent, version, help) with the NAU_NOWRITE
+// read-only gating and the shared output conventions (one JSON line on
+// stdout, diagnostics on stderr, errors as
+// {"status":"<code>","motivo":"<text>"}).
 package cli
 
 import (
@@ -42,6 +42,9 @@ var commands = []command{
 	// DJA-622: the machine connect to the hub (writes the local
 	// hub.json credential once the pairing is confirmed)
 	{"connect", true, true, cmdConnect},
+	// DJA-626: the per-machine agent (reads hub.json, writes the health
+	// file in the config dir)
+	{"agent", true, true, cmdAgent},
 }
 
 // Run executes args[0] as a command and returns its exit code. An unknown

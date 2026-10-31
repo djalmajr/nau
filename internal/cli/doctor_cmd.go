@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
 
+	"github.com/djalmajr/nau/internal/agent"
 	"github.com/djalmajr/nau/internal/config"
 	"github.com/djalmajr/nau/internal/soho"
 )
@@ -23,9 +25,34 @@ type doctorSoho struct {
 	Version string `json:"version"`
 }
 
+// doctorAgentHealth is the health sub-block of the doctor's agent
+// block: the saved health without the hub field.
+type doctorAgentHealth struct {
+	State         string `json:"state"`
+	LastOKMS      int64  `json:"last_ok_ms"`
+	LastAttemptMS int64  `json:"last_attempt_ms"`
+	LastError     string `json:"last_error"`
+}
+
+// doctorAgent is the agent block of the doctor line: the connection
+// from hub.json and the saved health. It never carries the key, and
+// the hub is reduced to its scheme and host.
+type doctorAgent struct {
+	Connected bool               `json:"connected"`
+	Hub       *string            `json:"hub"`
+	MachineID *string            `json:"machine_id"`
+	Health    *doctorAgentHealth `json:"health"`
+}
+
+// doctorAgentBlock reads hub.json and the saved health from the config
+// directory. connected is true when hub.json is valid; the health
+// block is present whenever a health file has been written, whatever
+// the connection says.
+
 // cmdDoctor implements `doctor`: a read-only JSON line with the version,
-// the config directory, the machine label and the soho backend block. It
-// works under NAU_NOWRITE=1 and creates no file; the version probe is a
+// the config directory, the machine label, the soho backend block and the
+// agent block (the hub connection and the saved agent health). It works
+// under NAU_NOWRITE=1 and creates no file; the version probe is a
 // bounded `--version` run of the resolved backend, and a missing or
 // non-answering backend reports found=false with an empty version rather
 // than a failure. It exits 0 whatever the backend reports, and 2 on bad
@@ -48,18 +75,46 @@ func cmdDoctor(args []string, env Env) int {
 		so.Version = sohoVersion(env, resolved)
 	}
 	line := struct {
-		Version      string     `json:"version"`
-		ConfigDir    string     `json:"config_dir"`
-		MachineLabel string     `json:"machine_label"`
-		HerdrSoho    doctorSoho `json:"herdr_soho"`
+		Version      string      `json:"version"`
+		ConfigDir    string      `json:"config_dir"`
+		MachineLabel string      `json:"machine_label"`
+		HerdrSoho    doctorSoho  `json:"herdr_soho"`
+		Agent        doctorAgent `json:"agent"`
 	}{
 		Version:      currentVersion(),
 		ConfigDir:    env.ConfigDir,
 		MachineLabel: cfg.MachineLabel,
 		HerdrSoho:    so,
+		Agent:        doctorAgentBlock(env.ConfigDir),
 	}
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", mustJSON(line))
 	return 0
+}
+
+// doctorAgentBlock builds the agent block from the config directory:
+
+// doctorAgentBlock builds the agent block from the config directory:
+// the hub connection from hub.json and the last saved health. The key
+// never reaches the line.
+func doctorAgentBlock(cfgDir string) doctorAgent {
+	block := doctorAgent{}
+	if hubCfg, err := agent.LoadHubFile(filepath.Join(cfgDir, "hub.json")); err == nil {
+		hub := agent.HostOnly(hubCfg.HubURL)
+		machineID := hubCfg.MachineID
+		block.Connected = true
+		block.Hub = &hub
+		block.MachineID = &machineID
+	}
+	if h, err := agent.ReadHealth(filepath.Join(cfgDir, "agent-state.json")); err == nil {
+		health := doctorAgentHealth{
+			State:         h.State,
+			LastOKMS:      h.LastOKMS,
+			LastAttemptMS: h.LastAttemptMS,
+			LastError:     h.LastError,
+		}
+		block.Health = &health
+	}
+	return block
 }
 
 // currentVersion returns the version string the version command prints.
