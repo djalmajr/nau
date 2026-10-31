@@ -298,6 +298,28 @@ func TestHubServeStartsAndShutsDownCleanly(t *testing.T) {
 	}
 }
 
+func TestHubServeRegistersTheLiveRoutes(t *testing.T) {
+	st := newHubFakeStore()
+	listen, stop := startHubServe(t, map[string]string{
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
+	}, st)
+	// The two routes are registered: without a session they answer
+	// the 401 of the session check, not the 404 of the router.
+	live := doGet(t, "http://"+listen+"/api/live")
+	if live.status != 401 || live.body != `{"error":"unauthenticated"}` {
+		t.Fatalf("GET /api/live without a session = %d %q, want the 401", live.status, live.body)
+	}
+	events := doGet(t, "http://"+listen+"/api/events")
+	if events.status != 401 || events.body != `{"error":"unauthenticated"}` {
+		t.Fatalf("GET /api/events without a session = %d %q, want the 401", events.status, events.body)
+	}
+	out, _, code := stop()
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0 (stdout %q)", code, out)
+	}
+}
+
 func TestHubServesStaticFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>hub</html>"), 0o600); err != nil {
