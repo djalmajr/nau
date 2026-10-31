@@ -330,6 +330,12 @@ export interface VersionResponse {
   version: string;
 }
 
+/** Versão do quadro da sessão (GET /api/live): os 32 caracteres que mudam
+ *  quando o que o usuário pode ver muda. */
+export interface LiveVersionResponse {
+  version: string;
+}
+
 export const api = {
   /** GET /api/session — 200 { user } ou 401 { error: "unauthenticated" }. */
   getSession: (signal?: AbortSignal) => req<SessionResponse>("/session", { signal }),
@@ -416,4 +422,9 @@ export const api = {
   /** GET /api/version — 200 { version }. */
   getVersion: (options: RequestOptions = {}) =>
     req<VersionResponse>("/version", { signal: options.signal }, options.user),
+  /** GET /api/live — 200 { version } (a versão do quadro da sessão) ou 401
+   *  sessão perdida (passa pelo tratamento central de 401). A recaída do
+   *  canal ao vivo consulta aqui quando o stream não abre. */
+  getLiveVersion: (options: RequestOptions = {}) =>
+    req<LiveVersionResponse>("/live", { signal: options.signal }, options.user),
 };

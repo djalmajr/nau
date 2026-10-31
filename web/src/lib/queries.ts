@@ -1,11 +1,14 @@
 // Queries TanStack Query dos endpoints de leitura do hub. O tempo real
-// chega num card seguinte; por enquanto a atualização periódica de 15 s
-// mantém as telas vivas (a pílula do header continua "offline").
+// chega pelo canal de lib/live: com o stream aberto, as queries do quadro
+// deixam de refazer em intervalo (o evento `board` invalida); sem stream,
+// o intervalo de 15 s de hoje volta e a recaída consulta GET /api/live
+// (a pílula do header acompanha o status em lib/live-status).
 // O `signal` da query vai até o fetch (lib/api) e a id do usuário, que já
 // está na chave, vai junto na chamada: o 401 atrasado de uma conta anterior
 // é cancelado no clear() e/ou ignorado pelo handler central.
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { useLiveStatus } from "./live-status";
 import { useSession } from "./session";
 
 /** Intervalo de atualização periódica das telas de dados. */
@@ -32,13 +35,20 @@ function useSessionUserId(): string | undefined {
   return data?.id;
 }
 
+/** O intervalo de refaz das queries do quadro: com o stream ao vivo o
+ *  evento `board` avisa e o intervalo sai; sem stream (reconectando ou
+ *  offline, com a recaída por consulta) volta o intervalo de hoje. */
+function useBoardRefetchInterval(): number | false {
+  return useLiveStatus() === "live" ? false : AGENT_REFRESH_MS;
+}
+
 /** GET /api/agents — a UI filtra a lista completa no cliente. */
 export function useAgents() {
   const userId = useSessionUserId();
   return useQuery({
     queryKey: AGENTS_QUERY_KEY(userId ?? "anonymous"),
     queryFn: ({ signal }) => api.getAgents({ signal, user: userId }),
-    refetchInterval: AGENT_REFRESH_MS,
+    refetchInterval: useBoardRefetchInterval(),
     enabled: userId !== undefined,
   });
 }
@@ -49,7 +59,7 @@ export function useAgent(id: string) {
   return useQuery({
     queryKey: AGENT_QUERY_KEY(userId ?? "anonymous", id),
     queryFn: ({ signal }) => api.getAgent(id, { signal, user: userId }),
-    refetchInterval: AGENT_REFRESH_MS,
+    refetchInterval: useBoardRefetchInterval(),
     enabled: userId !== undefined,
   });
 }
@@ -60,7 +70,7 @@ export function useOverview() {
   return useQuery({
     queryKey: OVERVIEW_QUERY_KEY(userId ?? "anonymous"),
     queryFn: ({ signal }) => api.getOverview({ signal, user: userId }),
-    refetchInterval: AGENT_REFRESH_MS,
+    refetchInterval: useBoardRefetchInterval(),
     enabled: userId !== undefined,
   });
 }
@@ -71,7 +81,7 @@ export function useMachines() {
   return useQuery({
     queryKey: MACHINES_QUERY_KEY(userId ?? "anonymous"),
     queryFn: ({ signal }) => api.getMachines({ signal, user: userId }),
-    refetchInterval: AGENT_REFRESH_MS,
+    refetchInterval: useBoardRefetchInterval(),
     enabled: userId !== undefined,
   });
 }
@@ -106,6 +116,20 @@ export function useVersion() {
     refetchInterval: false,
     enabled: userId !== undefined,
   });
+}
+
+/** Invalida as queries do quadro do usuário (lista de agentes, detalhes,
+ *  visão geral, máquinas e desenvolvedores): é o que o canal ao vivo
+ *  (lib/live) chama quando a versão do quadro muda, seja pelo evento
+ *  `board` do stream ou pela leitura do GET /api/live na recaída. Usa as
+ *  chaves existentes acima (o detalhe por prefixo, que cobre os detalhes
+ *  daquela conta); não inventa chave nova. */
+export function invalidateBoardQueries(queryClient: QueryClient, userId: string): void {
+  void queryClient.invalidateQueries({ queryKey: AGENTS_QUERY_KEY(userId) });
+  void queryClient.invalidateQueries({ queryKey: ["agents", "detail", userId] as const });
+  void queryClient.invalidateQueries({ queryKey: OVERVIEW_QUERY_KEY(userId) });
+  void queryClient.invalidateQueries({ queryKey: MACHINES_QUERY_KEY(userId) });
+  void queryClient.invalidateQueries({ queryKey: DEVELOPERS_QUERY_KEY(userId) });
 }
 
 // Mutações: cada uma invalida as queries que o efeito dela afeta (a chave
