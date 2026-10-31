@@ -50,6 +50,15 @@ type Request struct {
 	Header Header
 	// Body is the request body, in bytes (bounded by the adapter).
 	Body []byte
+	// PathParams carries the values of the named path segments of the
+	// route the request matched, when the route has any.
+	PathParams map[string]string
+}
+
+// PathParam returns the value of the named path segment of the matched
+// route, or the empty string when the route has no such segment.
+func (r Request) PathParam(name string) string {
+	return r.PathParams[name]
 }
 
 // Response is one outgoing response.
@@ -100,12 +109,26 @@ type Deps struct {
 	CronToken string
 }
 
-// Server routes the requests to the handlers by exact method and path,
-// serves the API endpoints (health and version) and the static files,
-// and answers 405 with Allow or 404 not_found where no handler fits.
+// route is one registered route: its method, the path segments and the
+// named parameters. A segment of the form {name} is a parameter: it
+// matches any single segment, including the empty one, and the value
+// reaches the handler through Request.PathParam. Matching is exact by
+// segment: the route and the path have the same number of segments, no
+// prefix is ever a wildcard.
+type route struct {
+	method  string
+	segs    []string
+	params  map[string]int
+	handler Handler
+}
+
+// Server routes the requests to the handlers by exact method and path
+// (with named segments), serves the API endpoints (health and version)
+// and the static files, and answers 405 with Allow or 404 not_found
+// where no handler fits.
 type Server struct {
 	deps   Deps
-	paths  map[string]map[string]Handler
+	routes []route
 	static fs.FS
 }
 
@@ -116,7 +139,6 @@ type Server struct {
 func New(deps Deps, static fs.FS) *Server {
 	s := &Server{
 		deps:   deps,
-		paths:  make(map[string]map[string]Handler),
 		static: static,
 	}
 	s.Handle("GET", apiHealthPath, s.health)
@@ -127,12 +149,58 @@ func New(deps Deps, static fs.FS) *Server {
 	return s
 }
 
-// Handle registers h for the exact method and path.
+// Handle registers h for the method and path. A path segment of the
+// form {name} is a named parameter. A malformed pattern (an empty name
+// or a brace inside the name) registers nothing.
 func (s *Server) Handle(method, path string, h Handler) {
-	if s.paths[path] == nil {
-		s.paths[path] = make(map[string]Handler)
+	segs := splitPath(path)
+	r := route{params: make(map[string]int)}
+	for i, seg := range segs {
+		name, isParam := segName(seg)
+		if isParam && name == "" {
+			return
+		}
+		if isParam {
+			r.params[name] = i
+		}
 	}
-	s.paths[path][method] = h
+	r.method = method
+	r.segs = segs
+	r.handler = h
+	s.routes = append(s.routes, r)
+}
+
+// splitPath is the path without the leading slash, by segment.
+func splitPath(path string) []string {
+	return strings.Split(strings.TrimPrefix(path, "/"), "/")
+}
+
+// segName reports whether the segment is a named parameter and returns
+// its name.
+func segName(seg string) (string, bool) {
+	if len(seg) > 2 && strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
+		return seg[1 : len(seg)-1], true
+	}
+	return "", false
+}
+
+// matchSegs reports whether the route pattern matches the path
+// segments and, when it does, returns the parameter values.
+func (r *route) matchSegs(segs []string) (map[string]string, bool) {
+	if len(r.segs) != len(segs) {
+		return nil, false
+	}
+	out := make(map[string]string, len(r.params))
+	for i, p := range r.segs {
+		if name, isParam := segName(p); isParam {
+			out[name] = segs[i]
+			continue
+		}
+		if p != segs[i] {
+			return nil, false
+		}
+	}
+	return out, true
 }
 
 // Serve routes one request and returns the response. It reads nothing
@@ -151,24 +219,48 @@ func (s *Server) isAPI(path string) bool {
 	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
-// api routes the requests of the API space to the exact handlers.
+// api routes the requests of the API space to the handlers. It picks
+// among the routes whose shape matches the path: a route without
+// parameters wins over a parameterized one, and the registration order
+// breaks the tie. When the path matches routes but not the method, it
+// answers 405 with the Allow of every method registered for the shape.
 func (s *Server) api(ctx context.Context, req Request) Response {
-	methods, ok := s.paths[req.Path]
-	if !ok {
+	segs := splitPath(req.Path)
+	var matched []route
+	for _, r := range s.routes {
+		if _, ok := r.matchSegs(segs); ok {
+			matched = append(matched, r)
+		}
+	}
+	if len(matched) == 0 {
 		return Response{Status: 404, Body: []byte(notFoundBody)}
 	}
-	h, ok := methods[req.Method]
-	if !ok {
-		allow := make([]string, 0, len(methods))
-		for m := range methods {
-			allow = append(allow, m)
+	for _, prefer := range []bool{true, false} {
+		for _, r := range matched {
+			if r.method != req.Method {
+				continue
+			}
+			isLiteral := len(r.params) == 0
+			if isLiteral != prefer {
+				continue
+			}
+			params, _ := r.matchSegs(segs)
+			req.PathParams = params
+			return r.handler(ctx, req)
 		}
-		sort.Strings(allow)
-		resp := Response{Status: 405, Header: make(Header)}
-		resp.Header.Set("Allow", strings.Join(allow, ", "))
-		return resp
 	}
-	return h(ctx, req)
+	allow := make([]string, 0, len(matched))
+	seen := make(map[string]bool, len(matched))
+	for _, r := range matched {
+		if !seen[r.method] {
+			seen[r.method] = true
+			allow = append(allow, r.method)
+		}
+	}
+	sort.Strings(allow)
+	resp := Response{Status: 405, Header: make(Header)}
+	resp.Header.Set("Allow", strings.Join(allow, ", "))
+	return resp
 }
 
 // staticFile serves the path from the static filesystem outside /api/:

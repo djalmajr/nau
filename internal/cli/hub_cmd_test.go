@@ -20,6 +20,15 @@ import (
 	"github.com/djalmajr/nau/internal/hub/store"
 )
 
+// hubTestSessionKey is a fixed test session key: the base64 of 34
+// bytes, well above the 32-byte bound. It is a test value, never a
+// secret.
+const hubTestSessionKey = base64Encode34
+
+// base64Encode34 is the base64 of 34 fixed bytes, inlined so the test
+// has no import cycle risk and stays a literal.
+const base64Encode34 = "dGVzdC1zZXNzaW9uLWtleS0wMDAwMDAwMDAwMDAwMDAwMDAwMDA="
+
 // hubFakeStore is the in-memory store the hub serve tests run against.
 type hubFakeStore struct {
 	mu       sync.Mutex
@@ -199,6 +208,25 @@ type httpResponse struct {
 	headers http.Header
 }
 
+func doPost(t *testing.T, url, body string) httpResponse {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return httpResponse{status: resp.StatusCode, body: string(b), headers: resp.Header}
+}
+
 func doGet(t *testing.T, url string) httpResponse {
 	t.Helper()
 	resp, err := http.Get(url)
@@ -216,7 +244,8 @@ func doGet(t *testing.T, url string) httpResponse {
 func TestHubServeStartsAndShutsDownCleanly(t *testing.T) {
 	st := newHubFakeStore()
 	listen, stop := startHubServe(t, map[string]string{
-		hubEnvDBURL: "http://127.0.0.1:1",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, st)
 	// The server answers while it runs: health and version.
 	health := doGet(t, "http://"+listen+"/api/health")
@@ -241,6 +270,17 @@ func TestHubServeStartsAndShutsDownCleanly(t *testing.T) {
 	if health.headers.Get("Cache-Control") != "no-store" {
 		t.Fatalf("health Cache-Control = %q", health.headers.Get("Cache-Control"))
 	}
+	// The accounts routes are registered: without a session the GET of
+	// the session is 401, and the bootstrap answers 404 when the
+	// bootstrap token is not set (it is optional and unset here).
+	session := doGet(t, "http://"+listen+"/api/session")
+	if session.status != 401 || session.body != `{"error":"unauthenticated"}` {
+		t.Fatalf("GET /api/session without a session = %d %q", session.status, session.body)
+	}
+	bootstrap := doPost(t, "http://"+listen+"/api/bootstrap", `{"token":"x","name":"x","email":"x","password":"x"}`)
+	if bootstrap.status != 404 || bootstrap.body != `{"error":"not_found"}` {
+		t.Fatalf("POST /api/bootstrap without the token = %d %q", bootstrap.status, bootstrap.body)
+	}
 	// The health turns 503 when the store stops answering.
 	st.pingErr = errors.New("database down")
 	health = doGet(t, "http://"+listen+"/api/health")
@@ -264,7 +304,8 @@ func TestHubServesStaticFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen, stop := startHubServe(t, map[string]string{
-		hubEnvDBURL: "http://127.0.0.1:1",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, newHubFakeStore(), "--web", dir)
 	// The root, the SPA fallback and the API, all while it runs.
 	resp := doGet(t, "http://"+listen+"/")
@@ -284,7 +325,8 @@ func TestHubServesStaticFiles(t *testing.T) {
 	}
 	// Without a web dir every path outside /api/ is 404.
 	listen2, stop2 := startHubServe(t, map[string]string{
-		hubEnvDBURL: "http://127.0.0.1:1",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, newHubFakeStore())
 	resp = doGet(t, "http://"+listen2+"/index.html")
 	if resp.status != 404 {
@@ -358,7 +400,8 @@ func TestHubServeWebSymlinkOutsideIsNotServed(t *testing.T) {
 		t.Skipf("cannot create symbolic links here: %v", err)
 	}
 	listen, stop := startHubServe(t, map[string]string{
-		hubEnvDBURL: "http://127.0.0.1:1",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, newHubFakeStore(), "--web", web)
 	// The link that escapes the web root is not served, even with an
 	// index available; the one that stays inside is.
@@ -403,8 +446,9 @@ func TestHubServeMigrationFailureDropsServerMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
-		hubEnvDBURL:   srv.URL,
-		hubEnvDBToken: secret,
+		hubEnvDBURL:      srv.URL,
+		hubEnvDBToken:    secret,
+		hubEnvSessionKey: hubTestSessionKey,
 	}, "hub", "serve")
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
@@ -458,8 +502,9 @@ func TestHubServeMigrationFailureExits4WithoutToken(t *testing.T) {
 	st := newHubFakeStore()
 	st.batchErr = errors.New("the database did not accept the batch")
 	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
-		hubEnvDBURL:   "http://127.0.0.1:1",
-		hubEnvDBToken: "sekret-token-sentinel",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvDBToken:    "sekret-token-sentinel",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, "hub", "serve")
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
@@ -487,8 +532,9 @@ func TestHubServeUnreachableDatabaseExits4(t *testing.T) {
 	// startup migration cannot run, the serve exits 4 with one stderr
 	// line and the token never appears.
 	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
-		hubEnvDBURL:   "http://127.0.0.1:1",
-		hubEnvDBToken: "sekret-token-unreachable",
+		hubEnvDBURL:      "http://127.0.0.1:1",
+		hubEnvDBToken:    "sekret-token-unreachable",
+		hubEnvSessionKey: hubTestSessionKey,
 	}, "hub", "serve")
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
@@ -498,6 +544,50 @@ func TestHubServeUnreachableDatabaseExits4(t *testing.T) {
 	}
 	if strings.Contains(stderr+stdout, "sekret-token-unreachable") {
 		t.Fatalf("the token leaked into the output: %q %q", stderr, stdout)
+	}
+}
+
+func TestHubServeMissingSessionKeyIsBadUsage(t *testing.T) {
+	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
+		hubEnvDBURL: "http://127.0.0.1:1",
+	}, "hub", "serve")
+	if exit != 2 {
+		t.Fatalf("exit = %d, want 2 (stdout %q)", exit, stdout)
+	}
+	if !strings.Contains(stderr, "NAU_HUB_SESSION_KEY is required") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if strings.Contains(stderr+stdout, "NAU_HUB_DB_URL=") {
+		t.Fatalf("the output carries an env value: %q %q", stderr, stdout)
+	}
+	var line map[string]string
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &line); err != nil {
+		t.Fatalf("stdout = %q", stdout)
+	}
+	if line["status"] != "2" {
+		t.Fatalf("status = %q, want 2", line["status"])
+	}
+}
+
+func TestHubServeInvalidSessionKeyIsBadUsage(t *testing.T) {
+	for name, key := range map[string]string{
+		"not base64":       "@@@-not-base64@@@",
+		"under 32 bytes":   "YXNkZg==",
+		"padded too short": "YWJj",
+	} {
+		stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
+			hubEnvDBURL:      "http://127.0.0.1:1",
+			hubEnvSessionKey: key,
+		}, "hub", "serve")
+		if exit != 2 {
+			t.Fatalf("%s: exit = %d, want 2 (stdout %q)", name, exit, stdout)
+		}
+		if !strings.Contains(stderr, "NAU_HUB_SESSION_KEY must be base64 of at least 32 bytes") {
+			t.Fatalf("%s: stderr = %q", name, stderr)
+		}
+		if strings.Contains(stderr+stdout, key) {
+			t.Fatalf("%s: the key leaked into the output: %q %q", name, stderr, stdout)
+		}
 	}
 }
 
