@@ -290,17 +290,24 @@ func agentTransport(c *http.Client) *http.Client {
 }
 
 // ingestEndpoint joins the base URL and the ingest path with net/url,
-// over the escaped base path: the trailing slash of the base does not
-// leak into the endpoint, and an encoded separator of the base (a %2F)
-// stays encoded instead of becoming a real one. A parse failure
-// returns the fixed error: the URL, or a piece of it, never reaches
-// the error.
+// over the escaped base path and without normalizing it: the trailing
+// slash of the base does not leak into the endpoint, an encoded
+// separator of the base (a %2F) stays encoded instead of becoming a
+// real one, and the segments of the base (a // or a ..) reach the hub
+// as they were accepted. A parse failure returns the fixed error: the
+// URL, or a piece of it, never reaches the error.
 func ingestEndpoint(base string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", errHubURLInvalid
 	}
-	return u.JoinPath(strings.TrimPrefix(ingestPath, "/")).String(), nil
+	escaped := strings.TrimSuffix(u.EscapedPath(), "/") + ingestPath
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", errHubURLInvalid
+	}
+	u.Path, u.RawPath = decoded, escaped
+	return u.String(), nil
 }
 
 // parseRetryAfter reads the Retry-After header: integer seconds, or an

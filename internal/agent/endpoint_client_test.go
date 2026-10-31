@@ -9,8 +9,9 @@ import (
 )
 
 // TestIngestEndpointKeepsEncodedBaseSeparators checks the joins of the
-// base URL: with and without the trailing slash, with a base path, and
-// with an encoded separator in the base path, which stays encoded.
+// base URL: with and without the trailing slash, with a base path, with
+// an encoded separator in the base path, which stays encoded, and with
+// segments the join must not normalize (a // and a ..).
 func TestIngestEndpointKeepsEncodedBaseSeparators(t *testing.T) {
 	cases := []struct{ base, want string }{
 		{"https://hub.example", "https://hub.example/api/ingest"},
@@ -18,6 +19,9 @@ func TestIngestEndpointKeepsEncodedBaseSeparators(t *testing.T) {
 		{"https://hub.example/base/", "https://hub.example/base/api/ingest"},
 		{"https://hub.example/base%2Ftenant", "https://hub.example/base%2Ftenant/api/ingest"},
 		{"https://hub.example/base%2Ftenant/", "https://hub.example/base%2Ftenant/api/ingest"},
+		{"https://hub.example/a//b", "https://hub.example/a//b/api/ingest"},
+		{"https://hub.example/a/../b/", "https://hub.example/a/../b/api/ingest"},
+		{"https://hub.example/caf%C3%A9", "https://hub.example/caf%C3%A9/api/ingest"},
 	}
 	for _, c := range cases {
 		got, err := ingestEndpoint(c.base)
