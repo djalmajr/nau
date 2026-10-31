@@ -171,7 +171,8 @@ func (f *fakeSharing) Unshare(_ context.Context, machineID, granteeID string) (b
 
 // Accounts is the in-memory developers route: for the member, the
 // viewer, the developers that share with the viewer and the developers
-// the viewer shares with; for the owner, every user.
+// the viewer shares with; for the owner, every user. The shares of the
+// revoked machines create no relationship and hold no count.
 func (f *fakeSharing) Accounts(_ context.Context, viewerID string, owner bool) ([]visibility.Account, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -182,27 +183,30 @@ func (f *fakeSharing) Accounts(_ context.Context, viewerID string, owner bool) (
 	if err != nil {
 		return nil, err
 	}
-	included := map[string]bool{viewerID: true}
+	// The non-revoked machine of each id, the developer of the id:
+	// the shares of a revoked machine create no relationship.
+	devOf := map[string]string{}
 	machines := map[string]int{}
 	for _, mc := range all {
 		if mc.RevokedMS != nil {
 			continue
 		}
+		devOf[mc.ID] = mc.DeveloperID
 		machines[mc.DeveloperID]++
 	}
+	included := map[string]bool{viewerID: true}
 	for k := range f.shares {
-		for _, mc := range all {
-			if mc.ID != k.machineID {
-				continue
-			}
-			if k.granteeID == viewerID {
-				// The developers that share a machine with the viewer.
-				included[mc.DeveloperID] = true
-			}
-			if mc.DeveloperID == viewerID {
-				// The developers the viewer shares with.
-				included[k.granteeID] = true
-			}
+		dev, ok := devOf[k.machineID]
+		if !ok {
+			continue
+		}
+		if k.granteeID == viewerID {
+			// The developers that share a machine with the viewer.
+			included[dev] = true
+		}
+		if dev == viewerID {
+			// The developers the viewer shares with.
+			included[k.granteeID] = true
 		}
 	}
 	ids := make([]string, 0, len(f.users))
@@ -218,13 +222,15 @@ func (f *fakeSharing) Accounts(_ context.Context, viewerID string, owner bool) (
 		id := u.ID
 		a := visibility.Account{ID: u.ID, Name: u.Name, Email: u.Email, Machines: machines[id]}
 		for k := range f.shares {
+			dev, ok := devOf[k.machineID]
+			if !ok {
+				continue
+			}
 			if k.granteeID == id {
 				a.SharesWithMe++
 			}
-			for _, mc := range all {
-				if mc.ID == k.machineID && mc.DeveloperID == id {
-					a.SharedByMe++
-				}
+			if dev == id {
+				a.SharedByMe++
 			}
 		}
 		out = append(out, a)
@@ -941,6 +947,85 @@ func testSharingReads(t *testing.T, fresh func(t *testing.T) *scenario) {
 	r = s.do("GET", "/api/machines", nil, s.asUser("bob"), false)
 	if r.Status != 200 || !containsBody(t, r.Body, `"machines":[]`) {
 		t.Fatalf("machines of bob after the revocation: %d %s, want the empty list", r.Status, r.Body)
+	}
+}
+
+// testRevokedShareEndsTheRelationship is the end of the relation:
+// the sharing of a revoked machine creates no relationship — the
+// grantee sees no account and no count of the former sharer, not even
+// when the sharer connects another machine without sharing it. The
+// owner of the hub keeps seeing every account, per the contract.
+func testRevokedShareEndsTheRelationship(t *testing.T, fresh func(t *testing.T) *scenario) {
+	s := fresh(t)
+	d, _ := s.deliver(t, "alice", "laptop")
+	bobID := s.users["bob"].ID
+
+	// The share of the machine with bob, and the relation before the
+	// revocation: bob sees alice.
+	r := s.doJSON("POST", "/api/machines/"+d.MachineID+"/shares", map[string]string{"email": "bob@example.test"}, s.asUser("alice"))
+	if r.Status != 201 {
+		t.Fatalf("share: %d %s, want 201", r.Status, r.Body)
+	}
+	r = s.do("GET", "/api/developers", nil, s.asUser("bob"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of bob before the revocation: %d %s, want 200", r.Status, r.Body)
+	}
+	if devs := parseDevelopers(t, r.Body); len(devs) != 2 {
+		t.Fatalf("developers of bob before the revocation = %+v, want alice and bob", devs)
+	}
+
+	// The revocation of the machine ends the relation: the grantee
+	// sees no account and no count of the sharer.
+	r = s.do("DELETE", "/api/machines/"+d.MachineID, nil, s.asUser("alice"), true)
+	if r.Status != 204 {
+		t.Fatalf("revoke: %d %s, want 204", r.Status, r.Body)
+	}
+	r = s.do("GET", "/api/developers", nil, s.asUser("bob"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of bob after the revocation: %d %s, want 200", r.Status, r.Body)
+	}
+	devs := parseDevelopers(t, r.Body)
+	if len(devs) != 1 || devs[0].ID != bobID {
+		t.Fatalf("developers of bob after the revocation = %+v, want only bob", devs)
+	}
+	if devs[0].Machines != 0 || devs[0].SharesWithMe != 0 || devs[0].SharedByMe != 0 {
+		t.Fatalf("counts of bob after the revocation = %+v, want none", devs[0])
+	}
+
+	// The sharer connects another machine without sharing it: the
+	// grantee still sees no account and no count of the sharer.
+	s.deliver(t, "alice", "laptop-2")
+	r = s.do("GET", "/api/developers", nil, s.asUser("bob"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of bob after the new machine: %d %s, want 200", r.Status, r.Body)
+	}
+	devs = parseDevelopers(t, r.Body)
+	if len(devs) != 1 || devs[0].ID != bobID {
+		t.Fatalf("developers of bob after the new machine = %+v, want only bob", devs)
+	}
+	if devs[0].Machines != 0 || devs[0].SharesWithMe != 0 || devs[0].SharedByMe != 0 {
+		t.Fatalf("counts of bob after the new machine = %+v, want none (the private machine does not count)", devs[0])
+	}
+
+	// The owner of the hub keeps seeing every account, per the
+	// contract, with the revoked machine not counted.
+	r = s.do("GET", "/api/developers", nil, s.asUser("owner"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of the owner: %d %s, want 200", r.Status, r.Body)
+	}
+	devs = parseDevelopers(t, r.Body)
+	if len(devs) != 3 {
+		t.Fatalf("developers of the owner = %+v, want every account", devs)
+	}
+	wantMachines := map[string]int{s.users["alice"].ID: 1, s.users["bob"].ID: 0, s.users["owner"].ID: 0}
+	for _, d := range devs {
+		w, ok := wantMachines[d.ID]
+		if !ok {
+			t.Fatalf("the account %s of the owner listing, want alice, bob and the owner", d.ID)
+		}
+		if d.Machines != w {
+			t.Fatalf("machines of %s in the owner listing = %d, want %d (the revoked machine does not count)", d.ID, d.Machines, w)
+		}
 	}
 }
 

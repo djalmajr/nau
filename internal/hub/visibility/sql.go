@@ -34,8 +34,10 @@ const (
 	sqlUserByEmail = `SELECT id, name, email FROM users WHERE email_norm = ?`
 	// sqlAccountIDs lists the account ids of the developers route of
 	// a member: the viewer, the developers that share a machine with
-	// the viewer and the developers the viewer shares with.
-	sqlAccountIDs = `SELECT DISTINCT u.id FROM users u WHERE u.id = ? OR u.id IN (SELECT m.developer_id FROM machines m JOIN shares s ON s.machine_id = m.id WHERE s.grantee_id = ?) OR u.id IN (SELECT s.grantee_id FROM shares s JOIN machines m ON m.id = s.machine_id WHERE m.developer_id = ?) ORDER BY u.id`
+	// the viewer and the developers the viewer shares with, through
+	// non-revoked machines only (the sharing of a revoked machine
+	// creates no relationship).
+	sqlAccountIDs = `SELECT DISTINCT u.id FROM users u WHERE u.id = ? OR u.id IN (SELECT m.developer_id FROM machines m JOIN shares s ON s.machine_id = m.id WHERE s.grantee_id = ? AND m.revoked_ms IS NULL) OR u.id IN (SELECT s.grantee_id FROM shares s JOIN machines m ON m.id = s.machine_id WHERE m.developer_id = ? AND m.revoked_ms IS NULL) ORDER BY u.id`
 	// sqlAllAccountIDs lists the account ids of the developers route
 	// of the owner of the hub: every account.
 	sqlAllAccountIDs = `SELECT id FROM users ORDER BY id`
@@ -45,11 +47,13 @@ const (
 	// accounts.
 	sqlAccountMachines = `SELECT developer_id, COUNT(*) FROM machines WHERE revoked_ms IS NULL AND developer_id IN (`
 	// sqlAccountSharesWithMe counts the shares that reach the
-	// accounts.
-	sqlAccountSharesWithMe = `SELECT grantee_id, COUNT(*) FROM shares WHERE grantee_id IN (`
+	// accounts, through non-revoked machines only (the sharing of a
+	// revoked machine does not count).
+	sqlAccountSharesWithMe = `SELECT s.grantee_id, COUNT(*) FROM shares s JOIN machines m ON m.id = s.machine_id WHERE m.revoked_ms IS NULL AND s.grantee_id IN (`
 	// sqlAccountSharedByMe counts the shares the accounts give
-	// through their machines.
-	sqlAccountSharedByMe = `SELECT m.developer_id, COUNT(*) FROM machines m JOIN shares s ON s.machine_id = m.id WHERE m.developer_id IN (`
+	// through their non-revoked machines (the sharing of a revoked
+	// machine does not count).
+	sqlAccountSharedByMe = `SELECT m.developer_id, COUNT(*) FROM machines m JOIN shares s ON s.machine_id = m.id WHERE m.revoked_ms IS NULL AND m.developer_id IN (`
 )
 
 // VisibleMachines is the rule of the decision: the non-revoked
@@ -234,8 +238,8 @@ func (s *sqlSharing) Accounts(ctx context.Context, viewerID string, owner bool) 
 	for _, row := range res.Rows {
 		out = append(out, Account{ID: strOf(row[0]), Name: strOf(row[1]), Email: strOf(row[2])})
 	}
-	counts := func(stmt string, index int) (map[string]int, error) {
-		res, err := s.runIn(ctx, stmt, "", ids)
+	counts := func(stmt, groupBy string, index int) (map[string]int, error) {
+		res, err := s.runIn(ctx, stmt, groupBy, ids)
 		if err != nil {
 			return nil, err
 		}
@@ -245,15 +249,17 @@ func (s *sqlSharing) Accounts(ctx context.Context, viewerID string, owner bool) 
 		}
 		return by, nil
 	}
-	machines, err := counts(sqlAccountMachines, 0)
+	// The grouping by the key of the account goes after the closing
+	// of the IN, so each account holds the count of its own rows.
+	machines, err := counts(sqlAccountMachines, " GROUP BY developer_id", 0)
 	if err != nil {
 		return nil, err
 	}
-	withMe, err := counts(sqlAccountSharesWithMe, 0)
+	withMe, err := counts(sqlAccountSharesWithMe, " GROUP BY s.grantee_id", 0)
 	if err != nil {
 		return nil, err
 	}
-	byMe, err := counts(sqlAccountSharedByMe, 0)
+	byMe, err := counts(sqlAccountSharedByMe, " GROUP BY m.developer_id", 0)
 	if err != nil {
 		return nil, err
 	}

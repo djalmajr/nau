@@ -365,6 +365,7 @@ func runMachinesScenarios(t *testing.T, fresh func(t *testing.T) *scenario) {
 	t.Run("StrictBody", func(t *testing.T) { testStrictBody(t, fresh) })
 	t.Run("NameValidation", func(t *testing.T) { testNameValidation(t, fresh) })
 	t.Run("SharingReads", func(t *testing.T) { testSharingReads(t, fresh) })
+	t.Run("RevokedShareEndsTheRelationship", func(t *testing.T) { testRevokedShareEndsTheRelationship(t, fresh) })
 	t.Run("StoreFailures", func(t *testing.T) { testStoreFailures(t, fresh) })
 }
 
@@ -914,8 +915,8 @@ func jsonCountField(t *testing.T, body []byte, array, field string, want bool) i
 }
 
 // testForeignUser is the isolation of the machines between the users:
-// the other user does not see nor revokes the machine, and the owner
-// of the hub sees and revokes all of them.
+// the other user and the owner of the hub do not see nor revoke the
+// machine, and only the developer of the machine revokes it.
 func testForeignUser(t *testing.T, fresh func(t *testing.T) *scenario) {
 	s := fresh(t)
 	db, _ := s.deliver(t, "bob", "bobbox")
@@ -959,15 +960,17 @@ func testForeignUser(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if len(ownerList.Machines) != 0 {
 		t.Fatalf("machines of the owner = %v, want none without a share", ownerList.Machines)
 	}
-	// The owner of the hub revokes the machine.
+	// The owner of the hub cannot revoke the machine of the other
+	// developer: the same 404 as an unknown machine, and the delivery
+	// of the machine keeps going.
 	r = s.do("DELETE", "/api/machines/"+db.MachineID, nil, s.asUser("owner"), true)
-	if r.Status != 204 {
-		t.Fatalf("revoke by the owner: %d %s, want 204", r.Status, r.Body)
+	if r.Status != 404 || string(r.Body) != `{"error":"not_found"}` {
+		t.Fatalf("revoke by the owner: %d %s, want 404 not_found", r.Status, r.Body)
 	}
-	// The machine is revoked for its developer.
+	s.advance(time.Second)
 	r = s.ingestWith(db.Key, validInventoryBody(s.nowMS()))
-	if r.Status != 401 {
-		t.Fatalf("ingest after the owner revoke: %d %s, want 401", r.Status, r.Body)
+	if r.Status != 204 {
+		t.Fatalf("ingest after the owner's refused revoke: %d %s, want 204", r.Status, r.Body)
 	}
 	// Without a session the revoke is refused.
 	da, _ := s.deliver(t, "bob", "bobbox-2")
@@ -975,10 +978,21 @@ func testForeignUser(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if r.Status != 401 {
 		t.Fatalf("revoke without session: %d, want 401", r.Status)
 	}
-	// The unknown machine is 404.
+	// The unknown machine is the same 404 as the refused revoke of
+	// the owner: the existence of the machine is not revealed.
 	r = s.do("DELETE", "/api/machines/unknown-id", nil, s.asUser("owner"), true)
-	if r.Status != 404 {
-		t.Fatalf("revoke of the unknown machine: %d %s, want 404", r.Status, r.Body)
+	if r.Status != 404 || string(r.Body) != `{"error":"not_found"}` {
+		t.Fatalf("revoke of the unknown machine: %d %s, want the same 404 not_found", r.Status, r.Body)
+	}
+	// The revocation of the developer of the machine still goes
+	// through, and the next delivery is refused.
+	r = s.do("DELETE", "/api/machines/"+da.MachineID, nil, s.asUser("bob"), true)
+	if r.Status != 204 {
+		t.Fatalf("revoke by the developer: %d %s, want 204", r.Status, r.Body)
+	}
+	r = s.ingestWith(da.Key, validInventoryBody(s.nowMS()))
+	if r.Status != 401 {
+		t.Fatalf("ingest after the developer revoke: %d %s, want 401", r.Status, r.Body)
 	}
 }
 

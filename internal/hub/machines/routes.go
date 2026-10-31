@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"github.com/djalmajr/nau/internal/hub"
-	"github.com/djalmajr/nau/internal/hub/accounts"
 )
 
 // developerRef is one developer of the read answers.
@@ -69,10 +68,11 @@ func (m *Service) listMachines(ctx context.Context, req hub.Request) hub.Respons
 }
 
 // revokeMachine is the DELETE /api/machines/{id} route (session
-// required): the owner of the machine or the owner of the hub revokes
-// it; any other user receives 404, so the existence of the machine is
-// not revealed. The revocation ends the reading of the machine for
-// the shared developers too: a revoked machine is not visible.
+// required): the developer of the machine revokes it; any other user,
+// the owner of the hub included, receives 404, so the existence of
+// the machine is not revealed. The revocation ends the reading of the
+// machine for the shared developers too: a revoked machine is not
+// visible.
 func (m *Service) revokeMachine(ctx context.Context, req hub.Request) hub.Response {
 	u, ok := m.sessionUser(ctx, req)
 	if !ok {
@@ -89,7 +89,7 @@ func (m *Service) revokeMachine(ctx context.Context, req hub.Request) hub.Respon
 	if !found {
 		return errResponse(404, "not_found")
 	}
-	if mc.DeveloperID != u.ID && u.Role != accounts.RoleOwner {
+	if mc.DeveloperID != u.ID {
 		return errResponse(404, "not_found")
 	}
 	if _, err := m.machines.RevokeMachine(ctx, id, m.nowMS()); err != nil {
