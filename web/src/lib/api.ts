@@ -181,7 +181,8 @@ export type AgentReason =
   | "provider"
   | "not_received"
   | "no_report"
-  | "compact";
+  | "compact"
+  | "owner";
 
 export interface Machine {
   id: string;

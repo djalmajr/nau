@@ -63,4 +63,16 @@ describe("i18n", () => {
     );
     expect(screen.getByTestId("label")).toHaveTextContent("Máquinas");
   });
+
+  it("labels the owner reason in pt-BR", () => {
+    localStorage.clear();
+    renderWithProviders(<Probe labelKey="reasons.owner" />);
+    expect(screen.getByTestId("label")).toHaveTextContent("Esperando o dono");
+  });
+
+  it("labels the owner reason in en-US", () => {
+    localStorage.setItem(LOCALE_STORAGE_KEY, "en-US");
+    renderWithProviders(<Probe labelKey="reasons.owner" />);
+    expect(screen.getByTestId("label")).toHaveTextContent("Waiting for the owner");
+  });
 });

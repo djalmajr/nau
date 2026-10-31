@@ -302,7 +302,7 @@ func knownState(s State) bool {
 
 func knownReason(r Reason) bool {
 	switch r {
-	case ReasonQuestion, ReasonApproval, ReasonQuota, ReasonProvider, ReasonNotReceived, ReasonNoReport, ReasonCompact:
+	case ReasonQuestion, ReasonApproval, ReasonQuota, ReasonProvider, ReasonNotReceived, ReasonNoReport, ReasonCompact, ReasonOwner:
 		return true
 	}
 	return false
