@@ -31,9 +31,18 @@ func realIngestStore(t *testing.T) store.Store {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// The tables of every migration, the children of the foreign keys
+	// first (the sessions and the machines reference the users), so
+	// the reset is re-runnable on a shared database no matter what
+	// the previous packages left behind.
 	for _, name := range []string{
-		"schema_migrations", "hub_meta", "inventory_snapshots", "agents_current",
-		"agent_history", "hidden_counts", "working_hourly", "ingest_guard",
+		"sessions", "machines",
+		"pairings", "pairing_attempts", "ingest_deliveries", "shares",
+		"agent_history", "agents_current", "hidden_counts", "working_hourly",
+		"inventory_snapshots", "login_failures", "invites",
+		"users",
+		"pairing_guard", "ingest_guard", "accounts_guard",
+		"schema_migrations", "hub_meta",
 	} {
 		if _, err := c.Execute(ctx, store.Stmt{SQL: `DROP TABLE IF EXISTS ` + name}); err != nil {
 			t.Fatalf("drop %s: %v", name, err)

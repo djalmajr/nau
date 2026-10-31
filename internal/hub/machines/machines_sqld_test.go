@@ -31,17 +31,17 @@ const testBootstrapToken = "test-bootstrap-622"
 // scenarios: the machine tables and the tables of the layers the real
 // flow writes (the accounts and the ingest).
 var sqldMachineTables = []string{
-	"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+	"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 	"agent_history", "agents_current", "hidden_counts", "working_hourly",
 	"inventory_snapshots", "login_failures", "sessions", "invites",
-	"users", "hub_meta",
+	"users", "accounts_guard", "hub_meta",
 }
 
 // hubZeroTables is the order of every table the hub migrations create:
 // the children first, so the foreign keys never block the delete or
 // the drop of a parent.
 var hubZeroTables = []string{
-	"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+	"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 	"agent_history", "agents_current", "hidden_counts", "working_hourly",
 	"inventory_snapshots", "login_failures", "sessions", "invites",
 	"users", "pairing_guard", "ingest_guard", "accounts_guard",
@@ -114,7 +114,7 @@ func TestSQLDMachinesScenarios(t *testing.T) {
 	t.Cleanup(func() {
 		stmts := make([]store.Stmt, 0, 8)
 		for _, table := range []string{
-			"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+			"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 			"login_failures", "sessions", "invites", "users",
 		} {
 			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
@@ -178,7 +178,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 
 	// The bootstrap owner.
 	ownerID, ownerCookie := bootstrapSQLUser(t, srv, "owner", "owner@example.test")
-	users := map[string]accounts.User{"owner": {ID: ownerID, Role: accounts.RoleOwner}}
+	users := map[string]accounts.User{"owner": {ID: ownerID, Name: "owner", Email: "owner@example.test", Role: accounts.RoleOwner}}
 	cookies := map[string]string{"owner": ownerCookie}
 	for _, who := range []struct {
 		name  string
@@ -188,7 +188,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		{"bob", "bob@example.test"},
 	} {
 		id, cookie := memberSQLUser(t, srv, ownerCookie, who.name, who.email)
-		users[who.name] = accounts.User{ID: id, Role: accounts.RoleMember}
+		users[who.name] = accounts.User{ID: id, Name: who.name, Email: who.email, Role: accounts.RoleMember}
 		cookies[who.name] = cookie
 	}
 	return &scenario{

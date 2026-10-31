@@ -3,65 +3,62 @@ package machines
 import (
 	"context"
 	"encoding/json"
-	"sort"
 
 	"github.com/djalmajr/nau/internal/hub"
 	"github.com/djalmajr/nau/internal/hub/accounts"
 )
 
-// machineItem is the machine of the listing, without the key hash.
+// developerRef is one developer of the read answers.
+type developerRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// machineItem is the machine of the listing: the user's own machines
+// and the machines shared with the user, never a revoked one.
 type machineItem struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	CreatedMS  int64  `json:"created_ms"`
-	Revoked    bool   `json:"revoked"`
-	LastSeenMS *int64 `json:"last_seen_ms"`
+	ID         string       `json:"id"`
+	Name       string       `json:"name"`
+	Developer  developerRef `json:"developer"`
+	CreatedMS  int64        `json:"created_ms"`
+	Revoked    bool         `json:"revoked"`
+	LastSeenMS *int64       `json:"last_seen_ms"`
+	Online     bool         `json:"online"`
+	// SharedWith holds the developers the machine is shared with,
+	// filled only for the user's own machines.
+	SharedWith *[]developerRef `json:"shared_with,omitempty"`
 }
 
 // listMachines is the GET /api/machines route (session required): the
-// machines of the signed-in user; the owner of the hub sees all of
-// them.
+// non-revoked machines of the signed-in user and the non-revoked
+// machines shared with them; the owner of the hub sees the same rule,
+// not all the machines.
 func (m *Service) listMachines(ctx context.Context, req hub.Request) hub.Response {
 	u, ok := m.sessionUser(ctx, req)
 	if !ok {
 		return errResponse(401, "unauthenticated")
 	}
-	var (
-		list []Machine
-		err  error
-	)
-	if u.Role == accounts.RoleOwner {
-		list, err = m.machines.ListAllMachines(ctx)
-	} else {
-		list, err = m.machines.ListMachinesByDeveloper(ctx, u.ID)
-	}
+	list, err := m.sharing.VisibleMachines(ctx, u.ID, m.nowMS())
 	if err != nil {
 		return unavailable()
 	}
-	ids := make([]string, 0, len(list))
-	for _, mc := range list {
-		ids = append(ids, mc.ID)
-	}
-	lastSeen, err := m.machines.LastSeen(ctx, ids)
-	if err != nil {
-		return unavailable()
-	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].CreatedMS != list[j].CreatedMS {
-			return list[i].CreatedMS < list[j].CreatedMS
-		}
-		return list[i].ID < list[j].ID
-	})
 	items := make([]machineItem, 0, len(list))
 	for _, mc := range list {
 		item := machineItem{
-			ID:        mc.ID,
-			Name:      mc.Name,
-			CreatedMS: mc.CreatedMS,
-			Revoked:   mc.RevokedMS != nil,
+			ID:         mc.ID,
+			Name:       mc.Name,
+			Developer:  developerRef{ID: mc.Developer.ID, Name: mc.Developer.Name},
+			CreatedMS:  mc.CreatedMS,
+			Revoked:    false,
+			LastSeenMS: mc.LastSeenMS,
+			Online:     mc.Online,
 		}
-		if seen, has := lastSeen[mc.ID]; has {
-			item.LastSeenMS = &seen
+		if mc.Own {
+			shared := make([]developerRef, 0, len(mc.SharedWith))
+			for _, d := range mc.SharedWith {
+				shared = append(shared, developerRef{ID: d.ID, Name: d.Name})
+			}
+			item.SharedWith = &shared
 		}
 		items = append(items, item)
 	}
@@ -74,7 +71,8 @@ func (m *Service) listMachines(ctx context.Context, req hub.Request) hub.Respons
 // revokeMachine is the DELETE /api/machines/{id} route (session
 // required): the owner of the machine or the owner of the hub revokes
 // it; any other user receives 404, so the existence of the machine is
-// not revealed.
+// not revealed. The revocation ends the reading of the machine for
+// the shared developers too: a revoked machine is not visible.
 func (m *Service) revokeMachine(ctx context.Context, req hub.Request) hub.Response {
 	u, ok := m.sessionUser(ctx, req)
 	if !ok {

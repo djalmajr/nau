@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -198,7 +199,9 @@ func (s *scenario) asUser(name string) hub.Header {
 }
 
 // do runs one request against the server. ct sets the Content-Type
-// application/json header when true.
+// application/json header when true. The query of the path, when the
+// caller writes one, goes to the Query of the request, as the
+// adapter decodes it.
 func (s *scenario) do(method, path string, body []byte, hdr hub.Header, ct bool) hub.Response {
 	if hdr == nil {
 		hdr = hub.Header{}
@@ -206,9 +209,18 @@ func (s *scenario) do(method, path string, body []byte, hdr hub.Header, ct bool)
 	if ct {
 		hdr.Set("Content-Type", "application/json")
 	}
+	p, rawQuery := path, ""
+	if i := strings.IndexByte(path, '?'); i >= 0 {
+		p, rawQuery = path[:i], path[i+1:]
+	}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		s.t.Fatalf("do: the query %q of %s: %v", rawQuery, path, err)
+	}
 	return s.srv.Serve(s.ctx, hub.Request{
 		Method: method,
-		Path:   path,
+		Path:   p,
+		Query:  query,
 		Header: hdr,
 		Body:   body,
 	})
@@ -352,6 +364,7 @@ func runMachinesScenarios(t *testing.T, fresh func(t *testing.T) *scenario) {
 	t.Run("ContentType", func(t *testing.T) { testContentType(t, fresh) })
 	t.Run("StrictBody", func(t *testing.T) { testStrictBody(t, fresh) })
 	t.Run("NameValidation", func(t *testing.T) { testNameValidation(t, fresh) })
+	t.Run("SharingReads", func(t *testing.T) { testSharingReads(t, fresh) })
 	t.Run("StoreFailures", func(t *testing.T) { testStoreFailures(t, fresh) })
 }
 
@@ -866,13 +879,11 @@ func testRevocationCutsImmediately(t *testing.T, fresh func(t *testing.T) *scena
 	if r.Status != 401 || string(r.Body) != `{"error":"unauthenticated"}` {
 		t.Fatalf("ingest after the revocation: %d %s, want 401 unauthenticated", r.Status, r.Body)
 	}
-	// The machine shows revoked in the listing.
+	// The revoked machine leaves the listing: the list holds the
+	// non-revoked machines only.
 	r = s.do("GET", "/api/machines", nil, s.asUser("alice"), false)
-	if r.Status != 200 {
-		t.Fatalf("machines: %d %s, want 200", r.Status, r.Body)
-	}
-	if jsonCountField(t, r.Body, "machines", "revoked", true) != 1 {
-		t.Fatalf("machines body %s, want one revoked machine", r.Body)
+	if r.Status != 200 || !strings.Contains(string(r.Body), `"machines":[]`) {
+		t.Fatalf("machines: %d %s, want the empty list", r.Status, r.Body)
 	}
 	// The second revocation is 204 (the operation is idempotent).
 	r = s.do("DELETE", "/api/machines/"+d.MachineID, nil, s.asUser("alice"), true)
@@ -933,7 +944,8 @@ func testForeignUser(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if r.Status != 204 {
 		t.Fatalf("ingest after the refused revoke: %d %s, want 204", r.Status, r.Body)
 	}
-	// The owner of the hub sees all the machines.
+	// The owner of the hub does not see the machine without a share:
+	// the owner follows the same rule for the machine data.
 	r = s.do("GET", "/api/machines", nil, s.asUser("owner"), false)
 	if r.Status != 200 {
 		t.Fatalf("machines of the owner: %d %s, want 200", r.Status, r.Body)
@@ -944,8 +956,8 @@ func testForeignUser(t *testing.T, fresh func(t *testing.T) *scenario) {
 	if err := json.Unmarshal(r.Body, &ownerList); err != nil {
 		t.Fatalf("machines body %s: %v", r.Body, err)
 	}
-	if len(ownerList.Machines) != 1 || ownerList.Machines[0]["id"] != db.MachineID {
-		t.Fatalf("machines of the owner = %v, want the machine of bob", ownerList.Machines)
+	if len(ownerList.Machines) != 0 {
+		t.Fatalf("machines of the owner = %v, want none without a share", ownerList.Machines)
 	}
 	// The owner of the hub revokes the machine.
 	r = s.do("DELETE", "/api/machines/"+db.MachineID, nil, s.asUser("owner"), true)
@@ -1309,6 +1321,8 @@ func TestMemoryMachinesScenarios(t *testing.T) {
 		}
 		mem := NewMemory()
 		apply := &fakeApply{}
+		sharing := newFakeSharing(mem, users, apply)
+		reads := newFakeReads(apply)
 		svc, err := New(Config{
 			Store:          stubStore{},
 			Machines:       mem,
@@ -1318,9 +1332,13 @@ func TestMemoryMachinesScenarios(t *testing.T) {
 				u, ok := users[n]
 				return u, ok
 			},
-			Apply: apply.run,
-			Now:   clock.Now,
-			Rand:  &counterReader{},
+			Apply:    apply.run,
+			Sharing:  sharing,
+			Agents:   reads.agents,
+			Agent:    reads.agent,
+			Overview: reads.overview,
+			Now:      clock.Now,
+			Rand:     &counterReader{},
 		})
 		if err != nil {
 			t.Fatalf("New: %v", err)

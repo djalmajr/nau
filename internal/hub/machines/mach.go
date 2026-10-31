@@ -1,10 +1,11 @@
 // Package machines is the machine-connect layer of the hub: the
 // pairing codes that a machine requests and the developer confirms,
 // the per-machine keys delivered once at the confirmation, the machine
-// listing and revocation, and the delivery route of the inventories.
-// It talks to the store contract and to the accounts' session
-// resolver only: no http, no os, no network. It compiles for the
-// wasip1 hub core.
+// listing and revocation, the delivery route of the inventories, the
+// machine sharing, and the read routes of the interface (the agents,
+// the overview and the developers). It talks to the store contract, to
+// the accounts' session resolver and to the ingest reads only: no
+// http, no os, no network. It compiles for the wasip1 hub core.
 package machines
 
 import (
@@ -25,6 +26,7 @@ import (
 	"github.com/djalmajr/nau/internal/hub/accounts"
 	"github.com/djalmajr/nau/internal/hub/ingest"
 	"github.com/djalmajr/nau/internal/hub/store"
+	"github.com/djalmajr/nau/internal/hub/visibility"
 	"github.com/djalmajr/nau/internal/inventory"
 )
 
@@ -169,11 +171,23 @@ type SessionUser func(ctx context.Context, req hub.Request) (accounts.User, bool
 // ApplyFunc applies one inventory of a machine to the hub state.
 type ApplyFunc func(ctx context.Context, st store.Store, machineID string, inv inventory.Inventory, receivedMS int64) (ingest.Result, error)
 
+// AgentsFunc reads the current agents and the hidden counts of the
+// machines; nil uses ingest.Agents over the hub store.
+type AgentsFunc func(ctx context.Context, st store.Store, machineIDs []string, nowMS int64) (ingest.AgentsResult, error)
+
+// AgentFunc reads one agent with its history; nil uses ingest.Agent
+// over the hub store.
+type AgentFunc func(ctx context.Context, st store.Store, machineID, terminal string, nowMS int64) (ingest.AgentDetail, error)
+
+// OverviewFunc reads the aggregates of the machines; nil uses
+// ingest.Overview over the hub store.
+type OverviewFunc func(ctx context.Context, st store.Store, machineIDs []string, nowMS int64) (ingest.OverviewResult, error)
+
 // Config is the configuration of the machine connect: the hub store
 // (the deliveries of the inventories apply through it), the machine
-// storage, the session resolver, the name of the trusted proxy
-// header that carries the ip of the client, the time and the
-// randomness, injected so the tests are deterministic.
+// storage, the session resolver, the sharing and the reads, the name
+// of the trusted proxy header that carries the ip of the client, the
+// time and the randomness, injected so the tests are deterministic.
 type Config struct {
 	// Store is the hub store the inventories apply to.
 	Store store.Store
@@ -188,6 +202,15 @@ type Config struct {
 	// validates as an ip). Empty reads the ip of the connection from
 	// the RemoteAddr header of the hub serve adapter.
 	ClientIPHeader string
+	// Sharing is the state and the computation of the sharing;
+	// nil uses the visibility over the hub store.
+	Sharing visibility.Sharing
+	// Agents reads the current agents; nil uses ingest.Agents.
+	Agents AgentsFunc
+	// Agent reads one agent with its history; nil uses ingest.Agent.
+	Agent AgentFunc
+	// Overview reads the aggregates; nil uses ingest.Overview.
+	Overview OverviewFunc
 	// Now is the clock.
 	Now func() time.Time
 	// Rand is the randomness source; nil uses crypto/rand.
@@ -195,14 +218,19 @@ type Config struct {
 }
 
 // Service is the machine-connect layer of the hub: the pairings, the
-// machines and the delivery of the inventories, on top of one
-// MachineStore. It holds no state between requests.
+// machines, the delivery of the inventories, the sharing and the read
+// routes, on top of one MachineStore. It holds no state between
+// requests.
 type Service struct {
 	store          store.Store
 	machines       MachineStore
 	sessionUser    SessionUser
 	apply          ApplyFunc
 	clientIPHeader string
+	sharing        visibility.Sharing
+	agents         AgentsFunc
+	agent          AgentFunc
+	overview       OverviewFunc
 	now            func() time.Time
 	rand           io.Reader
 }
@@ -223,6 +251,22 @@ func New(cfg Config) (*Service, error) {
 	if apply == nil {
 		apply = ingest.Apply
 	}
+	sharing := cfg.Sharing
+	if sharing == nil {
+		sharing = visibility.New(cfg.Store)
+	}
+	agents := cfg.Agents
+	if agents == nil {
+		agents = ingest.Agents
+	}
+	agent := cfg.Agent
+	if agent == nil {
+		agent = ingest.Agent
+	}
+	overview := cfg.Overview
+	if overview == nil {
+		overview = ingest.Overview
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
@@ -237,6 +281,10 @@ func New(cfg Config) (*Service, error) {
 		sessionUser:    cfg.SessionUser,
 		apply:          apply,
 		clientIPHeader: cfg.ClientIPHeader,
+		sharing:        sharing,
+		agents:         agents,
+		agent:          agent,
+		overview:       overview,
 		now:            now,
 		rand:           rnd,
 	}, nil
@@ -252,6 +300,12 @@ func (m *Service) Register(s *hub.Server) {
 	s.Handle("POST", "/api/pairings/poll", m.pollPairing)
 	s.Handle("GET", "/api/machines", m.listMachines)
 	s.Handle("DELETE", "/api/machines/{id}", m.revokeMachine)
+	s.Handle("POST", "/api/machines/{id}/shares", m.shareMachine)
+	s.Handle("DELETE", "/api/machines/{id}/shares/{developerId}", m.unshareMachine)
+	s.Handle("GET", "/api/agents", m.listAgents)
+	s.Handle("GET", "/api/agents/{id}", m.getAgent)
+	s.Handle("GET", "/api/overview", m.getOverview)
+	s.Handle("GET", "/api/developers", m.listDevelopers)
 	s.Handle("POST", "/api/ingest", m.RequireMachine(m.ingestDeliveries))
 }
 
