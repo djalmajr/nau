@@ -1,9 +1,9 @@
 // Process-level contract for the nau binary: the single program of the
-// repository. The state directory keeps its herdr-hermes name, so the
-// config root contains the herdr-hermes directory and no nau directory.
-// TestMain builds the binary once; every case runs it with an isolated
-// HOME/XDG_CONFIG_HOME/APPDATA root, so no state on the machine is read
-// or written.
+// repository. The binary uses the `nau` directory under the user
+// configuration directory; nothing is read from or written to the old
+// herdr-hermes directory. TestMain builds the binary once; every case runs
+// it with an isolated HOME/XDG_CONFIG_HOME/APPDATA root, so no state on the
+// machine is read or written.
 package main
 
 import (
@@ -80,17 +80,17 @@ func buildIdentity(dir, name, importPath string) (string, error) {
 	return out, nil
 }
 
-// cfgDirFor returns the herdr-hermes config dir the child resolves from
+// cfgDirFor returns the nau config dir the child resolves from
 // its explicit environment; it matches os.UserConfigDir for the standard
 // per-OS variables the test sets (HOME, XDG_CONFIG_HOME, APPDATA).
 func cfgDirFor(root string) string {
 	switch runtime.GOOS {
 	case "darwin":
-		return filepath.Join(root, "home", "Library", "Application Support", "herdr-hermes")
+		return filepath.Join(root, "home", "Library", "Application Support", "nau")
 	case "windows":
-		return filepath.Join(root, "appdata", "herdr-hermes")
+		return filepath.Join(root, "appdata", "nau")
 	default:
-		return filepath.Join(root, "xdg", "herdr-hermes")
+		return filepath.Join(root, "xdg", "nau")
 	}
 }
 
@@ -156,9 +156,9 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 }
 
-// TestOnlyHerdrHermesStateDir: after the binary ran, the config root
-// contains the herdr-hermes directory and no nau directory.
-func TestOnlyHerdrHermesStateDir(t *testing.T) {
+// TestOnlyNauStateDir: after the binary ran, the config root contains the
+// nau directory and no other directory.
+func TestOnlyNauStateDir(t *testing.T) {
 	root := t.TempDir()
 	if _, stderr, exit := runIdentity(t, nauBin, root, "config", "set", "machine_label", "m1"); exit != 0 {
 		t.Fatalf("nau config set exit = %d, stderr %q", exit, stderr)
@@ -172,42 +172,42 @@ func TestOnlyHerdrHermesStateDir(t *testing.T) {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	if len(names) != 1 || names[0] != "herdr-hermes" {
-		t.Fatalf("config root = %v, want exactly [herdr-hermes]", names)
+	if len(names) != 1 || names[0] != "nau" {
+		t.Fatalf("config root = %v, want exactly [nau]", names)
 	}
 }
 
-// TestPreexistingNauDirIgnored: a nau directory with a different config
-// next to the state dir is ignored: the binary reads only the
-// herdr-hermes directory and leaves the nau directory untouched.
-func TestPreexistingNauDirIgnored(t *testing.T) {
+// TestPreexistingHerdrHermesDirIgnored: an old herdr-hermes directory with
+// a different config is ignored: the binary reads only the nau directory
+// and leaves the old directory untouched.
+func TestPreexistingHerdrHermesDirIgnored(t *testing.T) {
 	root := t.TempDir()
 	parent := filepath.Dir(cfgDirFor(root))
-	naudir := filepath.Join(parent, "nau")
-	if err := os.MkdirAll(naudir, 0o700); err != nil {
-		t.Fatalf("create nau dir: %v", err)
+	olddir := filepath.Join(parent, "herdr-hermes")
+	if err := os.MkdirAll(olddir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(naudir, "config"), []byte("machine_label=other-label\n"), 0o600); err != nil {
-		t.Fatalf("write nau config: %v", err)
+	if err := os.WriteFile(filepath.Join(olddir, "config"), []byte("machine_label=other-label\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	stdout, stderr, exit := runIdentity(t, nauBin, root, "config", "get", "machine_label")
 	if exit != 0 {
 		t.Fatalf("nau config get exit = %d, stderr %q", exit, stderr)
 	}
 	if stdout != `{"key":"machine_label","value":""}`+"\n" {
-		t.Fatalf("nau config get stdout = %q, want the empty value (the nau dir is ignored)", stdout)
+		t.Fatalf("nau config get stdout = %q, want the empty value (the old dir is ignored)", stdout)
 	}
-	// The pre-existing nau dir is untouched: still exactly its config file.
-	entries, err := os.ReadDir(naudir)
+	// The pre-existing old dir is untouched: still exactly its config file.
+	entries, err := os.ReadDir(olddir)
 	if err != nil {
-		t.Fatalf("read nau dir: %v", err)
+		t.Fatalf("read old dir: %v", err)
 	}
 	if len(entries) != 1 || entries[0].Name() != "config" {
 		var names []string
 		for _, e := range entries {
 			names = append(names, e.Name())
 		}
-		t.Fatalf("nau dir = %v, want exactly [config]", names)
+		t.Fatalf("old dir = %v, want exactly [config]", names)
 	}
 }
 
@@ -215,7 +215,7 @@ func TestPreexistingNauDirIgnored(t *testing.T) {
 // exit 0, empty stderr; the usage leads with the title line, carries the
 // usage line and no deprecation line.
 func TestHelpAndNoArgsUsage(t *testing.T) {
-	const titleSuffix = " - universal messaging and registry core; this build bridges a remote job dispatcher and a Herdr node"
+	const titleSuffix = " - read-only hub of the coding agents at work: which agents are working, on which machines, for which developers"
 	for _, args := range [][]string{{"help"}, {}} {
 		stdout, stderr, exit := runIdentity(t, nauBin, t.TempDir(), args...)
 		if exit != 0 {

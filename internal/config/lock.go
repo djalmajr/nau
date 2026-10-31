@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-// lockConfig uses the same exclusive file-lock mechanism as the outbox, on a
-// stable sibling of the atomically replaced configuration, with a bounded wait.
+// lockConfig takes an exclusive file lock on a stable sibling of the
+// atomically replaced configuration, with a bounded wait.
 func lockConfig(dir string) (func(), error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err

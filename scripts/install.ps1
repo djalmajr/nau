@@ -59,7 +59,7 @@ function Set-BackendPin {
         if ($pinExit -ne 0) { Fail 'nau config set herdr_soho_bin failed' }
         return
     }
-    Write-Host 'nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend'
+    Write-Host 'nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic'
 }
 
 # Windows PowerShell 5.1 turns the redirected stderr of a native command
@@ -186,8 +186,7 @@ try {
     if ($LASTEXITCODE -ne 0) {
         Fail ('nau version failed (exit ' + $LASTEXITCODE + ')')
     }
-    # doctor is informational: its non-zero exit (for example a missing
-    # backend) must not fail the install.
+    # doctor is informational: its non-zero exit must not fail the install.
     & $NauTarget doctor
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'nau install: doctor reported a problem (informational); see the output above'

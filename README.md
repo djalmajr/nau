@@ -1,27 +1,10 @@
 # Nau
 
-Nau is a universal messaging and registry core: a neutral core — the durable outbox, the routing and the job bookkeeping — with four boundary adapters, built on the ephemeral job contract of soho.
-
-The adapters and their status:
-
-- **Hermes** — the remote job dispatcher boundary: the pull of the outbox and the push client are implemented, and the dispatcher-side receiver does not exist yet — implemented in part.
-- **Herdr** — the node boundary: forwarding to the `soho` public CLI — implemented.
-- **Grok Bot** — planned, not implemented.
-- **OpenAI Dots** — planned, not implemented.
-
-Planned adapters have no code, commands or configuration; nothing in this documentation describes commands, keys or endpoints for them.
-
-On the node, `nau` keeps the two-way bridge to the dispatcher: it receives job dispatches and amendments and hands them to the local `soho job` commands unchanged, and it records job events, session status and decisions in a durable local outbox that the dispatcher can pull or that the node can push to a configured dispatcher URL with a per-user API key stored on the machine. Nau ships as one native Go executable per machine. `soho` stays an independent project; Nau only uses its public CLI.
-
-Status: under development. Nothing here is stable yet.
-
-## Names
-
-`nau` is the command, built from `./cmd/nau`; the old `herdr-hermes` command name and its binary are retired. `nau` uses the existing state directory, the `herdr-hermes` directory under the user's configuration directory: nothing is migrated, and a `nau` state directory is never read or created. The `HERDR_HERMES_NOWRITE` variable and the `User-Agent` header value `herdr-hermes/<version>` keep the `herdr-hermes` name. The backend is named `soho`. Only an empty `herdr_soho_bin` is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is. The wake hook reads `SOHO_JOB_ID`, `SOHO_JOB_SEQ`, `SOHO_JOB_EVENT` and `SOHO_JOB_IDEMPOTENCY_KEY`. The `config` probes of `nau doctor` run the backend with `SOHO_NOWRITE=1`.
+Nau is a read-only hub of the coding agents at work: which agents are working, on which machines, for which developers.
 
 ## Install
 
-The recommended path is the install script: it puts the `nau` binary in the bin directory from the ref. Prerequisites: Go 1.26 or newer on the `PATH`.
+The recommended path is the install script: it puts the `nau` binary in the bin directory from the ref and records `machine_label` while it is still empty. Prerequisites: Go 1.26 or newer on the `PATH`.
 
 On macOS and Linux:
 
@@ -35,9 +18,7 @@ On Windows (PowerShell):
 powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.local\bin] [-MachineLabel <label>]
 ```
 
-Updating is re-running the same script with another `--ref`. The script sets `machine_label` only when it is still empty and finishes with `nau version` and the informational `nau doctor`.
-
-On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. Go rechecks the stored selection under `config.lock`, shared by all `config set` writers, and pins only an automatic selection to a regular executable with trusted ownership and permissions along both the supplied and resolved paths. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues. The pin changes only the effective backend record and preserves other lines and their terminators; `config set` rejects CR, LF and NUL in values with exit 2.
+On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues.
 
 For development, from a checkout of the module `github.com/djalmajr/nau`:
 
@@ -47,46 +28,22 @@ go build -o <dir>/nau ./cmd/nau
 
 The binary must be on your `PATH`.
 
-### Upgrading from herdr-hermes
+## Configuration
 
-`nau` replaces the retired `herdr-hermes` binary: the commands, flags, JSON output and exit codes are the same.
+`nau` keeps its configuration in the `nau` directory under the user's configuration directory. Two keys exist:
 
-- Install `nau` on your `PATH` (`go build -o <dir>/nau ./cmd/nau`).
-- Change `job_wake_cmd=herdr-hermes wake` to `job_wake_cmd=nau wake` in the `soho` machine configuration, because `nau doctor` no longer accepts the old name.
-- The state directory is the same `herdr-hermes` directory under the user's configuration directory: nothing is migrated.
-
-## Setup
-
-1. Set the machine label that outbox records are stamped with: `nau config set machine_label <label>`.
-2. Store the per-user API key your dispatcher operator issued you: `nau auth login --key -` (the key is read from stdin and never accepted as a flag value or environment variable).
-3. Point the node at the dispatcher (HTTPS): `nau config set dispatcher_url <https-url>`. Until this is set, push is disabled and the dispatcher can still pull the outbox.
-4. Register the wake hook in the `soho` machine configuration: `job_wake_cmd=nau wake`, so every job event that wakes the dispatcher is recorded in the outbox as it happens.
-5. Verify with `nau doctor`, which reports the `soho` capabilities, the configuration state, the wake hook and the outbox counts in one JSON line.
-6. On the dispatcher host that chooses machines, list the fleet in priority order: `nau config set route_machines <label>,<label>` (dispatcher side only; the nodes do not need it — see [`docs/routing.md`](docs/routing.md)). Run the read-only preflight in [`docs/routing.md`](docs/routing.md#preflight-read-only) as the operating-system user that saved the Herdr machines, and make sure each orchestrator's Herdr agent is named after the orchestrator base — `orchestrator` or `orchestrator-<n>` by default, `<base>` or `<base>-<n>` when `route_orchestrator_name` sets another base — as `soho init` names it, or it does not count toward its machine's load.
+- `machine_label` — the label the machine reports. Set it with `nau config set machine_label <label>`.
+- `herdr_soho_bin` — the backend selection. Only the empty value is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is.
 
 ## Commands
 
-Every command prints exactly one JSON line on stdout and its diagnostics on stderr, with these exceptions: `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0; `outbox` prints one JSON line per record and then the trailer line; and the forwarded `job` subcommands copy the stdout of `soho job` unchanged, which for `job events` is JSON lines and a trailer line. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `3`, `4`, `40`, `41`, `42`, `43`.
+Every command prints exactly one JSON line on stdout and its diagnostics on stderr; `help` and `nau` run with no arguments print the plain-text usage on stdout and exit 0. On bad usage the usage text goes to stderr and stdout still carries one JSON error line. The exit codes are `0`, `2`, `4`.
 
-- `job <sub> [args]` — forward a dispatcher-facing job subcommand to `soho` (`start`, `status`, `wait`, `events`, `collect`, `amend`, `send`, `ack`, `cancel`, `close`, `list`), applying the contract input limits first.
+- `config get|set|list` — manage the machine configuration. `config set [--if-automatic] <key> <value>`.
+- `doctor` — print the status line: the version, the config directory, the machine label and the soho backend block (read-only).
 - `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`).
-- `wake` — read one job event on stdin, record it in the outbox and attempt one push (configured as the `soho` wake hook).
-- `sync [--job <id>] [--push-only]` — pull new job events for the tracked jobs into the outbox and push the pending records.
-- `push` — push the pending outbox records to the dispatcher.
-- `outbox [--since <seq>] [--wait <ms>]` — print outbox records with `seq > since` as JSON lines, then the trailer (the dispatcher pull channel; read-only).
-- `route [--machine <label>]` — dispatcher-side machine choice: probe the configured fleet read-only and print the chosen machine as one JSON line (advisory; see [`docs/routing.md`](docs/routing.md)).
-- `session start|update|end` — manage open session records for a project.
-- `decision --projeto <org/repo> --escopo global|projeto --motivo <text> [--job <id>] [<resumo>|-]` — record a decision taken outside a job.
-- `auth login|status|logout` — manage the per-user dispatcher API key.
-- `config get|set|list` — manage the machine configuration (`machine_label`, `dispatcher_url`, `herdr_soho_bin`, `push_timeout_s`, `route_machines`, `route_disabled`, `route_orchestrator_name`, `route_probe_timeout_s`, `herdr_bin`).
-- `doctor` — check the bridge prerequisites and print one status line.
-- `capabilities --json` — print the bridge capability line `{"schema":1,"bridge":1,"outbox":1,"push":1}`.
 - `version` — print the version.
 - `help` — print the usage as plain text (not JSON); running `nau` with no arguments does the same.
-
-## Pull and push
-
-The node records everything in a durable local outbox (`outbox.jsonl`, one JSON line per record with a gapless `seq`). A dispatcher that can run commands on the node reads it with `nau outbox --since <seq> --wait <ms>` — no network endpoint and no key required. When `dispatcher_url` is configured, the node also pushes pending records with the key, in `seq` order, with `Idempotency-Key` headers and a bounded retry schedule; a failed push never loses or blocks a record. The wire format, headers and exit codes are in [`docs/protocol.md`](docs/protocol.md).
 
 ## Development
 
@@ -100,8 +57,8 @@ go test -race -timeout=30m ./...
 go build ./cmd/nau
 ```
 
-The project is Go only; well-established, maintained community libraries are used when a dependency is justified, following normal engineering and security best practices. Tests are hermetic (no network beyond loopback, injected clocks) and must not hang. The vendored contract in [`docs/upstream/job-contract.md`](docs/upstream/job-contract.md) is copied verbatim and never edited; the drift test in `internal/jobapi` fails when the vendored constants drift from it.
+The project is Go, with the web UI in `web/` built by Bun (never at runtime); well-established, maintained community libraries are used when a dependency is justified, following normal engineering and security best practices. Tests are hermetic (no network beyond loopback, injected clocks) and must not hang.
 
 ## Status
 
-Phase 1 — the neutral core and the Hermes and Herdr adapters — is under development and not yet stable. The dispatcher-side receiver of the Hermes adapter does not exist yet; until it does, the node works standalone through the pull channel. The wire format may still change.
+The hub is under construction; the soho inventory is the only source.

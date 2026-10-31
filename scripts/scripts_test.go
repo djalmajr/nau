@@ -103,8 +103,9 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 		{name: "Unicode whitespace explicit", config: configWhitespace + "herdr_soho_bin" + configWhitespace + "=" + configWhitespace + "soho" + configWhitespace + "\n", backend: "soho", explicit: true},
 		{name: "Unicode whitespace auto", config: "herdr_soho_bin=" + configWhitespace + configWhitespace + "\n", backend: "soho"},
 		{name: "Unicode nonspace explicit", config: "herdr_soho_bin=\u200bsoho\u200b\n", backend: "soho", explicit: true},
-		// A file nau itself cannot load is left alone and the install still succeeds.
-		{name: "unloadable BOM key", config: "\ufeffherdr_soho_bin=soho\n", backend: "soho", unreadable: true},
+		// A BOM-prefixed key line is an unknown key: it is ignored on load
+		// and the pin appends the clean record.
+		{name: "ignored BOM key", config: "\ufeffherdr_soho_bin=soho\n", backend: "soho"},
 		{name: "unloadable line", config: "herdr_soho_bin\n", backend: "soho", unreadable: true},
 		// os.UserConfigDir accepts an absolute XDG_CONFIG_HOME without HOME on Linux.
 		{name: "XDG without HOME", missing: true, backend: "soho", linuxEmptyHome: true},
@@ -161,7 +162,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			if runtime.GOOS == "darwin" {
 				cfgRoot = filepath.Join(home, "Library", "Application Support")
 			}
-			cfgDir := filepath.Join(cfgRoot, "herdr-hermes")
+			cfgDir := filepath.Join(cfgRoot, "nau")
 			cfgFile := filepath.Join(cfgDir, "config")
 			initial := tc.config
 			if initial == "absolute" {
@@ -214,7 +215,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				env = append(env, "INSTALL_FIXTURE_FAIL=1")
 			}
 			if tc.failSet {
-				env = append(env, "HERDR_HERMES_NOWRITE=1")
+				env = append(env, "NAU_NOWRITE=1")
 			}
 			if tc.relativeCurrent {
 				// Shells differ: some return a relative lookup and others
@@ -304,7 +305,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				if tc.explicit && !strings.Contains(output, "herdr_soho_bin is set explicitly; keeping it") {
 					t.Fatal("missing explicit-value message")
 				}
-				if tc.backend != "soho" && !strings.Contains(output, "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic, and an ssh forced command (nau gate) may not find the backend") {
+				if tc.backend != "soho" && !strings.Contains(output, "nau install: warning: soho not found on the PATH; herdr_soho_bin stays automatic") {
 					t.Fatal("missing backend warning")
 				}
 				if tc.noXDG && !strings.Contains(output, "nau install: warning: cannot read the config file; herdr_soho_bin unchanged") {

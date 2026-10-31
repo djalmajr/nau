@@ -32,12 +32,12 @@ func TestSetRejectsRecordSeparators(t *testing.T) {
 
 func TestSetPreservesText(t *testing.T) {
 	for _, tc := range []struct{ name, initial, key, value, want string }{
-		{"LF", "# note\n\nmachine_label=old\npush_timeout_s=19\n", "machine_label", "new", "# note\n\nmachine_label=new\npush_timeout_s=19\n"},
-		{"CRLF", "# note\r\n\r\nmachine_label=old\r\npush_timeout_s=19\r\n", "machine_label", "new", "# note\r\n\r\nmachine_label=new\r\npush_timeout_s=19\r\n"},
+		{"LF", "# note\n\nmachine_label=old\ndispatcher_url=http://x.invalid\n", "machine_label", "new", "# note\n\nmachine_label=new\ndispatcher_url=http://x.invalid\n"},
+		{"CRLF", "# note\r\n\r\nmachine_label=old\r\ndispatcher_url=http://x.invalid\r\n", "machine_label", "new", "# note\r\n\r\nmachine_label=new\r\ndispatcher_url=http://x.invalid\r\n"},
 		// Load uses the last occurrence; the earlier duplicate must remain verbatim.
 		{"duplicate", " machine_label = first\n# middle\n\u3000machine_label = last\r\n", "machine_label", "new", " machine_label = first\n# middle\nmachine_label=new\r\n"},
-		{"append", "# note\r\npush_timeout_s=19\r\n", "machine_label", "new", "# note\r\npush_timeout_s=19\r\nmachine_label=new\r\n"},
-		{"no final newline", "# note\r\npush_timeout_s=19", "machine_label", "new", "# note\r\npush_timeout_s=19\r\nmachine_label=new\r\n"},
+		{"append", "# note\r\ndispatcher_url=http://x.invalid\r\n", "machine_label", "new", "# note\r\ndispatcher_url=http://x.invalid\r\nmachine_label=new\r\n"},
+		{"no final newline", "# note\r\ndispatcher_url=http://x.invalid", "machine_label", "new", "# note\r\ndispatcher_url=http://x.invalid\r\nmachine_label=new\r\n"},
 		{"replace no newline", "# note\nmachine_label=old", "machine_label", "new", "# note\nmachine_label=new"},
 		{"empty", "", "machine_label", "new", "machine_label=new\n"},
 	} {

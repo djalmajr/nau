@@ -1,301 +1,165 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestRouteLists covers the two list helpers: nil on the empty value and the
-// items of the normalized value otherwise.
-func TestRouteLists(t *testing.T) {
-	var empty Config
-	if got := empty.RouteMachineList(); got != nil {
-		t.Errorf("RouteMachineList on empty config = %v, want nil", got)
-	}
-	if got := empty.RouteDisabledList(); got != nil {
-		t.Errorf("RouteDisabledList on empty config = %v, want nil", got)
-	}
-	c := Config{RouteMachines: "mac-a,win-a", RouteDisabled: "win-a"}
-	if got, want := c.RouteMachineList(), []string{"mac-a", "win-a"}; !sameList(got, want) {
-		t.Errorf("RouteMachineList = %v, want %v", got, want)
-	}
-	if got, want := c.RouteDisabledList(), []string{"win-a"}; !sameList(got, want) {
-		t.Errorf("RouteDisabledList = %v, want %v", got, want)
-	}
-}
-
-func sameList(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
-}
-
-// TestSetRouteNormalization: the stored and effective form is the normalized
-// value (trimmed herdr_bin, comma-joined route lists).
-func TestSetRouteNormalization(t *testing.T) {
+// TestLoadDefaults: a missing file or directory yields the defaults
+// without error and without creating anything.
+func TestLoadDefaults(t *testing.T) {
 	dir := t.TempDir()
-	if err := Set(dir, "route_machines", " mac-a , win-a "); err != nil {
-		t.Fatalf("Set route_machines: %v", err)
-	}
-	if err := Set(dir, "herdr_bin", "  herdr-x  "); err != nil {
-		t.Fatalf("Set herdr_bin: %v", err)
-	}
+	t.Setenv("PATH", t.TempDir())
 	cfg, err := Load(dir)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.RouteMachines != "mac-a,win-a" {
-		t.Errorf("RouteMachines = %q, want %q", cfg.RouteMachines, "mac-a,win-a")
+	if cfg.MachineLabel != "" {
+		t.Errorf("MachineLabel = %q, want empty", cfg.MachineLabel)
 	}
-	if cfg.HerdrBin != "herdr-x" {
-		t.Errorf("HerdrBin = %q, want %q", cfg.HerdrBin, "herdr-x")
+	if cfg.HerdrSohoBin != "soho" {
+		t.Errorf("HerdrSohoBin = %q, want the bare name soho (PATH empty)", cfg.HerdrSohoBin)
 	}
-	if v, err := cfg.Value("route_probe_timeout_s"); err != nil || v != "20" {
-		t.Errorf("Value(route_probe_timeout_s) = %q (err %v), want %q", v, err, "20")
-	}
-}
-
-// TestSetRouteRefusals: an invalid value is refused with an error that names
-// the key and writes nothing, even when the file already exists.
-func TestSetRouteRefusals(t *testing.T) {
-	dir := t.TempDir()
-	cases := []struct {
-		key string
-		val string
-	}{
-		{"herdr_bin", ""},
-		{"herdr_bin", "   "},
-		{"route_machines", "a,,b"},
-		{"route_machines", "a,"},
-		{"route_machines", "-x"},
-		{"route_machines", "mac-a,mac-a"},
-		{"route_disabled", "win-a,win-a"},
-		{"route_orchestrator_name", ""},
-		{"route_orchestrator_name", "Orchestrator"},
-		{"route_orchestrator_name", "9name"},
-		{"route_probe_timeout_s", "0"},
-		{"route_probe_timeout_s", "121"},
-		{"route_probe_timeout_s", "x"},
-	}
-	for _, tc := range cases {
-		if err := Set(dir, tc.key, tc.val); err == nil {
-			t.Errorf("Set %s %q: want error, got nil", tc.key, tc.val)
-		} else if !strings.Contains(err.Error(), tc.key) {
-			t.Errorf("Set %s %q: error does not name the key: %v", tc.key, tc.val, err)
-		}
+	if cfg.HerdrSohoBinStored() != "" {
+		t.Errorf("HerdrSohoBinStored = %q, want empty (the auto form)", cfg.HerdrSohoBinStored())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "config")); !os.IsNotExist(err) {
-		t.Errorf("refused sets created the config file: %v", err)
-	}
-	// The refusal happens before any read or write of the file.
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("machine_label=lab-1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	before, err := os.ReadFile(filepath.Join(dir, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Set(dir, "route_machines", "-x"); err == nil {
-		t.Error("Set route_machines -x over an existing file: want error, got nil")
-	}
-	after, err := os.ReadFile(filepath.Join(dir, "config"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != string(before) {
-		t.Errorf("refused Set changed the file:\n%s", after)
-	}
-	// A valid set is also refused when the file holds an invalid value.
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("route_machines=-x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := Set(dir, "machine_label", "lab"); err == nil {
-		t.Error("Set machine_label over an invalid file: want error, got nil")
+		t.Errorf("Load created the config file: %v", err)
 	}
 }
 
-// TestLoadRouteErrorsNameTheKey: an invalid value in the file is refused at
-// load time with an error that names the key.
-func TestLoadRouteErrorsNameTheKey(t *testing.T) {
-	cases := []struct {
-		line string
-		want string
-	}{
-		{"route_machines=mac-a,mac-a\n", "route_machines"},
-		{"route_machines=-x\n", `invalid machine label "-x"`},
-		{"route_machines=a,,b\n", "route_machines"},
-		{"route_disabled=win-a,win-a\n", "route_disabled"},
-		{"route_disabled=a,\n", "route_disabled"},
-		{"route_orchestrator_name=Orchestrator\n", "route_orchestrator_name"},
-		{"route_orchestrator_name=9name\n", "route_orchestrator_name"},
-		{"route_probe_timeout_s=0\n", "route_probe_timeout_s must be an integer from 1 to 120"},
-		{"route_probe_timeout_s=121\n", "route_probe_timeout_s must be an integer from 1 to 120"},
-		{"route_probe_timeout_s=abc\n", "route_probe_timeout_s must be an integer from 1 to 120"},
-		{"herdr_bin=\n", "herdr_bin"},
-	}
-	for _, tc := range cases {
-		dir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(dir, "config"), []byte(tc.line), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Load(dir)
-		if err == nil {
-			t.Errorf("Load with %q: want error, got nil", tc.line)
-			continue
-		}
-		if !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("Load with %q: error = %v, want it to contain %q", tc.line, err, tc.want)
-		}
-	}
-}
-
-// TestRouteValidationMessages pins the exact error texts of the validation
-// examples.
-func TestRouteValidationMessages(t *testing.T) {
+// TestLoadIgnoresRemovedKeys: an old configuration file that carries keys
+// removed from the configuration still reads; the removed keys are
+// ignored, the kept key takes its value, and the stored backend form is
+// preserved.
+func TestLoadIgnoresRemovedKeys(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("route_machines=-x\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); err == nil {
-		t.Fatal("Load: want error, got nil")
-	} else if err.Error() != `config: route_machines: invalid machine label "-x"` {
-		t.Errorf("Load error = %q", err.Error())
-	}
-	dir = t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte("route_probe_timeout_s=0\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(dir); err == nil {
-		t.Fatal("Load: want error, got nil")
-	} else if err.Error() != "config: route_probe_timeout_s must be an integer from 1 to 120" {
-		t.Errorf("Load error = %q", err.Error())
-	}
-	// Set reports the same texts without the "config: " prefix, which the
-	// command layer prepends.
-	if err := Set(dir, "route_machines", "-x"); err == nil {
-		t.Fatal("Set route_machines: want error, got nil")
-	} else if err.Error() != `route_machines: invalid machine label "-x"` {
-		t.Errorf("Set error = %q", err.Error())
-	}
-	if err := Set(dir, "route_probe_timeout_s", "121"); err == nil {
-		t.Fatal("Set route_probe_timeout_s: want error, got nil")
-	} else if err.Error() != "route_probe_timeout_s must be an integer from 1 to 120" {
-		t.Errorf("Set error = %q", err.Error())
-	}
-}
-
-// TestLoadNormalizesRouteValues: hand-edited values are validated and the
-// effective configuration holds the normalized form.
-func TestLoadNormalizesRouteValues(t *testing.T) {
-	dir := t.TempDir()
-	content := "route_machines= mac-a , win-a \nroute_disabled=win-a\nherdr_bin=  herdr-x  \n"
-	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(content), 0o600); err != nil {
+	t.Setenv("PATH", t.TempDir())
+	data := "machine_label=m1\ndispatcher_url=http://x.invalid\npush_timeout_s=19\nroute_machines=mac-a,win-a\nherdr_soho_bin=/abs/soho\n"
+	if err := os.WriteFile(filepath.Join(dir, "config"), []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(dir)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatalf("Load with removed keys: %v", err)
 	}
-	if cfg.RouteMachines != "mac-a,win-a" {
-		t.Errorf("RouteMachines = %q, want %q", cfg.RouteMachines, "mac-a,win-a")
+	if cfg.MachineLabel != "m1" {
+		t.Errorf("MachineLabel = %q, want m1", cfg.MachineLabel)
 	}
-	if cfg.RouteDisabled != "win-a" {
-		t.Errorf("RouteDisabled = %q, want %q", cfg.RouteDisabled, "win-a")
+	if cfg.HerdrSohoBin != "/abs/soho" || cfg.HerdrSohoBinStored() != "/abs/soho" {
+		t.Errorf("HerdrSohoBin = %q (stored %q), want /abs/soho", cfg.HerdrSohoBin, cfg.HerdrSohoBinStored())
 	}
-	if cfg.HerdrBin != "herdr-x" {
-		t.Errorf("HerdrBin = %q, want %q", cfg.HerdrBin, "herdr-x")
+	// The kept key of an all-removed file: an empty label.
+	removedOnly := t.TempDir()
+	if err := os.WriteFile(filepath.Join(removedOnly, "config"), []byte("dispatcher_url=http://x.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// TestRouteLabelFormatsValid: the documented valid label examples load and
-// store cleanly (the router reserved label, a dashed label list and a label
-// with a dot and underscore).
-func TestRouteLabelFormatsValid(t *testing.T) {
-	dir := t.TempDir()
-	for _, want := range []string{"local", "mac-a,win-a", "win.a_1"} {
-		if err := Set(dir, "route_machines", want); err != nil {
-			t.Errorf("Set route_machines %q: %v", want, err)
-			continue
-		}
-		cfg, err := Load(dir)
-		if err != nil {
-			t.Errorf("Load after Set %q: %v", want, err)
-			continue
-		}
-		if cfg.RouteMachines != want {
-			t.Errorf("RouteMachines = %q, want %q", cfg.RouteMachines, want)
-		}
+	cfg, err = Load(removedOnly)
+	if err != nil {
+		t.Fatalf("Load of an all-removed file: %v", err)
+	}
+	if cfg.MachineLabel != "" || cfg.HerdrSohoBinStored() != "" {
+		t.Errorf("all-removed file = %q stored %q, want the defaults", cfg.MachineLabel, cfg.HerdrSohoBinStored())
 	}
 }
 
-// TestUnmatchedDisabled: the route_disabled labels that are not in
-// route_machines, in route_disabled order; nil when either list is empty or
-// every exclusion matches the fleet (staging an exclusion before the fleet
-// is not reported).
-func TestUnmatchedDisabled(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		machines string
-		disabled string
-		want     []string
+// TestLoadMalformedLineStillErrors: a line without = is a format error
+// whatever the key, and a removed key with a value is not one.
+func TestLoadMalformedLineStillErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		wantErr bool
 	}{
-		{"empty fleet staged exclusion", "", "ghost", nil},
-		{"both lists empty", "", "", nil},
-		{"fleet without exclusions", "local,win-a", "", nil},
-		{"every exclusion matches", "local,win-a", "win-a", nil},
-		{"one unmatched", "local,win-a", "ghost-box", []string{"ghost-box"}},
-		{"mixed keeps route_disabled order", "local,win-a", "ghost,win-a,typo", []string{"ghost", "typo"}},
-	} {
+		{"no equals", "machine_label", true},
+		{"no equals removed key", "dispatcher_url", true},
+		{"removed key with value", "dispatcher_url=http://x.invalid", false},
+		{"unknown key with value", "no_such_key=1", false},
+	}
+	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := Config{RouteMachines: tc.machines, RouteDisabled: tc.disabled}
-			got := cfg.UnmatchedDisabled()
-			if tc.want == nil {
-				if got != nil {
-					t.Fatalf("UnmatchedDisabled = %v, want nil", got)
-				}
-				return
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "config"), []byte(tc.line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
 			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("UnmatchedDisabled = %v, want %v", got, tc.want)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Fatalf("UnmatchedDisabled = %v, want %v", got, tc.want)
-				}
+			_, err := Load(dir)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Load %q: err = %v, want error %t", tc.line, err, tc.wantErr)
 			}
 		})
 	}
 }
 
-// TestRouteListLimits: 32 labels are the limit and valid, 33 are refused.
-func TestRouteListLimits(t *testing.T) {
-	labels := make([]string, 0, 33)
-	for i := 0; i < 33; i++ {
-		labels = append(labels, fmt.Sprintf("m%02d", i))
+// TestSetRefusesRemovedKey: setting a key the configuration no longer
+// defines is refused as an unknown key, before anything is read or
+// written; the refusal names the key.
+func TestSetRefusesRemovedKey(t *testing.T) {
+	for _, key := range []string{"dispatcher_url", "push_timeout_s", "herdr_bin", "route_machines", "route_disabled", "route_orchestrator_name", "route_probe_timeout_s", "no_such_key"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config")
+			const initial = "machine_label=m1\n"
+			if err := os.WriteFile(path, []byte(initial), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := Set(dir, key, "value")
+			if err == nil {
+				t.Fatalf("Set %q: err = nil, want unknown key", key)
+			}
+			if !strings.Contains(err.Error(), key) {
+				t.Errorf("Set %q error %q does not name the key", key, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil || string(got) != initial {
+				t.Fatalf("refusal changed config: %q, %v", got, err)
+			}
+		})
 	}
+	// Refused on a fresh directory too: no file is created.
 	dir := t.TempDir()
-	if err := Set(dir, "route_machines", strings.Join(labels[:32], ",")); err != nil {
-		t.Fatalf("Set with 32 labels: %v", err)
+	if err := Set(dir, "dispatcher_url", "value"); err == nil {
+		t.Fatal("Set removed key on a fresh dir: err = nil, want unknown key")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "config")); !os.IsNotExist(err) {
+		t.Errorf("refused Set created the config file: %v", err)
+	}
+}
+
+// TestValueKnownKeys: Value returns the effective values of the two keys
+// and refuses a removed key with the unknown-key error that names it.
+func TestValueKnownKeys(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", t.TempDir())
+	if err := Set(dir, "machine_label", "m1"); err != nil {
+		t.Fatal(err)
 	}
 	cfg, err := Load(dir)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatal(err)
 	}
-	if got := len(cfg.RouteMachineList()); got != 32 {
-		t.Errorf("RouteMachineList has %d items, want 32", got)
+	if v, err := cfg.Value("machine_label"); err != nil || v != "m1" {
+		t.Errorf("Value(machine_label) = %q (err %v), want m1", v, err)
 	}
-	if err := Set(dir, "route_machines", strings.Join(labels, ",")); err == nil {
-		t.Fatal("Set with 33 labels: want error, got nil")
-	} else if !strings.Contains(err.Error(), "32") {
-		t.Errorf("Set with 33 labels: error = %v, want the 32-item limit named", err)
+	if v, err := cfg.Value("herdr_soho_bin"); err != nil || v != "soho" {
+		t.Errorf("Value(herdr_soho_bin) = %q (err %v), want soho", v, err)
+	}
+	for _, key := range []string{"dispatcher_url", "push_timeout_s", "herdr_bin", "route_machines"} {
+		if _, err := cfg.Value(key); err == nil || !strings.Contains(err.Error(), key) {
+			t.Errorf("Value(%s) = (err %v), want the unknown-key error naming the key", key, err)
+		}
+	}
+}
+
+// TestKeys: the two keys in canonical order.
+func TestKeys(t *testing.T) {
+	want := "machine_label,herdr_soho_bin"
+	var got []string
+	for _, k := range Keys() {
+		got = append(got, k)
+	}
+	if strings.Join(got, ",") != want {
+		t.Errorf("Keys = %v, want %v", got, strings.Split(want, ","))
 	}
 }

@@ -14,8 +14,8 @@ import (
 const ProgramNau = "nau"
 
 // Env carries every dependency a command needs from the process. Tests
-// replace each field; ConfigDir is the herdr-hermes directory itself (in
-// production <user config dir>/herdr-hermes), never its parent.
+// replace each field; ConfigDir is the nau directory itself (in
+// production <user config dir>/nau), never its parent.
 type Env struct {
 	Stdin          io.Reader
 	Stdout, Stderr io.Writer
@@ -26,8 +26,7 @@ type Env struct {
 	Program string
 	Getenv  func(string) string
 	// Environ returns the exact environment of the nau process;
-	// forwarded subprocesses get this environment and nothing else. The
-	// API key is never in it because it is never put there.
+	// forwarded subprocesses get this environment and nothing else.
 	Environ   func() []string
 	ConfigDir string
 	Now       func() time.Time
@@ -59,7 +58,7 @@ func EnvFromOS() Env {
 		Sleep:   sleepCtx,
 	}
 	if cfg, err := os.UserConfigDir(); err == nil && cfg != "" {
-		env.ConfigDir = filepath.Join(cfg, "herdr-hermes")
+		env.ConfigDir = filepath.Join(cfg, "nau")
 	}
 	return env
 }
