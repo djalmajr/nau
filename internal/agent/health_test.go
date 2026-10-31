@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // TestHealthRoundTrip: the file is written atomically in the shape of
@@ -88,5 +89,38 @@ func TestHealthKeyNeverStored(t *testing.T) {
 func TestReadHealthMissing(t *testing.T) {
 	if _, err := ReadHealth(filepath.Join(t.TempDir(), "absent.json")); err == nil {
 		t.Error("ReadHealth accepted an absent file")
+	}
+}
+
+// TestWriteAtomicWhileAReaderHoldsTheFile: a reader that has the
+// health file open (nau doctor, for one) must not make the write fail.
+// On Windows the rename over an open file fails until the reader
+// closes it, and the write waits for that; on Unix the rename never
+// waits. The reader here closes the file after 100 ms.
+func TestWriteAtomicWhileAReaderHoldsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state", "health.json")
+	if err := writeAtomic(path, []byte("{\"n\":1}\n")); err != nil {
+		t.Fatalf("the first write: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open the health file as a reader: %v", err)
+	}
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		f.Close()
+		close(released)
+	}()
+	if err := writeAtomic(path, []byte("{\"n\":2}\n")); err != nil {
+		t.Fatalf("a write while a reader holds the file failed: %v", err)
+	}
+	<-released
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(got) != "{\"n\":2}\n" {
+		t.Fatalf("health = %q, want the second write", got)
 	}
 }

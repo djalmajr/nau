@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 )
 
 // The health states. last_error always holds the current state when
@@ -128,7 +129,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := os.Chmod(tmp, 0o600); err != nil {
 		return modeErrIfNone(modeErr, err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := renameReplace(tmp, path); err != nil {
 		return modeErrIfNone(modeErr, err)
 	}
 	tmp = ""
@@ -147,4 +148,28 @@ func modeErrIfNone(modeErr, err error) error {
 		return fmt.Errorf("%w: %v", errHealthDirMode, modeErr)
 	}
 	return nil
+}
+
+// The retries of renameReplace on Windows: a reader that has the
+// health file open (nau doctor, a test) holds it for a moment, and the
+// rename over it fails until the reader closes it.
+var (
+	renameRetries = 20
+	renameWait    = 25 * time.Millisecond
+)
+
+// renameReplace renames tmp over path. On Windows a rename over a file
+// another process has open fails (Go opens files without
+// FILE_SHARE_DELETE), so the rename is tried again for a short while
+// instead of failing the health write, which would stop the agent.
+func renameReplace(tmp, path string) error {
+	err := os.Rename(tmp, path)
+	if err == nil || runtime.GOOS != "windows" {
+		return err
+	}
+	for i := 0; i < renameRetries && err != nil; i++ {
+		time.Sleep(renameWait)
+		err = os.Rename(tmp, path)
+	}
+	return err
 }
