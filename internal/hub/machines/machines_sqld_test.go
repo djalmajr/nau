@@ -31,17 +31,17 @@ const testBootstrapToken = "test-bootstrap-622"
 // scenarios: the machine tables and the tables of the layers the real
 // flow writes (the accounts and the ingest).
 var sqldMachineTables = []string{
-	"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+	"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 	"agent_history", "agents_current", "hidden_counts", "working_hourly",
 	"inventory_snapshots", "login_failures", "sessions", "invites",
-	"users", "hub_meta",
+	"users", "accounts_guard", "hub_meta",
 }
 
 // hubZeroTables is the order of every table the hub migrations create:
 // the children first, so the foreign keys never block the delete or
 // the drop of a parent.
 var hubZeroTables = []string{
-	"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+	"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 	"agent_history", "agents_current", "hidden_counts", "working_hourly",
 	"inventory_snapshots", "login_failures", "sessions", "invites",
 	"users", "pairing_guard", "ingest_guard", "accounts_guard",
@@ -114,7 +114,7 @@ func TestSQLDMachinesScenarios(t *testing.T) {
 	t.Cleanup(func() {
 		stmts := make([]store.Stmt, 0, 8)
 		for _, table := range []string{
-			"ingest_deliveries", "pairing_attempts", "pairings", "machines",
+			"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
 			"login_failures", "sessions", "invites", "users",
 		} {
 			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
@@ -178,7 +178,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 
 	// The bootstrap owner.
 	ownerID, ownerCookie := bootstrapSQLUser(t, srv, "owner", "owner@example.test")
-	users := map[string]accounts.User{"owner": {ID: ownerID, Role: accounts.RoleOwner}}
+	users := map[string]accounts.User{"owner": {ID: ownerID, Name: "owner", Email: "owner@example.test", Role: accounts.RoleOwner}}
 	cookies := map[string]string{"owner": ownerCookie}
 	for _, who := range []struct {
 		name  string
@@ -188,7 +188,7 @@ func freshSQLScenario(t *testing.T, client *sqld.Client) *scenario {
 		{"bob", "bob@example.test"},
 	} {
 		id, cookie := memberSQLUser(t, srv, ownerCookie, who.name, who.email)
-		users[who.name] = accounts.User{ID: id, Role: accounts.RoleMember}
+		users[who.name] = accounts.User{ID: id, Name: who.name, Email: who.email, Role: accounts.RoleMember}
 		cookies[who.name] = cookie
 	}
 	return &scenario{
@@ -297,4 +297,76 @@ func cookieOf(t *testing.T, resp hub.Response) string {
 	}
 	t.Fatal("the response has no session cookie")
 	return ""
+}
+
+// TestSQLDDeveloperCounters is the counters of the developers route
+// on the real sqld: several accounts with different counts, grouped
+// by the right key of each account.
+func TestSQLDDeveloperCounters(t *testing.T) {
+	url := os.Getenv("NAU_TEST_SQLD_URL")
+	if url == "" {
+		t.Skip("set NAU_TEST_SQLD_URL to run the developers counters against a real sqld")
+	}
+	client, err := sqld.New(url, "")
+	if err != nil {
+		t.Fatalf("sqld.New: %v", err)
+	}
+	ctx := context.Background()
+	resetToZero(t, client, ctx)
+	if err := (&migrate.Runner{Store: client, Now: time.Now}).Apply(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() {
+		stmts := make([]store.Stmt, 0, 9)
+		for _, table := range []string{
+			"ingest_deliveries", "pairing_attempts", "pairings", "machines", "shares",
+			"login_failures", "sessions", "invites", "users",
+		} {
+			stmts = append(stmts, store.Stmt{SQL: "DELETE FROM " + table})
+		}
+		if _, err := client.Batch(ctx, stmts); err != nil {
+			t.Logf("the cleanup of the rows: %v", err)
+		}
+	})
+	s := freshSQLScenario(t, client)
+	// alice has two machines, one of them shared with bob; bob has
+	// one machine, shared with alice and with the owner of the hub.
+	da1, _ := s.deliver(t, "alice", "m1")
+	s.deliver(t, "alice", "m2")
+	db1, _ := s.deliver(t, "bob", "m3")
+	for _, sh := range []struct{ machine, by, email string }{
+		{da1.MachineID, "alice", "bob@example.test"},
+		{db1.MachineID, "bob", "alice@example.test"},
+		{db1.MachineID, "bob", "owner@example.test"},
+	} {
+		r := s.doJSON("POST", "/api/machines/"+sh.machine+"/shares", map[string]string{"email": sh.email}, s.asUser(sh.by))
+		if r.Status != 201 {
+			t.Fatalf("share %s with %s: %d %s, want 201", sh.machine, sh.email, r.Status, r.Body)
+		}
+	}
+	// The owner of the hub sees every account; the counters of each
+	// account hold the counts of that account: the machines, the
+	// shares that reach the account and the shares the account gives.
+	r := s.do("GET", "/api/developers", nil, s.asUser("owner"), false)
+	if r.Status != 200 {
+		t.Fatalf("developers of the owner: %d %s, want 200", r.Status, r.Body)
+	}
+	devs := parseDevelopers(t, r.Body)
+	want := map[string][3]int{
+		s.users["alice"].ID: {2, 1, 1}, // machines, incoming, outgoing
+		s.users["bob"].ID:   {1, 1, 2},
+		s.users["owner"].ID: {0, 1, 0},
+	}
+	if len(devs) != len(want) {
+		t.Fatalf("developers of the owner = %+v, want the three accounts", devs)
+	}
+	for _, d := range devs {
+		w, ok := want[d.ID]
+		if !ok {
+			t.Fatalf("the account %s of the owner listing, want alice, bob and the owner", d.ID)
+		}
+		if d.Machines != w[0] || d.SharesWithMe != w[1] || d.SharedByMe != w[2] {
+			t.Fatalf("counts of %s = [%d %d %d], want [%d %d %d]", d.ID, d.Machines, d.SharesWithMe, d.SharedByMe, w[0], w[1], w[2])
+		}
+	}
 }
