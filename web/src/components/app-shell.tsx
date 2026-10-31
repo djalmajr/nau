@@ -295,7 +295,7 @@ function UserMenu() {
   );
 }
 
-function LanguageMenu() {
+export function LanguageMenu() {
   const { locale, setLocale, t } = useI18n();
   const selected = LOCALE_OPTIONS.find((option) => option.value === locale) ?? LOCALE_OPTIONS[0];
 
@@ -330,7 +330,7 @@ function LanguageMenu() {
   );
 }
 
-function ThemeMenu() {
+export function ThemeMenu() {
   const { t } = useI18n();
   const { resolvedTheme, setTheme, theme } = useTheme();
   const options: Array<{ label: string; value: ThemePreference }> = [

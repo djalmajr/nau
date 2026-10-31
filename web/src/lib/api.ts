@@ -105,9 +105,12 @@ async function req<T>(path: string, init?: RequestInit, user?: string): Promise<
     }
     // 401 numa chamada autenticada significa sessão perdida: o handler
     // central remove a sessão do cache e leva o usuário de volta ao login.
-    // O POST de login é a exceção (acima).
-    const isLoginPost = path === "/session" && String(init?.method ?? "GET").toUpperCase() === "POST";
-    if (res.status === 401 && !isLoginPost) unauthorizedHandler?.(user);
+    // Duas chamadas são a exceção (o 401 ali é erro de formulário, não
+    // sessão expirada): o POST de login (credencial errada) e o POST de
+    // troca de senha (senha atual incorreta).
+    const method = String(init?.method ?? "GET").toUpperCase();
+    const expected401 = (path === "/session" && method === "POST") || path === "/session/password";
+    if (res.status === 401 && !expected401) unauthorizedHandler?.(user);
     throw new ApiError(res.status, serverError);
   }
   if (res.status === 204) return undefined as T;
@@ -235,6 +238,60 @@ export interface OverviewResponse {
   top_projects: TopProject[];
 }
 
+/** Máquina com os dados da chave (GET /api/machines): as próprias e as
+ *  compartilhadas. `shared_with` vem preenchido só nas próprias. */
+export interface HubMachine {
+  id: string;
+  name: string;
+  developer: Developer;
+  created_ms: number;
+  revoked: boolean;
+  last_seen_ms: number | null;
+  online: boolean;
+  shared_with: Developer[];
+}
+
+export interface MachinesResponse {
+  machines: HubMachine[];
+}
+
+/** Desenvolvedor com as contagens de contabilidade (GET /api/developers). */
+export interface HubDeveloper {
+  id: string;
+  name: string;
+  email: string;
+  machines: number;
+  /** Máquinas que este desenvolvedor compartilha com o usuário. */
+  shares_with_me: number;
+  /** Máquinas que o usuário compartilha com este desenvolvedor. */
+  shared_by_me: number;
+}
+
+export interface DevelopersResponse {
+  developers: HubDeveloper[];
+}
+
+/** Convite pendente (GET/POST /api/invites). O `token` só existe na resposta
+ *  do POST: aparece uma única vez. */
+export interface Invite {
+  id: string;
+  email: string;
+  expires_ms: number;
+}
+
+export interface InvitesResponse {
+  invites: Invite[];
+}
+
+export interface InviteCreated extends Invite {
+  token: string;
+}
+
+/** Versão do hub (GET /api/version). */
+export interface VersionResponse {
+  version: string;
+}
+
 export const api = {
   /** GET /api/session — 200 { user } ou 401 { error: "unauthenticated" }. */
   getSession: (signal?: AbortSignal) => req<SessionResponse>("/session", { signal }),
@@ -257,4 +314,67 @@ export const api = {
   /** GET /api/overview — 200 com contagens, máquinas, espera, 24 h e projetos. */
   getOverview: (options: RequestOptions = {}) =>
     req<OverviewResponse>("/overview", { signal: options.signal }, options.user),
+  /** GET /api/machines — 200 { machines }; as próprias + as compartilhadas. */
+  getMachines: (options: RequestOptions = {}) =>
+    req<MachinesResponse>("/machines", { signal: options.signal }, options.user),
+  /** DELETE /api/machines/{id} — 204 revoga a chave (só o dono; 404 caso contrário). */
+  revokeMachine: (id: string, options: RequestOptions = {}) =>
+    req<void>(`/machines/${encodeURIComponent(id)}`, { method: "DELETE", signal: options.signal }, options.user),
+  /** POST /api/pairings/confirm — 204 vincula o pareamento; 400 código inválido/expirado;
+   *  429 depois de 10 códigos errados em 15 min. O código pode vir com ou sem
+   *  hífen e em qualquer caixa (o servidor normaliza). */
+  confirmPairing: (code: string, options: RequestOptions = {}) =>
+    req<void>("/pairings/confirm", {
+      body: JSON.stringify({ code }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** POST /api/machines/{id}/shares — 201 { developer }; 404 máquina não própria
+   *  ou e-mail sem conta (os dois casos se parecem). */
+  shareMachine: (id: string, email: string, options: RequestOptions = {}) =>
+    req<{ developer: Developer }>(`/machines/${encodeURIComponent(id)}/shares`, {
+      body: JSON.stringify({ email }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** DELETE /api/machines/{id}/shares/{developerId} — 204 encerra o compartilhamento. */
+  unshareMachine: (id: string, developerId: string, options: RequestOptions = {}) =>
+    req<void>(`/machines/${encodeURIComponent(id)}/shares/${encodeURIComponent(developerId)}`, {
+      method: "DELETE",
+      signal: options.signal,
+    }, options.user),
+  /** GET /api/developers — 200 { developers }. */
+  getDevelopers: (options: RequestOptions = {}) =>
+    req<DevelopersResponse>("/developers", { signal: options.signal }, options.user),
+  /** POST /api/invites — 201 { id, email, expires_ms, token } (owner; 403 membro).
+   *  O token aparece só nesta resposta. */
+  createInvite: (email: string, options: RequestOptions = {}) =>
+    req<InviteCreated>("/invites", {
+      body: JSON.stringify({ email, role: "member" }),
+      method: "POST",
+      signal: options.signal,
+    }, options.user),
+  /** GET /api/invites — 200 { invites } (só os pendentes). */
+  getInvites: (options: RequestOptions = {}) =>
+    req<InvitesResponse>("/invites", { signal: options.signal }, options.user),
+  /** DELETE /api/invites/{id} — 204. */
+  revokeInvite: (id: string, options: RequestOptions = {}) =>
+    req<void>(`/invites/${encodeURIComponent(id)}`, { method: "DELETE", signal: options.signal }, options.user),
+  /** POST /api/invites/accept — sem sessão: 201 { user } (+cookie),
+   *  400 convite inválido/expirado, 409 e-mail já usado. */
+  acceptInvite: (token: string, name: string, password: string) =>
+    req<SessionResponse>("/invites/accept", {
+      body: JSON.stringify({ name, password, token }),
+      method: "POST",
+    }),
+  /** POST /api/session/password — 204 (nova cookie; demais sessões terminam);
+   *  401 senha atual errada; 400 weak_password. */
+  changePassword: (current: string, newPassword: string) =>
+    req<void>("/session/password", {
+      body: JSON.stringify({ current, new: newPassword }),
+      method: "POST",
+    }),
+  /** GET /api/version — 200 { version }. */
+  getVersion: (options: RequestOptions = {}) =>
+    req<VersionResponse>("/version", { signal: options.signal }, options.user),
 };

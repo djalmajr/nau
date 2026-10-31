@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { renderHubApp, type HubApiState } from "@/test/hub-harness";
+import { defaultHubState, renderHubApp } from "@/test/hub-harness";
 
 beforeEach(() => {
   localStorage.clear();
@@ -64,10 +64,7 @@ describe("overview", () => {
   });
 
   it("shows the empty states when the hub has no data", async () => {
-    const empty: HubApiState = {
-      agentDetail: {},
-      agents: null,
-      calls: [],
+    const empty = defaultHubState({
       overview: {
         counts: { done: 0, idle: 0, needs_you: 0, unknown: 0, working: 0 },
         developers: 0,
@@ -78,7 +75,7 @@ describe("overview", () => {
         top_projects: [],
         working_24h: Array.from({ length: 24 }, (_, index) => ({ hour_ms: index, working: 0 })),
       },
-    };
+    });
     renderHubApp("/", empty);
     expect(await screen.findByText("Ninguém esperando por você")).toBeInTheDocument();
     expect(screen.getByText("Nenhuma máquina conectada.")).toBeInTheDocument();
@@ -87,12 +84,7 @@ describe("overview", () => {
 
   it("shows the error state with retry when the request fails", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
-    const state: HubApiState = {
-      agentDetail: {},
-      agents: null,
-      calls: [],
-      overview: null,
-    };
+    const state = defaultHubState({ overview: null });
     renderHubApp("/", state);
     expect(await screen.findByText("Algo deu errado. Tente novamente.")).toBeInTheDocument();
     const callsBefore = state.calls.filter((call) => call.url === "/api/overview").length;

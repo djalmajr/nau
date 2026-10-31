@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { CircleSlash, TriangleAlert, type LucideIcon } from "lucide-react";
+import { ArrowLeft, CircleSlash, TriangleAlert, type LucideIcon } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/lib/i18n";
@@ -34,6 +34,30 @@ export function NotFoundPage() {
         {t("notFound.back")}
       </Link>
     </div>
+  );
+}
+
+/** Barra de volta "← <rótulo>" no topo das telas de segundo nível; leva ao
+ *  destino com os parâmetros que a URL de origem carrega (view e filtros). */
+export function BackBar({
+  back,
+  label,
+}: {
+  back: { search?: object; to: string };
+  label: string;
+}) {
+  return (
+    <Link
+      className={cn(
+        "-m-1.5 inline-flex items-center gap-1.5 rounded-md p-1.5 text-sm text-muted-foreground outline-none",
+        "transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+      search={back.search}
+      to={back.to}
+    >
+      <ArrowLeft aria-hidden className="size-4" />
+      {label}
+    </Link>
   );
 }
 
