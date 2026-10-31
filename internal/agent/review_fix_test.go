@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -292,6 +293,9 @@ func TestReviewEventsCaptureIsCleared(t *testing.T) {
 // TestReviewExistingHealthDirectoryMode: a health directory that
 // already exists is still brought to the private mode after the write.
 func TestReviewExistingHealthDirectoryMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no POSIX modes: the 0700/0600 contract is a Unix one")
+	}
 	dir := filepath.Join(t.TempDir(), "state")
 	if e := os.Mkdir(dir, 0755); e != nil {
 		t.Fatal(e)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -46,7 +47,9 @@ func TestHealthRoundTrip(t *testing.T) {
 	if string(raw) != wantRaw {
 		t.Errorf("raw health = %s, want %s", raw, wantRaw)
 	}
-	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o600 {
+	// Windows has no POSIX modes (a file reports 0666): the private
+	// mode is a Unix contract.
+	if fi, err := os.Stat(path); err == nil && runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("the health file mode = %v, want 0600", fi.Mode().Perm())
 	}
 	// No temp file is left behind.
