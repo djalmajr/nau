@@ -158,8 +158,13 @@ func (c *Client) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result,
 			return nil, errors.New("sqld: malformed batch step error")
 		}
 		if i >= 1 && i <= n {
-			return nil, fmt.Errorf("sqld: batch statement %d: server error%s", i, codeSuffix(we.Code))
+			// The user statement that failed: a StatementError with
+			// the statement number and, when well-formed, its code.
+			// The message carries no server text.
+			return nil, fmt.Errorf("sqld: batch statement %w", &store.StatementError{Index: i, Code: validatedCode(we.Code)})
 		}
+		// The control steps (BEGIN, COMMIT, ROLLBACK) are not user
+		// statements: they keep a plain error, never a StatementError.
 		return nil, fmt.Errorf("sqld: batch step %d: server error%s", i, codeSuffix(we.Code))
 	}
 	out := make([]store.Result, 0, n)
@@ -292,13 +297,24 @@ type wireError struct {
 // uncontrolled shape reaches the error.
 var hranaCodePattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 
-// codeSuffix builds the " (code ...)" part of an error from a Hrana
-// code; an empty or malformed code yields no suffix.
+// codeSuffix builds the " (code ...)" part of a plain error from a
+// Hrana code; an empty or malformed code yields no suffix.
 func codeSuffix(code string) string {
 	if !hranaCodePattern.MatchString(code) {
 		return ""
 	}
 	return " (code " + code + ")"
+}
+
+// validatedCode keeps a Hrana error code only in the shape
+// hranaCodePattern allows, for the Code of a StatementError; anything
+// else is dropped, so no server text of an uncontrolled shape reaches
+// the typed error.
+func validatedCode(code string) string {
+	if !hranaCodePattern.MatchString(code) {
+		return ""
+	}
+	return code
 }
 
 type wireResponse struct {
@@ -366,13 +382,14 @@ func (c *Client) pipeline(ctx context.Context, reqs []any) ([]wireItem, error) {
 	}
 	for i, item := range p.Results {
 		if item.Type == "error" {
-			// The error result is opaque: only the request index and a
-			// well-formed code are reported, never its message.
+			// The error result is opaque: the single statement of the
+			// request fails with index 0 and a well-formed code, never
+			// its message.
 			code := ""
 			if item.Error != nil {
-				code = item.Error.Code
+				code = validatedCode(item.Error.Code)
 			}
-			return nil, fmt.Errorf("sqld: request %d: server error%s", i, codeSuffix(code))
+			return nil, fmt.Errorf("sqld: request %w", &store.StatementError{Index: 0, Code: code})
 		}
 		if item.Type != "ok" || item.Response == nil {
 			return nil, fmt.Errorf("sqld: request %d: unexpected result type", i)

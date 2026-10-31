@@ -25,6 +25,7 @@ const (
 	hubShutdownTimeout = 10 * time.Second
 	hubEnvDBURL        = "NAU_HUB_DB_URL"
 	hubEnvDBToken      = "NAU_HUB_DB_TOKEN"
+	hubEnvCronToken    = "NAU_HUB_CRON_TOKEN"
 	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>]"
 )
 
@@ -179,9 +180,10 @@ func cmdHubServe(args []string, env Env) int {
 		v = devVersion(debug.ReadBuildInfo())
 	}
 	srv := httpserve.NewServer(httpserve.New(hub.New(hub.Deps{
-		Store:   st,
-		Now:     env.Now,
-		Version: v,
+		Store:     st,
+		Now:       env.Now,
+		Version:   v,
+		CronToken: env.Getenv(hubEnvCronToken),
 	}, static)))
 	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
 

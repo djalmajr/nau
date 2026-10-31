@@ -3,6 +3,7 @@ package sqld
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -590,6 +591,122 @@ func TestBatchFailureAtAControlStep(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "begin failed") {
 		t.Fatalf("the server message leaked into the error: %v", err)
+	}
+}
+
+// TestBatchFailureIsAStatementError: the failed statement comes back
+// as a StatementError with the statement number and the validated
+// code, and the text is the one the client reported before.
+func TestBatchFailureIsAStatementError(t *testing.T) {
+	f := newFakeServer(t, func(req *requestWire) []itemWire {
+		return []itemWire{
+			okBatch(`{"step_results":[
+				{"cols":[],"rows":[],"affected_row_count":1,"last_insert_rowid":"1"},
+				{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":null},
+				null, null, null
+			],"step_errors":[
+				null,
+				null,
+				{"message":"SQLite error: no such table: nosuchtable","code":"SQLITE_CONSTRAINT"},
+				null, null
+			]}`),
+			okClose(),
+		}
+	})
+	c := f.clientFor(t, "")
+	stmts := []store.Stmt{{SQL: "INSERT INTO t VALUES (1)"}, {SQL: "INSERT INTO nosuchtable VALUES (1)"}}
+	_, err := c.Batch(context.Background(), stmts)
+	var se *store.StatementError
+	if !errors.As(err, &se) {
+		t.Fatalf("err = %v, want a StatementError", err)
+	}
+	if se.Index != 2 {
+		t.Fatalf("index = %d, want 2 (the failed statement)", se.Index)
+	}
+	if se.Code != "SQLITE_CONSTRAINT" {
+		t.Fatalf("code = %q, want the validated code", se.Code)
+	}
+	want := "sqld: batch statement 2: server error (code SQLITE_CONSTRAINT)"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want the preserved text %q", err.Error(), want)
+	}
+}
+
+// TestExecuteErrorIsAStatementError: the execute failure carries
+// index 0 and the validated code, with the preserved text and no
+// server text; a malformed code drops the code into the type too.
+func TestExecuteErrorIsAStatementError(t *testing.T) {
+	for _, tc := range []struct {
+		code     string
+		wantCode string
+		want     string
+	}{
+		{"SQLITE_AUTH", "SQLITE_AUTH", "sqld: request 0: server error (code SQLITE_AUTH)"},
+		{"CODE WITH SPACE", "", "sqld: request 0: server error"},
+	} {
+		f := newFakeServer(t, func(req *requestWire) []itemWire {
+			return []itemWire{errItem("SQLite error: SELECT secret FROM passwords", tc.code), okClose()}
+		})
+		c := f.clientFor(t, "")
+		_, err := c.Execute(context.Background(), store.Stmt{SQL: "SELECT 1"})
+		var se *store.StatementError
+		if !errors.As(err, &se) {
+			t.Fatalf("code %q: err = %v, want a StatementError", tc.code, err)
+		}
+		if se.Index != 0 {
+			t.Fatalf("code %q: index = %d, want 0 (the single statement of Execute)", tc.code, se.Index)
+		}
+		if se.Code != tc.wantCode {
+			t.Fatalf("code %q: code = %q, want %q", tc.code, se.Code, tc.wantCode)
+		}
+		if err.Error() != tc.want {
+			t.Fatalf("code %q: error = %q, want the preserved text %q", tc.code, err.Error(), tc.want)
+		}
+		if strings.Contains(err.Error(), "passwords") {
+			t.Fatalf("the server message leaked into the error: %v", err)
+		}
+	}
+}
+
+// TestControlStepFailureIsNotAStatementError: the BEGIN and COMMIT
+// failures stay plain errors: the control steps are not user
+// statements, and the text is the one the client reported before.
+// TestControlStepFailureIsNotAStatementError: the BEGIN and COMMIT
+// failures stay plain errors: the control steps are not user
+// statements, and the text is the one the client reported before.
+func TestControlStepFailureIsNotAStatementError(t *testing.T) {
+	batchAt := func(errIdx int, code string) string {
+		stepErr := func(i int) string {
+			if i == errIdx {
+				return `{"message":"control diagnostic","code":"` + code + `"}`
+			}
+			return "null"
+		}
+		return `{"step_results":[
+				{"cols":[],"rows":[],"affected_row_count":0,"last_insert_rowid":null},
+				null, null, null
+			],"step_errors":[` + stepErr(0) + "," + stepErr(1) + "," + stepErr(2) + "," + stepErr(3) + `]}`
+	}
+	for _, tc := range []struct {
+		errIdx int
+		code   string
+		want   string
+	}{
+		{0, "SQLITE_BUSY", "sqld: batch step 0: server error (code SQLITE_BUSY)"},
+		{2, "SQLITE_FULL", "sqld: batch step 2: server error (code SQLITE_FULL)"},
+	} {
+		f := newFakeServer(t, func(req *requestWire) []itemWire {
+			return []itemWire{okBatch(batchAt(tc.errIdx, tc.code)), okClose()}
+		})
+		c := f.clientFor(t, "")
+		_, err := c.Batch(context.Background(), []store.Stmt{{SQL: "INSERT INTO t VALUES (1)"}})
+		var se *store.StatementError
+		if errors.As(err, &se) {
+			t.Fatalf("step %d: a control step failure became a StatementError: %v", tc.errIdx, err)
+		}
+		if err.Error() != tc.want {
+			t.Fatalf("step %d: error = %q, want the preserved text %q", tc.errIdx, err.Error(), tc.want)
+		}
 	}
 }
 

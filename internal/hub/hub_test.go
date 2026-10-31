@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -23,6 +24,10 @@ type fakeStore struct {
 	schemaErr   error
 	executedSQL []string
 	pingCalls   int
+	// retainErr fails the retention batch; retainCutoffs records the
+	// cutoffs of the retention batch, in statement order.
+	retainErr     error
+	retainCutoffs []store.Value
 }
 
 func (f *fakeStore) Execute(ctx context.Context, stmt store.Stmt) (store.Result, error) {
@@ -40,7 +45,23 @@ func (f *fakeStore) Execute(ctx context.Context, stmt store.Stmt) (store.Result,
 }
 
 func (f *fakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.Result, error) {
-	return nil, errors.New("fakeStore: Batch not implemented")
+	if f.retainErr != nil {
+		return nil, f.retainErr
+	}
+	var results []store.Result
+	for i, s := range stmts {
+		switch {
+		case strings.HasPrefix(s.SQL, "DELETE FROM agent_history WHERE at_ms <"),
+			strings.HasPrefix(s.SQL, "DELETE FROM working_hourly WHERE hour_ms <"):
+			f.retainCutoffs = append(f.retainCutoffs, s.Args...)
+		default:
+			// The statement the store does not model: a statement
+			// failure with its number, like the real store reports.
+			return nil, &store.StatementError{Index: i + 1}
+		}
+		results = append(results, store.Result{Affected: 1})
+	}
+	return results, nil
 }
 
 func (f *fakeStore) Ping(ctx context.Context) error {
@@ -377,5 +398,105 @@ func TestStaticDotSegmentIsAcceptedByValidPath(t *testing.T) {
 	}
 	if string(resp.Body) != "<html>hub</html>" {
 		t.Fatalf("body = %q", resp.Body)
+	}
+}
+
+// newCronTestServer builds the server of the cron route tests, with the
+// same fixed clock as newTestServer.
+func newCronTestServer(t *testing.T, st *fakeStore, token string) *Server {
+	t.Helper()
+	return New(Deps{
+		Store:     st,
+		Now:       func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Version:   "v1.2.3",
+		CronToken: token,
+	}, nil)
+}
+
+// TestCronRetentionRouteAbsentWithoutToken: without the token the route
+// is not registered and answers 404.
+func TestCronRetentionRouteAbsentWithoutToken(t *testing.T) {
+	s := newCronTestServer(t, &fakeStore{}, "")
+	resp := s.Serve(context.Background(), Request{Method: "POST", Path: apiCronRetentionPath})
+	if resp.Status != 404 {
+		t.Fatalf("status = %d, want 404", resp.Status)
+	}
+	if string(resp.Body) != `{"error":"not_found"}` {
+		t.Fatalf("body = %q", resp.Body)
+	}
+}
+
+// TestCronRetentionWrongToken: the missing or wrong token answers 401
+// and never runs the retention.
+func TestCronRetentionWrongToken(t *testing.T) {
+	st := &fakeStore{}
+	s := newCronTestServer(t, st, "tok-retention-1")
+	for _, header := range []string{"", "Bearer wrong", "bearer tok-retention-1", "Bearer ", "Bearer tok-retention-1 extra"} {
+		req := Request{Method: "POST", Path: apiCronRetentionPath, Header: make(Header)}
+		if header != "" {
+			req.Header.Set("Authorization", header)
+		}
+		resp := s.Serve(context.Background(), req)
+		if resp.Status != 401 {
+			t.Fatalf("%q: status = %d, want 401", header, resp.Status)
+		}
+		if string(resp.Body) != `{"error":"unauthorized"}` {
+			t.Fatalf("%q: body = %q", header, resp.Body)
+		}
+	}
+	if len(st.retainCutoffs) != 0 {
+		t.Fatalf("the 401s ran the retention: %v", st.retainCutoffs)
+	}
+}
+
+// TestCronRetentionOK: the right token runs the retention with the
+// current time and answers 204 with an empty body.
+func TestCronRetentionOK(t *testing.T) {
+	st := &fakeStore{}
+	s := newCronTestServer(t, st, "tok-retention-1")
+	req := Request{Method: "POST", Path: apiCronRetentionPath, Header: make(Header)}
+	req.Header.Set("Authorization", "Bearer tok-retention-1")
+	resp := s.Serve(context.Background(), req)
+	if resp.Status != 204 {
+		t.Fatalf("status = %d, want 204", resp.Status)
+	}
+	if len(resp.Body) != 0 {
+		t.Fatalf("body = %q, want empty", resp.Body)
+	}
+	now := int64(time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli())
+	want := []store.Value{now - 7*24*3600*1000, now - 48*3600*1000}
+	if len(st.retainCutoffs) != 2 || st.retainCutoffs[0] != want[0] || st.retainCutoffs[1] != want[1] {
+		t.Fatalf("cutoffs = %v, want %v", st.retainCutoffs, want)
+	}
+}
+
+// TestCronRetentionStoreError: the store failure answers 503 without
+// the error detail.
+func TestCronRetentionStoreError(t *testing.T) {
+	st := &fakeStore{retainErr: errors.New("database unavailable")}
+	s := newCronTestServer(t, st, "tok-retention-1")
+	req := Request{Method: "POST", Path: apiCronRetentionPath, Header: make(Header)}
+	req.Header.Set("Authorization", "Bearer tok-retention-1")
+	resp := s.Serve(context.Background(), req)
+	if resp.Status != 503 {
+		t.Fatalf("status = %d, want 503", resp.Status)
+	}
+	if string(resp.Body) != `{"error":"unavailable"}` {
+		t.Fatalf("body = %q", resp.Body)
+	}
+	if bytes.Contains(resp.Body, []byte("database unavailable")) {
+		t.Fatalf("the database error leaked into the response")
+	}
+}
+
+// TestCronRetentionWrongMethod: the route answers only POST.
+func TestCronRetentionWrongMethod(t *testing.T) {
+	s := newCronTestServer(t, &fakeStore{}, "tok-retention-1")
+	resp := s.Serve(context.Background(), Request{Method: "GET", Path: apiCronRetentionPath})
+	if resp.Status != 405 {
+		t.Fatalf("status = %d, want 405", resp.Status)
+	}
+	if got := resp.Header.Get("Allow"); got != "POST" {
+		t.Fatalf("Allow = %q, want POST", got)
 	}
 }
