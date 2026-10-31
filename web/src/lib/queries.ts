@@ -116,6 +116,9 @@ export function useVersion() {
 /** DELETE /api/machines/{id} — revoga a chave; atualiza a lista de máquinas
  *  (a máquina vira revogada) e a de agentes (os agentes dela ficam no último
  *  estado, máquina offline). */
+/** DELETE /api/machines/{id} — revoga a chave. As contagens dos
+ *  desenvolvedores mudam junto (a máquina some de lá), então a lista é
+ *  invalidada também. */
 export function useRevokeMachine() {
   const userId = useSessionUserId();
   const queryClient = useQueryClient();
@@ -124,6 +127,7 @@ export function useRevokeMachine() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MACHINES_QUERY_KEY(userId ?? "anonymous") });
       void queryClient.invalidateQueries({ queryKey: AGENTS_QUERY_KEY(userId ?? "anonymous") });
+      void queryClient.invalidateQueries({ queryKey: DEVELOPERS_QUERY_KEY(userId ?? "anonymous") });
     },
   });
 }
@@ -141,7 +145,8 @@ export function useConfirmPairing() {
   });
 }
 
-/** POST /api/machines/{id}/shares — o `shared_with` da máquina muda. */
+/** POST /api/machines/{id}/shares — o `shared_with` da máquina muda e as
+ *  contagens dos desenvolvedores também (quem você compartilha com). */
 export function useShareMachine() {
   const userId = useSessionUserId();
   const queryClient = useQueryClient();
@@ -150,11 +155,13 @@ export function useShareMachine() {
       api.shareMachine(id, email, { user: userId }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MACHINES_QUERY_KEY(userId ?? "anonymous") });
+      void queryClient.invalidateQueries({ queryKey: DEVELOPERS_QUERY_KEY(userId ?? "anonymous") });
     },
   });
 }
 
-/** DELETE /api/machines/{id}/shares/{developerId} — remove um compartilhado. */
+/** DELETE /api/machines/{id}/shares/{developerId} — remove um compartilhado
+ *  (as contagens dos desenvolvedores mudam junto). */
 export function useUnshareMachine() {
   const userId = useSessionUserId();
   const queryClient = useQueryClient();
@@ -163,6 +170,7 @@ export function useUnshareMachine() {
       api.unshareMachine(id, developerId, { user: userId }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: MACHINES_QUERY_KEY(userId ?? "anonymous") });
+      void queryClient.invalidateQueries({ queryKey: DEVELOPERS_QUERY_KEY(userId ?? "anonymous") });
     },
   });
 }

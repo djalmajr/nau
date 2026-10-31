@@ -78,9 +78,12 @@ function AccountCard({ email, name }: { email: string; name: string }) {
   );
 }
 
-/** Troca de senha (POST /api/session/password): 401 = senha atual errada;
- *  400 weak_password = comprimento fora de 12–128. As senhas vivem só no
- *  estado local do formulário (não vão para log, URL nem armazenamento). */
+/** Troca de senha (POST /api/session/password): 401
+ *  `invalid_credentials` = senha atual errada (erro de formulário); 401
+ *  `unauthenticated` = sessão expirada/revogada (o handler central de 401
+ *  remove a conta e leva ao login); 400 weak_password = comprimento fora de
+ *  12–128. As senhas vivem só no estado local do formulário (não vão para
+ *  log, URL nem armazenamento). */
 function PasswordCard() {
   const { t } = useI18n();
   const [current, setCurrent] = React.useState("");
@@ -117,9 +120,18 @@ function PasswordCard() {
       setConfirm("");
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.status === 401) setError(t("settings.password.wrongCurrent"));
-        else if (err.status === 400 && err.serverError === "weak_password") setError(t("settings.password.weak"));
-        else setError(t("errors.generic"));
+        if (err.status === 401) {
+          // `invalid_credentials` é o 401 de formulário (senha atual
+          // errada). O 401 `unauthenticated` é a sessão expirada/revogada:
+          // o handler central de 401 já removeu a conta e redirecionou para
+          // o login — não há mensagem local a mostrar (o finally ainda roda).
+          if (err.serverError !== "invalid_credentials") return;
+          setError(t("settings.password.wrongCurrent"));
+        } else if (err.status === 400 && err.serverError === "weak_password") {
+          setError(t("settings.password.weak"));
+        } else {
+          setError(t("errors.generic"));
+        }
       } else {
         setError(t("errors.generic"));
       }

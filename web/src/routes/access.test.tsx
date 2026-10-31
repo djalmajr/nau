@@ -1,7 +1,9 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { INVITES_RESPONSE } from "@/test/fixtures";
 import { defaultHubState, renderHubApp, TEST_MEMBER } from "@/test/hub-harness";
+import { absoluteTime } from "@/lib/time";
 
 beforeEach(() => {
   localStorage.clear();
@@ -111,6 +113,32 @@ describe("access: sharing", () => {
     );
     expect(await screen.findByText("Você não tem máquinas para compartilhar.")).toBeInTheDocument();
   });
+
+  it("shows the error with retry when a share removal fails", async () => {
+    const user = userEvent.setup();
+    renderHubApp("/access");
+    await screen.findByRole("heading", { name: "Compartilhamento" });
+
+    const original = fetch;
+    vi.stubGlobal(
+      "fetch",
+      async (input: RequestInfo | URL, init?: RequestInit) =>
+        init?.method === "DELETE" && String(input).includes("/shares/")
+          ? Response.json({ error: "internal" }, { status: 500 })
+          : original(input, init),
+    );
+
+    const button = within(screen.getByTestId("share-m1")).getByRole("button", { name: "Remover — laptop-a" });
+    await user.click(button);
+    await waitFor(() => expect(button).toBeEnabled());
+
+    // O compartilhamento continua listado (o servidor não confirmou) e o
+    // item mostra o erro com "Tentar de novo".
+    const item = within(screen.getByTestId("share-m1"));
+    expect(item.getByRole("alert")).toHaveTextContent("Algo deu errado. Tente novamente.");
+    expect(item.getByRole("button", { name: /Tentar de novo/ })).toBeInTheDocument();
+    expect(item.getByText("Bruno Exemplo")).toBeInTheDocument();
+  });
 });
 
 describe("access: machine keys", () => {
@@ -216,5 +244,22 @@ describe("access: invites", () => {
     await screen.findByRole("heading", { name: "Compartilhamento" });
     expect(screen.queryByRole("heading", { name: "Convites" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Criar convite" })).not.toBeInTheDocument();
+  });
+
+  it("shows the absolute expiry date on a pending invite", async () => {
+    renderHubApp("/access");
+    const email = await screen.findByText("carla@example.com");
+    const row = within(email.closest("li") as HTMLElement);
+    const expiry = row.getByText(/expira/);
+
+    // O convite do fixture vence em 7 dias (futuro): o texto principal
+    // mostra a data absoluta no formato do idioma — não um tempo relativo
+    // (um vencimento futuro não é "agora") — e o tooltip a mantém.
+    const expires = INVITES_RESPONSE.invites[0].expires_ms;
+    const absolute = absoluteTime(expires, "pt-BR");
+    expect(expiry).not.toHaveTextContent("expira agora");
+    expect(expiry).toHaveTextContent("expira em");
+    expect(expiry).toHaveTextContent(absolute);
+    expect(expiry.getAttribute("title")).toBe(absolute);
   });
 });

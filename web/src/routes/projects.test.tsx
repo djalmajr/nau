@@ -62,6 +62,30 @@ describe("projects", () => {
     expect(screen.getByText("Nenhum agente em projetos ocultos.")).toBeInTheDocument();
   });
 
+  it("shows the per-machine hidden totals even when no project is shown", async () => {
+    const state = defaultHubState();
+    state.agents = {
+      agents: [],
+      generated_ms: Date.now(),
+      hidden: [
+        {
+          counts: { done: 0, idle: 0, needs_you: 0, unknown: 0, working: 2 },
+          machine: { id: "m2", name: "laptop-b", online: true },
+        },
+      ],
+    };
+    renderHubApp("/projects", state);
+
+    // O estado vazio vale só para a tabela: as contagens ocultas por
+    // máquina (e a nota) continuam aparecendo.
+    await screen.findByRole("heading", { name: "Agentes em projetos ocultos" });
+    expect(screen.getByText("Nenhum projeto exibido no hub.")).toBeInTheDocument();
+    expect(screen.getByText("laptop-b: 2 agentes")).toBeInTheDocument();
+    expect(
+      screen.getByText("Projetos com 'não entregar' não aparecem aqui: eles nunca saem da máquina."),
+    ).toBeInTheDocument();
+  });
+
   it("renders the error state with retry", async () => {
     renderHubApp("/projects", defaultHubState({ agents: null }));
     expect(await screen.findByText("Algo deu errado. Tente novamente.")).toBeInTheDocument();

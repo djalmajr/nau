@@ -5,9 +5,9 @@ import { AppShell } from "@/components/app-shell";
 import { PageError, PageLoading } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import type { AgentsResponse } from "@/lib/api";
+import type { AgentsResponse, MachinesResponse } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
-import { useAgents } from "@/lib/queries";
+import { useAgents, useMachines } from "@/lib/queries";
 import { RequireSession, useSession } from "@/lib/session";
 import { Route as rootRoute } from "./__root";
 
@@ -17,12 +17,13 @@ export const Route = createRoute({
   path: "/privacy",
 });
 
-/** Prévia: das máquinas do usuário (pelo `developer` dos agentes de
- *  GET /api/agents), quantos agentes chegam em projetos exibidos e quantos
- *  ficam só nas contagens dos ocultos. */
-function privacyPreview(agents: AgentsResponse, userId: string) {
+/** Prévia: das máquinas do usuário (GET /api/machines, `developer` = o
+ *  logado), quantos agentes chegam em projetos exibidos e quantos ficam só
+ *  nas contagens dos ocultos. As máquinas que outros usuários compartilham
+ *  não contam: os agentes delas pertencem ao dono. */
+function privacyPreview(machines: MachinesResponse, agents: AgentsResponse, userId: string) {
   const ownMachineIds = new Set(
-    agents.agents.filter((agent) => agent.developer.id === userId).map((agent) => agent.machine.id),
+    machines.machines.filter((machine) => machine.developer.id === userId).map((machine) => machine.id),
   );
   let shown = 0;
   let hidden = 0;
@@ -43,18 +44,27 @@ function privacyPreview(agents: AgentsResponse, userId: string) {
 export function PrivacyPage() {
   const { t } = useI18n();
   const session = useSession();
-  const { data, error, isPending, refetch } = useAgents();
+  const { data: agents, error: agentsError, isPending: agentsPending, refetch: refetchAgents } = useAgents();
+  const { data: machines, error: machinesError, isPending: machinesPending, refetch: refetchMachines } =
+    useMachines();
 
-  const preview = data && session.data ? privacyPreview(data, session.data.id) : null;
+  const preview = agents && machines && session.data ? privacyPreview(machines, agents, session.data.id) : null;
   const hasOwnAgents = preview !== null && preview.shown + preview.hidden > 0;
+  const pending = agentsPending || machinesPending;
+  const failed = (agentsError && !agents) || (machinesError && !machines);
 
   return (
     <RequireSession>
       <AppShell>
-        {isPending ? (
+        {pending ? (
           <PageLoading />
-        ) : error && !data ? (
-          <PageError onRetry={() => void refetch()} />
+        ) : failed ? (
+          <PageError
+            onRetry={() => {
+              void refetchAgents();
+              void refetchMachines();
+            }}
+          />
         ) : (
           <div className="max-w-3xl space-y-6">
             <section className="space-y-2">

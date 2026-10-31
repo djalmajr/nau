@@ -64,57 +64,66 @@ export function ProjectsPage() {
           <PageLoading />
         ) : error || !data ? (
           <PageError onRetry={() => void refetch()} />
-        ) : rows.length === 0 ? (
-          <PageEmpty icon={FolderKanban} message={t("projects.empty")} />
         ) : (
           <div className="space-y-6">
-            <div className="overflow-x-auto rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t("projects.column.project")}</TableHead>
-                    <TableHead className="text-right">{t("projects.column.agents")}</TableHead>
-                    <TableHead className="text-right">{t("states.needs_you")}</TableHead>
-                    <TableHead className="text-right">{t("states.working")}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((row) => (
-                    <TableRow key={row.name}>
-                      <TableCell className="whitespace-nowrap">
-                        <Link
-                          className="text-primary underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-                          search={{ project: row.name }}
-                          to="/agents"
-                        >
-                          {row.name}
-                        </Link>
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">{row.agents}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.needsYou}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.working}</TableCell>
+            {rows.length === 0 ? (
+              // O estado vazio vale só para a tabela de projetos exibidos:
+              // as contagens ocultas por máquina (e a nota) continuam
+              // aparecendo quando `hidden` não está vazio.
+              <PageEmpty icon={FolderKanban} message={t("projects.empty")} />
+            ) : (
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t("projects.column.project")}</TableHead>
+                      <TableHead className="text-right">{t("projects.column.agents")}</TableHead>
+                      <TableHead className="text-right">{t("states.needs_you")}</TableHead>
+                      <TableHead className="text-right">{t("states.working")}</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((row) => (
+                      <TableRow key={row.name}>
+                        <TableCell className="whitespace-nowrap">
+                          <Link
+                            className="text-primary underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+                            search={{ project: row.name }}
+                            to="/agents"
+                          >
+                            {row.name}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">{row.agents}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.needsYou}</TableCell>
+                        <TableCell className="text-right tabular-nums">{row.working}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
 
-            <section>
-              <h2 className="mb-2 text-sm font-medium text-muted-foreground">{t("projects.hiddenTitle")}</h2>
-              {hidden.length === 0 ? (
-                <p className="text-sm text-muted-foreground">{t("projects.hiddenEmpty")}</p>
-              ) : (
-                <ul className="space-y-1 text-sm">
-                  {hidden.map((entry) => (
-                    <li key={entry.machine}>
-                      {t("projects.hiddenRow", { machine: entry.machine, n: entry.total })}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
+            {(hidden.length > 0 || rows.length > 0) && (
+              <section>
+                <h2 className="mb-2 text-sm font-medium text-muted-foreground">{t("projects.hiddenTitle")}</h2>
+                {hidden.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">{t("projects.hiddenEmpty")}</p>
+                ) : (
+                  <ul className="space-y-1 text-sm">
+                    {hidden.map((entry) => (
+                      <li key={entry.machine}>
+                        {t("projects.hiddenRow", { machine: entry.machine, n: entry.total })}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            )}
 
-            <p className="text-xs text-muted-foreground">{t("projects.note")}</p>
+            {(hidden.length > 0 || rows.length > 0) && (
+              <p className="text-xs text-muted-foreground">{t("projects.note")}</p>
+            )}
           </div>
         )}
       </AppShell>

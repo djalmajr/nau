@@ -51,6 +51,28 @@ describe("privacy", () => {
     expect(screen.getByText("5 em projetos ocultos")).toBeInTheDocument();
   });
 
+  it("counts a hidden-only own machine in the preview", async () => {
+    const state = defaultHubState();
+    state.agents = {
+      agents: [],
+      generated_ms: Date.now(),
+      hidden: [
+        {
+          counts: { done: 0, idle: 0, needs_you: 0, unknown: 0, working: 2 },
+          machine: { id: "m2", name: "laptop-b", online: true },
+        },
+      ],
+    };
+    renderHubApp("/privacy", state);
+    await screen.findByRole("heading", { name: "Sua máquina agora" });
+
+    // A máquina é da usuária (GET /api/machines, developer = u1) mesmo sem
+    // agentes exibidos: a prévia conta os ocultos dela e não mostra o
+    // estado vazio.
+    expect(screen.queryByText("Sua máquina não entrega agentes agora.")).not.toBeInTheDocument();
+    expect(screen.getByText("2 em projetos ocultos")).toBeInTheDocument();
+  });
+
   it("shows the empty preview when the machine delivers nothing", async () => {
     renderHubApp(
       "/privacy",

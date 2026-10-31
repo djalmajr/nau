@@ -134,12 +134,16 @@ async function req<T>(path: string, init?: RequestInit, user?: string): Promise<
       }
       // 401 numa chamada autenticada significa sessão perdida: o handler
       // central remove a sessão do cache e leva o usuário de volta ao login.
-      // Duas chamadas são a exceção (o 401 ali é erro de formulário, não
-      // sessão expirada): o POST de login (credencial errada) e o POST de
-      // troca de senha (senha atual incorreta).
+      // Duas respostas são a exceção (o 401 ali é erro de formulário, não
+      // sessão expirada): o POST de login (credencial errada) e a senha atual
+      // errada no POST de troca de senha — e só ela: o contrato responde
+      // `invalid_credentials` nesse caso, enquanto `unauthenticated` é a
+      // sessão expirada/revogada e passa pelo handler central como qualquer
+      // outra rota.
       const method = String(init?.method ?? "GET").toUpperCase();
-      const expected401 = (path === "/session" && method === "POST") || path === "/session/password";
-      if (res.status === 401 && !expected401) unauthorizedHandler?.(user);
+      const isLogin = path === "/session" && method === "POST";
+      const isWrongPassword = path === "/session/password" && serverError === "invalid_credentials";
+      if (res.status === 401 && !isLogin && !isWrongPassword) unauthorizedHandler?.(user);
       throw new ApiError(res.status, serverError);
     }
     if (res.status === 204) return undefined as T;

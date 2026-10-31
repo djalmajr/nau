@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultHubState, renderHubApp } from "@/test/hub-harness";
+import { SESSION_QUERY_KEY } from "@/lib/session";
 
 beforeEach(() => {
   localStorage.clear();
@@ -54,6 +55,33 @@ describe("settings: change password", () => {
 
     await fillPasswordForm(user);
     expect(await screen.findByRole("alert")).toHaveTextContent("Senha atual incorreta.");
+  });
+
+  it("clears the authenticated cache when the password 401 means session loss", async () => {
+    const user = userEvent.setup();
+    const app = renderHubApp("/settings");
+    await screen.findByRole("heading", { name: "Trocar senha" });
+
+    // 401 `unauthenticated` no POST de troca de senha não é erro de
+    // formulário: é a sessão expirada/revogada (o contrato responde
+    // `invalid_credentials` na senha atual errada). Uma sessão expirada
+    // responde 401 em toda chamada autenticada — inclusive a checagem de
+    // sessão — e o handler central de 401 remove a conta e leva ao login,
+    // como em qualquer outra rota.
+    const original = fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/session/password") || url.endsWith("/api/session")) {
+        return Response.json({ error: "unauthenticated" }, { status: 401 });
+      }
+      return original(input, init);
+    });
+
+    await fillPasswordForm(user);
+    await waitFor(() => expect(app.queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined());
+    // A mensagem de senha atual errada não aparece: ela é só do
+    // `invalid_credentials`.
+    expect(screen.queryByText("Senha atual incorreta.")).not.toBeInTheDocument();
   });
 
   it("maps 400 weak_password to the length message", async () => {

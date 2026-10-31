@@ -98,6 +98,9 @@ function MachineSharing({ machine }: { machine: HubMachine }) {
   const { t } = useI18n();
   const [email, setEmail] = React.useState("");
   const [error, setError] = React.useState("");
+  /** `developerId` cuja remoção falhou: o compartilhamento continua listado
+   *  (o servidor não confirmou) e o item mostra o erro com "Tentar de novo". */
+  const [unshareFail, setUnshareFail] = React.useState<string | null>(null);
   const share = useShareMachine();
   const unshare = useUnshareMachine();
 
@@ -126,24 +129,52 @@ function MachineSharing({ machine }: { machine: HubMachine }) {
     );
   }
 
+  async function handleUnshare(developer: { id: string }) {
+    try {
+      await unshare.mutateAsync({ id: machine.id, developerId: developer.id });
+      if (unshareFail === developer.id) setUnshareFail(null);
+    } catch {
+      setUnshareFail(developer.id);
+    }
+  }
+
   return (
     <div className="space-y-3 border-t pt-4 first:border-t-0 first:pt-0" data-testid={`share-${machine.id}`}>
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-medium">{machine.name}</span>
         {machine.shared_with.map((developer) => (
-          <span key={developer.id} className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs">
-            {developer.name}
-            <Button
-              aria-label={t("access.share.remove") + ` — ${machine.name}`}
-              disabled={unshare.isPending}
-              onClick={() => void unshare.mutateAsync({ id: machine.id, developerId: developer.id })}
-              size="xs"
-              type="button"
-              variant="ghost"
-            >
-              {t("access.share.remove")}
-            </Button>
-          </span>
+          <React.Fragment key={developer.id}>
+            <span className="flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs">
+              {developer.name}
+              <Button
+                aria-label={t("access.share.remove") + ` — ${machine.name}`}
+                disabled={unshare.isPending}
+                onClick={() => void handleUnshare(developer)}
+                size="xs"
+                type="button"
+                variant="ghost"
+              >
+                {t("access.share.remove")}
+              </Button>
+            </span>
+            {unshareFail === developer.id ? (
+              <span className="flex items-center gap-1.5 text-xs">
+                <span className="text-destructive" role="alert">
+                  {t("errors.generic")}
+                </span>
+                <Button
+                  aria-label={t("errors.retry") + ` — ${developer.name} ${machine.name}`}
+                  disabled={unshare.isPending}
+                  onClick={() => void handleUnshare(developer)}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                >
+                  {t("errors.retry")}
+                </Button>
+              </span>
+            ) : null}
+          </React.Fragment>
         ))}
       </div>
       <form className="flex flex-wrap items-center gap-2" noValidate onSubmit={(event) => void onSubmit(event)}>
@@ -361,7 +392,7 @@ function InvitesSection() {
                   <div className="min-w-0">
                     <div className="truncate text-sm">{invite.email}</div>
                     <div className="text-xs text-muted-foreground" title={absoluteTime(invite.expires_ms, locale)}>
-                      {t("access.invites.expires", { time: relativeTime(invite.expires_ms, locale, undefined, t("time.justNow")) })}
+                      {t("access.invites.expires", { time: absoluteTime(invite.expires_ms, locale) })}
                     </div>
                   </div>
                   <Button

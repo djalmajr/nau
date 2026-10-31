@@ -1,5 +1,6 @@
-import { screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEVELOPERS_RESPONSE } from "@/test/fixtures";
 import { defaultHubState, renderHubApp } from "@/test/hub-harness";
 
@@ -46,5 +47,42 @@ describe("developers", () => {
     expect(cells[3].textContent).toBe("0");
     expect(cells[4].textContent).toBe("1");
     expect(DEVELOPERS_RESPONSE.developers).toHaveLength(2);
+  });
+
+  it("refreshes the developer counts after sharing on a fresh cached page", async () => {
+    const user = userEvent.setup();
+    const state = defaultHubState();
+    const initial = state.developers!.developers.find((d) => d.id === "u1")!.shared_by_me;
+    const app = renderHubApp("/developers", state);
+    await screen.findByRole("columnheader", { name: "Você compartilha com" });
+
+    // Página fresca em cache: sem a invalidação, o staleTime manteria a
+    // contagem velha na volta (o servidor já respondeu o novo número).
+    app.queryClient.setDefaultOptions({
+      queries: { retry: false, staleTime: 10_000 },
+      mutations: { retry: false },
+    });
+    const original = fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await original(input, init);
+      if (init?.method === "POST" && String(input).endsWith("/machines/m2/shares") && response.ok) {
+        state.developers!.developers.find((d) => d.id === "u1")!.shared_by_me = initial + 1;
+      }
+      return response;
+    });
+
+    await user.click(screen.getByRole("link", { name: "Acesso" }));
+    const form = await screen.findByTestId("share-m2");
+    await user.type(within(form).getByLabelText("Compartilhar — laptop-b"), "bruno@example.com");
+    await user.click(within(form).getByRole("button", { name: "Compartilhar" }));
+    await waitFor(() =>
+      expect(within(screen.getByTestId("share-m2")).getByText("Bruno Exemplo")).toBeInTheDocument(),
+    );
+
+    await user.click(screen.getByRole("link", { name: "Desenvolvedores" }));
+    await screen.findByRole("columnheader", { name: "Você compartilha com" });
+    const row = screen.getByText("Ana Exemplo").closest("tr") as HTMLElement;
+    const rendered = within(row).getAllByRole("cell")[4].textContent;
+    expect(rendered).toBe(String(initial + 1));
   });
 });
