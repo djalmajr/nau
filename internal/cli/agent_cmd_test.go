@@ -530,3 +530,26 @@ func TestAgentRunHealthWriteFailure(t *testing.T) {
 		t.Fatalf("the key reached an output surface: %q", out.String()+errb.String())
 	}
 }
+
+// TestConnectHubFileLoadsInTheAgent is the contract between the two
+// commands: the hub.json that nau connect writes is the one nau agent
+// run loads, with the same hub, machine id and key.
+func TestConnectHubFileLoadsInTheAgent(t *testing.T) {
+	f := newFakePairingHub(t)
+	cfgDir := t.TempDir()
+	env, _, errb := connectTestEnv(t, cfgDir)
+	go func() {
+		<-f.pollEntered
+		f.confirm()
+	}()
+	if code := Run([]string{"connect", f.server.URL, "--name", "laptop"}, env); code != 0 {
+		t.Fatalf("connect = %d (stderr %s), want 0", code, errb.String())
+	}
+	cfg, err := agent.LoadHubFile(filepath.Join(cfgDir, "hub.json"))
+	if err != nil {
+		t.Fatalf("the agent cannot load the hub.json of connect: %v", err)
+	}
+	if cfg.HubURL != f.server.URL || cfg.MachineID != "machine-1" || cfg.Key != fakePairingKey {
+		t.Fatalf("the agent loaded hub=%q machine=%q key-matches=%t, want the connect values", cfg.HubURL, cfg.MachineID, cfg.Key == fakePairingKey)
+	}
+}
