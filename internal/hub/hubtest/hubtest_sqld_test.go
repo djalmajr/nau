@@ -3,6 +3,7 @@
 package hubtest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,5 +50,40 @@ func TestSQLDResetDropsTablesWhateverTheForeignKeys(t *testing.T) {
 	}
 	if n, _ := res.Rows[0][0].(int64); n != 0 {
 		t.Fatalf("users after the reset = %v, want an empty table from the migrations", res.Rows[0][0])
+	}
+}
+
+// TestSQLDResetEndsEmptyOnTheLastPass seeds a chain of maxDropPasses
+// tables, each a child of the previous one with a linked row, created
+// parent first: every pass drops only the last child, so the last
+// table falls on the last allowed pass. The reset must report the
+// empty database as a success.
+func TestSQLDResetEndsEmptyOnTheLastPass(t *testing.T) {
+	st := SQLD(t)
+	ctx := t.Context()
+	DropAll(t, st)
+	var stmts []store.Stmt
+	for i := 0; i < maxDropPasses; i++ {
+		name := fmt.Sprintf("chain_%02d", i)
+		create := fmt.Sprintf(`CREATE TABLE %s (id INTEGER PRIMARY KEY`, name)
+		insert := fmt.Sprintf(`INSERT INTO %s VALUES (1`, name)
+		if i > 0 {
+			create += fmt.Sprintf(`, parent_id INTEGER REFERENCES chain_%02d(id)`, i-1)
+			insert += `, 1`
+		}
+		stmts = append(stmts, store.Stmt{SQL: create + `)`}, store.Stmt{SQL: insert + `)`})
+	}
+	if _, err := st.Batch(ctx, stmts); err != nil {
+		t.Fatalf("seed the chain: %v", err)
+	}
+	if err := dropAll(st, ctx); err != nil {
+		t.Fatalf("drop the chain of %d tables: %v", maxDropPasses, err)
+	}
+	res, err := st.Execute(ctx, store.Stmt{SQL: `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name LIKE 'chain_%'`})
+	if err != nil {
+		t.Fatalf("count the chain tables: %v", err)
+	}
+	if n, _ := res.Rows[0][0].(int64); n != 0 {
+		t.Fatalf("chain tables left = %v, want 0", res.Rows[0][0])
 	}
 }

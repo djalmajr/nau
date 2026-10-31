@@ -161,6 +161,15 @@ func dropAll(st store.Store, ctx context.Context) error {
 			return fmt.Errorf("drop the tables: no table could be dropped: %w", lastErr)
 		}
 	}
+	// The last allowed pass may have dropped the last table: list once
+	// more before calling it a failure.
+	names, err := dropOrder(ctx, st)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 {
+		return nil
+	}
 	return fmt.Errorf("drop the tables: still tables left after %d passes", maxDropPasses)
 }
 
