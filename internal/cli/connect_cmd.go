@@ -46,9 +46,17 @@ var (
 	connectMachineShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
+// connectKeyShape is the raw form of the machine key: 43 characters of
+// the base64url alphabet, without padding. The decoder alone is not
+// enough: it skips CR and LF, so a key with a line break would decode.
+var connectKeyShape = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
 // validConnectKey reports whether the hub-delivered key is the
-// base64url without padding of exactly 32 bytes.
+// base64url without padding of exactly 32 bytes, in its raw form.
 func validConnectKey(key string) bool {
+	if !connectKeyShape.MatchString(key) {
+		return false
+	}
 	b, err := base64.RawURLEncoding.DecodeString(key)
 	return err == nil && len(b) == 32
 }
@@ -256,18 +264,34 @@ func cmdConnect(args []string, env Env) int {
 		status, body, err = connectPost(reqCtx, hubURL, "/api/pairings/poll", struct {
 			PollToken string `json:"poll_token"`
 		}{PollToken: created.PollToken})
+		// The cause of a failed poll is read before the cancel: the
+		// effective deadline reached in flight is the expiry (3), not
+		// an unreachable hub.
+		expired := reqCtx.Err() == context.DeadlineExceeded
 		cancelReq()
 		if err != nil {
 			if ctx.Err() != nil {
 				return connectErrExit(env, ctx)
+			}
+			if expired {
+				fail(env, 3, "connect: the pairing expired")
+				return 3
 			}
 			fail(env, 4, "connect: the hub is unreachable")
 			return 4
 		}
 		switch status {
 		case http.StatusAccepted:
-			if err := sleep(ctx, connectPollInterval); err != nil {
-				return connectErrExit(env, ctx)
+			// The wait never passes the effective deadline: the last
+			// one is cut to the time left, and the next turn exits 3.
+			wait := connectPollInterval
+			if left := time.Duration(deadlineMS-env.Now().UnixMilli()) * time.Millisecond; left < wait {
+				wait = left
+			}
+			if wait > 0 {
+				if err := sleep(ctx, wait); err != nil {
+					return connectErrExit(env, ctx)
+				}
 			}
 			continue
 		case http.StatusOK:

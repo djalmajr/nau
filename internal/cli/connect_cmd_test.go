@@ -601,6 +601,7 @@ func TestConnectLocalDeadline(t *testing.T) {
 	}{
 		{"the local 10 minutes", 24 * time.Hour.Milliseconds()},
 		{"the closer hub validity", 5 * time.Minute.Milliseconds()},
+		{"a hub validity off the poll grid", 5*time.Minute.Milliseconds() + 500},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -640,16 +641,16 @@ func TestConnectLocalDeadline(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
 				t.Fatal("hub.json was written, want nothing")
 			}
-			// The command gave up at the effective deadline: the
-			// smaller between the local 10 minutes and the hub
-			// validity, with the last sleep of the loop as the only
-			// overshoot.
+			// The command gave up exactly at the effective deadline:
+			// the smaller between the local 10 minutes and the hub
+			// validity. The last wait is cut to the time left, so the
+			// fake clock never passes it.
 			want := connectDeadline
 			if hub := time.Duration(c.expiresMS) * time.Millisecond; hub < want {
 				want = hub
 			}
-			if got := now.Sub(start); got < want || got > want+connectPollInterval {
-				t.Fatalf("the command ran for %s, want about %s (the effective deadline)", got.Round(time.Millisecond), want)
+			if got := now.Sub(start); got != want {
+				t.Fatalf("the command ran for %s, want exactly %s (the effective deadline)", got, want)
 			}
 			// The poll request runs under a deadline context: each
 			// request is bounded (the per-request timeout of 10 s, the
@@ -712,6 +713,69 @@ func TestConnectCancelBeforePersistence(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "interrupted") {
 		t.Fatalf("stderr = %q, want the interrupted line", errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
+		t.Fatal("hub.json was written, want nothing")
+	}
+}
+
+// TestConnectKeyRawShape checks the raw form of the delivered key: a
+// key the base64url decoder accepts only because it skips the line
+// break is refused, and so are padding and the wrong length.
+func TestConnectKeyRawShape(t *testing.T) {
+	good := strings.Repeat("A", 43)
+	if !validConnectKey(good) {
+		t.Fatalf("validConnectKey(43 base64url chars) = false, want true")
+	}
+	for name, key := range map[string]string{
+		"line feed":         good[:20] + "\n" + good[20:],
+		"carriage return":   good[:20] + "\r" + good[20:],
+		"padding":           good + "=",
+		"short":             good[:42],
+		"standard alphabet": good[:42] + "+",
+	} {
+		if validConnectKey(key) {
+			t.Errorf("validConnectKey(%s) = true, want false", name)
+		}
+	}
+}
+
+// TestConnectExpiryInFlight is the effective deadline reached during a
+// poll request: the request dies with its bounded context, and the
+// command exits 3 (expired), not 4 (unreachable), without writing.
+func TestConnectExpiryInFlight(t *testing.T) {
+	cfgDir := t.TempDir()
+	var out, errb bytes.Buffer
+	env := Env{
+		Stdout:    &out,
+		Stderr:    &errb,
+		Getenv:    func(string) string { return "" },
+		ConfigDir: cfgDir,
+		Now:       time.Now,
+		Sleep:     sleepCtx,
+	}
+	f := &fakeConnectTransport{}
+	createBody, _ := json.Marshal(map[string]any{
+		"code":       fakePairingCode,
+		"poll_token": "polltoken0000000000000000000000000001",
+		"expires_ms": time.Now().Add(150 * time.Millisecond).UnixMilli(),
+	})
+	f.resp = func(req *http.Request) *http.Response {
+		if req.URL.Path == "/api/pairings" {
+			return fakeConnectResponse(req, http.StatusCreated, createBody, "")
+		}
+		// The poll hangs until its context ends: the hub never answers
+		// before the deadline.
+		<-req.Context().Done()
+		return nil
+	}
+	start := time.Now()
+	code := withFakeTransport(t, f, nil, env, []string{"connect", connectTestHub, "--name", "laptop"})
+	if code != 3 {
+		t.Fatalf("connect = %d (stdout %s stderr %s), want 3 (the expired)", code, out.String(), errb.String())
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the command took %s, want it to stop at the 150 ms validity", took.Round(time.Millisecond))
 	}
 	if _, err := os.Stat(filepath.Join(cfgDir, "hub.json")); !os.IsNotExist(err) {
 		t.Fatal("hub.json was written, want nothing")

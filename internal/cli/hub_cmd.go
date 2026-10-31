@@ -242,11 +242,12 @@ func cmdHubServe(args []string, env Env) int {
 	// The adapter keeps no state of the connection: this wrapper sets
 	// the ip of the connection (the RemoteAddr without the port) in
 	// the header the machine connect reads as the client of the
-	// creation limit. The adapter overwrites the value the client
-	// sends, so the header cannot be spoofed to claim a foreign
-	// connection.
+	// creation limit. The adapter drops the value the client sends
+	// before it sets its own, so the header cannot be spoofed to claim
+	// a foreign connection.
 	inner := httpserve.New(srvHub)
 	srv := httpserve.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Header.Del(machines.RemoteIPHeader)
 		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			r.Header.Set(machines.RemoteIPHeader, ip)
 		}
