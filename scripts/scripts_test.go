@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -133,7 +134,8 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			}
 			tmp := filepath.Join(root, "temp space")
 			bin := filepath.Join(root, "bin space")
-			for _, dir := range []string{home, app, local, goDir, backendDir, tmp} {
+			tasks := filepath.Join(root, "tasks space")
+			for _, dir := range []string{home, app, local, goDir, backendDir, tmp, tasks} {
 				if err := os.MkdirAll(dir, 0700); err != nil {
 					t.Fatal(err)
 				}
@@ -209,7 +211,10 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				}
 			}
 			if windows {
-				env = append(env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("WINDIR"), "PATHEXT=.COM;.EXE;.BAT;.CMD")
+				// The no-flag re-run may at most query the agent task, and
+				// even that query is a fixture: nothing reaches the real
+				// Task Scheduler.
+				env = append(env, "SystemRoot="+os.Getenv("SystemRoot"), "WINDIR="+os.Getenv("WINDIR"), "PATHEXT=.COM;.EXE;.BAT;.CMD", "NAU_TASKS_TRACE="+filepath.Join(tasks, "tasks.trace"), "NAU_TASKS_PRESENT="+filepath.Join(tasks, "task-present"), "NAU_TASKS_STATE="+filepath.Join(app, "nau", "agent-state.json"))
 			}
 			if tc.failGo {
 				env = append(env, "INSTALL_FIXTURE_FAIL=1")
@@ -241,12 +246,11 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				defer cancel()
 				args := []string{"install.sh", "--bin-dir", bin}
 				if windows {
-					quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 					script, err := filepath.Abs("install.ps1")
 					if err != nil {
 						t.Fatal(err)
 					}
-					args = []string{"-NoProfile", "-NonInteractive", "-Command", "& " + quote(script) + " -BinDir " + quote(bin)}
+					args = []string{"-NoProfile", "-NonInteractive", "-Command", psTaskSchedulerFixtures("& " + psQuote(script) + " -BinDir " + psQuote(bin))}
 				}
 				cmd := exec.CommandContext(ctx, shell, args...)
 				cmd.WaitDelay = time.Second
@@ -270,6 +274,16 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				}
 				if code != want {
 					t.Fatalf("installer exit=%d want=%d: %s", code, want, out)
+				}
+				if windows && want == 0 {
+					// A successful no-flag install only queries the agent
+					// task (which may be absent): stop, start, register
+					// and unregister must not run.
+					for _, line := range psTraceLines(t, filepath.Join(tasks, "tasks.trace")) {
+						if !strings.HasPrefix(line, "get ") {
+							t.Fatalf("a service cmdlet ran during the pin install: %s", line)
+						}
+					}
 				}
 				if !windows && tc.backend != "soho" && !strings.Contains(stderr.String(), "nau install: warning: soho not found on the PATH") {
 					t.Fatal("missing backend warning on stderr")
@@ -386,6 +400,143 @@ func powershellAvailable(t *testing.T) string {
 	}
 	t.Skip("neither pwsh nor powershell is available")
 	return ""
+}
+
+// psQuote wraps a value in PowerShell single quotes, doubling any
+// embedded quote, for use inside a -Command string.
+func psQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// psTaskSchedulerPreamble defines a fixture function for every Task
+// Scheduler cmdlet that install.ps1 uses; the list comes from
+// `git grep -n ScheduledTask scripts/install.ps1`, not from anywhere
+// else. A PowerShell function shadows the cmdlet of the same name in
+// the called script, so every scheduler call the installer makes
+// lands in these fixtures and never in the real Task Scheduler, on
+// any host. Every fixture appends one line to the trace file named by
+// NAU_TASKS_TRACE; Get-ScheduledTask returns a task only when the
+// file named by NAU_TASKS_PRESENT exists; Start-ScheduledTask writes
+// the fresh health file named by NAU_TASKS_STATE after a short sleep,
+// so the installer's mtime check passes at second granularity. The
+// installer itself gains no variable or parameter for this: it is
+// the test process, not the script, that defines the fixtures.
+const psTaskSchedulerPreamble = `function Trace-Task {
+    param([string]$What)
+    Add-Content -LiteralPath $env:NAU_TASKS_TRACE -Value $What -Encoding ascii
+}
+[CmdletBinding()]
+function Get-ScheduledTask {
+    param([string]$TaskName, [string]$TaskPath)
+    Trace-Task ('get ' + $TaskName)
+    if (Test-Path -LiteralPath $env:NAU_TASKS_PRESENT) { return @{ TaskName = $TaskName } }
+    return $null
+}
+[CmdletBinding()]
+function Stop-ScheduledTask {
+    param([string]$TaskName, [string]$TaskPath)
+    Trace-Task ('stop ' + $TaskName)
+}
+[CmdletBinding()]
+function Start-ScheduledTask {
+    param([string]$TaskName, [string]$TaskPath)
+    Trace-Task ('start ' + $TaskName)
+    Start-Sleep -Milliseconds 1100
+    $state = $env:NAU_TASKS_STATE
+    [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($state))
+    [System.IO.File]::WriteAllText($state, '{}')
+}
+[CmdletBinding()]
+function Register-ScheduledTask {
+    param([string]$TaskName, [string]$TaskPath, $InputObject, [switch]$Force)
+    Trace-Task ('register ' + $TaskName)
+    return $InputObject
+}
+[CmdletBinding(SupportsShouldProcess = $true)]
+function Unregister-ScheduledTask {
+    param([string]$TaskName, [string]$TaskPath)
+    Trace-Task ('unregister ' + $TaskName)
+}
+[CmdletBinding()]
+function New-ScheduledTaskPrincipal {
+    param([string]$UserId, [string]$LogonType, [string]$RunLevel)
+    Trace-Task 'new-principal'
+    return @{ Principal = $UserId }
+}
+[CmdletBinding()]
+function New-ScheduledTaskTrigger {
+    param([switch]$AtLogOn, [string]$User, [switch]$Once, [datetime]$At, [timespan]$RepetitionInterval)
+    Trace-Task 'new-trigger'
+    return @{ Trigger = $true }
+}
+[CmdletBinding()]
+function New-ScheduledTaskSettingsSet {
+    param([string]$MultipleInstances, [timespan]$ExecutionTimeLimit, [switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries)
+    Trace-Task 'new-settings'
+    return @{ Settings = $true }
+}
+[CmdletBinding()]
+function New-ScheduledTaskAction {
+    param([string]$Execute, [string]$Argument)
+    Trace-Task 'new-action'
+    return @{ Action = $Execute }
+}
+[CmdletBinding()]
+function New-ScheduledTask {
+    param($Settings, $Trigger, $Action, $Principal)
+    Trace-Task 'new-task'
+    return @{ Task = $true }
+}`
+
+// psTaskSchedulerFixtures returns the -Command string that defines the
+// fixture functions and then runs the installer invocation, so a
+// test never runs install.ps1 without the fixtures in the same
+// process.
+func psTaskSchedulerFixtures(invocation string) string {
+	return psTaskSchedulerPreamble + "\n" + invocation
+}
+
+// psTraceLines reads the task scheduler trace written by the fixtures,
+// one call per line, tolerating the CRLF terminators of Windows.
+func psTraceLines(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the task scheduler trace is missing: %v", err)
+	}
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSuffix(line, "\r")
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// TestPsTaskSchedulerFixturesCoverEveryCmdlet: the fixture preamble
+// must define a function for every ScheduledTask cmdlet that
+// install.ps1 calls, so no installer run from these tests can reach
+// the real Task Scheduler. It runs on every platform: it compares the
+// fixture definitions with the script's call sites statically.
+func TestPsTaskSchedulerFixturesCoverEveryCmdlet(t *testing.T) {
+	script, err := os.ReadFile("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	used := map[string]bool{}
+	for _, name := range regexp.MustCompile(`[A-Z][A-Za-z]*-ScheduledTask[A-Za-z]*`).FindAllString(string(script), -1) {
+		used[name] = true
+	}
+	if len(used) == 0 {
+		t.Fatal("no ScheduledTask cmdlet found in install.ps1; the extraction changed")
+	}
+	preamble := psTaskSchedulerPreamble
+	for name := range used {
+		if !strings.Contains(preamble, "function "+name+" {") {
+			t.Errorf("install.ps1 uses %s but the fixtures define no replacement for it", name)
+		}
+	}
 }
 
 func TestInstallShSyntax(t *testing.T) {
@@ -780,7 +931,15 @@ func TestInstallPs1Parses(t *testing.T) {
 
 func TestInstallPs1Help(t *testing.T) {
 	powershell := powershellAvailable(t)
-	out, err := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-File", "install.ps1", "-Help").CombinedOutput()
+	script, err := filepath.Abs("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The fixtures are defined even for -Help, which exits before the
+	// install: no installer run from these tests can reach the real
+	// Task Scheduler.
+	command := psTaskSchedulerFixtures("& " + psQuote(script) + " -Help")
+	out, err := exec.Command(powershell, "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s install.ps1 -Help: %v\n%s", powershell, err, out)
 	}
@@ -789,5 +948,161 @@ func TestInstallPs1Help(t *testing.T) {
 		if !strings.Contains(text, opt) {
 			t.Errorf("install.ps1 -Help does not list %q:\n%s", opt, text)
 		}
+	}
+}
+
+// TestInstallPs1AgentRestartOnRerun: a re-run without -Agent restarts
+// the agent task when it is registered (so the machine never runs the
+// old binary) and waits for its fresh health file, without re-registering
+// the task or rewriting the wrapper; without the task it installs the
+// binary and calls no service cmdlet other than the query. The Task
+// Scheduler cmdlets are fixtures in the same -Command as the installer
+// run: every call is traced, and a start writes the fresh health file
+// after a short sleep, so the mtime test of the health check is
+// deterministic at second granularity.
+func TestInstallPs1AgentRestartOnRerun(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PowerShell installer runtime requires Windows; exercised by Windows CI")
+	}
+	powershell := powershellAvailable(t)
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau.exe")
+	helper := filepath.Join(buildDir, "helper.exe")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "fixture space")
+	home := filepath.Join(root, "home space")
+	app := filepath.Join(root, "config space")
+	local := filepath.Join(root, "local space")
+	goDir := filepath.Join(root, "go space")
+	backendDir := filepath.Join(root, "backend space")
+	tmp := filepath.Join(root, "temp space")
+	bin := filepath.Join(root, "bin space")
+	for _, dir := range []string{home, app, local, goDir, backendDir, tmp, bin} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(goDir, "go.exe"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backendDir, "soho.exe"), helperBytes, 0700); err != nil {
+		t.Fatal(err)
+	}
+	script, err := filepath.Abs("install.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(tmp, "tasks.trace")
+	present := filepath.Join(tmp, "task-present")
+	stateFile := filepath.Join(app, "nau", "agent-state.json")
+	wrapper := filepath.Join(local, "nau", "agent.cmd")
+	command := psTaskSchedulerFixtures("& " + psQuote(script) + " -BinDir " + psQuote(bin))
+	system := filepath.Join(os.Getenv("SystemRoot"), "System32")
+	env := []string{
+		"HOME=" + home,
+		"USERPROFILE=" + home,
+		"APPDATA=" + app,
+		"LOCALAPPDATA=" + local,
+		"TMPDIR=" + tmp,
+		"TEMP=" + tmp,
+		"TMP=" + tmp,
+		"PATH=" + strings.Join([]string{goDir, backendDir, system, filepath.Join(system, "WindowsPowerShell", "v1.0")}, string(os.PathListSeparator)),
+		"INSTALL_FIXTURE_NAU=" + nau,
+		"NAU_TASKS_TRACE=" + trace,
+		"NAU_TASKS_PRESENT=" + present,
+		"NAU_TASKS_STATE=" + stateFile,
+		"SystemRoot=" + os.Getenv("SystemRoot"),
+		"WINDIR=" + os.Getenv("WINDIR"),
+		"PATHEXT=.COM;.EXE;.BAT;.CMD",
+	}
+	run := func() string {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-Command", command)
+		cmd.WaitDelay = time.Second
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		out := stdout.String() + stderr.String()
+		if err != nil {
+			if ctx.Err() != nil {
+				t.Fatalf("installer did not finish within %s: %s", installerRunBound, out)
+			}
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("installer failed: %v\n%s", err, out)
+			}
+			if exit.ExitCode() != 0 {
+				t.Fatalf("installer exit=%d: %s", exit.ExitCode(), out)
+			}
+		}
+		return out
+	}
+	// With the task present: the re-run without the flag stops and
+	// starts the task over the fresh binary and waits for its fresh
+	// health file, without re-registering the task or rewriting the
+	// wrapper.
+	wrapperSentinel := []byte("@echo off\nREM sentinel: the no-flag re-run must not rewrite the wrapper\n")
+	if err := os.MkdirAll(filepath.Dir(wrapper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(wrapper, wrapperSentinel, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(present, []byte("present\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := run()
+	lines := psTraceLines(t, trace)
+	if len(lines) != 3 || lines[0] != "get nau agent" || lines[1] != "stop nau agent" || lines[2] != "start nau agent" {
+		t.Fatalf("the no-flag re-run must query, stop and start the task and nothing else:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.Contains(out, "nau install: agent running") {
+		t.Fatalf("the fresh health wait did not report the agent running:\n%s", out)
+	}
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("the fresh health file did not appear after the restart: %v", err)
+	}
+	after, err := os.ReadFile(wrapper)
+	if err != nil || !bytes.Equal(after, wrapperSentinel) {
+		t.Fatalf("the restart rewrote the wrapper: %v\n%s", err, after)
+	}
+	if _, err := os.Stat(filepath.Join(bin, "nau.exe")); err != nil {
+		t.Fatalf("the install did not complete: %v", err)
+	}
+	// Without the task: the re-run installs the binary and calls no
+	// service cmdlet other than the query, creating nothing.
+	if err := os.Remove(present); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(stateFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(wrapper)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(trace); err != nil {
+		t.Fatal(err)
+	}
+	out = run()
+	lines = psTraceLines(t, trace)
+	if len(lines) != 1 || lines[0] != "get nau agent" {
+		t.Fatalf("a service cmdlet ran without an installed task:\n%s", strings.Join(lines, "\n"))
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("the re-run without the flag wrote the health file: %v", err)
+	}
+	if _, err := os.Stat(wrapper); !os.IsNotExist(err) {
+		t.Fatalf("the re-run without the flag created the wrapper: %v", err)
+	}
+	if !strings.Contains(out, "nau install: installed") {
+		t.Fatalf("the install did not complete:\n%s", out)
 	}
 }
