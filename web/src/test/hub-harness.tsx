@@ -258,6 +258,19 @@ export function fakeHubFetch(state: HubApiState) {
           error: state.inviteAcceptFail === 409 ? "email_taken" : "invalid_invite",
         });
       }
+      // Contrato (docs/hub-api.md): senha fora de 12 a 128 bytes responde
+      // 400 {"error":"weak_password"} — o servidor aplica a regra também
+      // no aceite de convite.
+      let acceptBody: { password?: unknown } = {};
+      try {
+        acceptBody = JSON.parse(body ?? "{}") as { password?: unknown };
+      } catch {
+        acceptBody = {};
+      }
+      const passwordBytes = new TextEncoder().encode(String(acceptBody.password ?? "")).length;
+      if (passwordBytes < 12 || passwordBytes > 128) {
+        return jsonResponse(400, { error: "weak_password" });
+      }
       return jsonResponse(201, { user: state.sessionUser });
     }
     if (url === "/api/version") {

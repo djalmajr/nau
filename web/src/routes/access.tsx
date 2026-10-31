@@ -6,6 +6,7 @@ import { RevokeMachineAction } from "@/components/machines/revoke-machine-action
 import { PageError, PageLoading } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError, type HubMachine, type InviteCreated } from "@/lib/api";
@@ -99,6 +100,17 @@ function MachineSharing({ machine }: { machine: HubMachine }) {
   const [error, setError] = React.useState("");
   const share = useShareMachine();
   const unshare = useUnshareMachine();
+
+  // Máquina revogada: sem lista de compartilhamentos e sem formulário —
+  // só o selo "revogada" (a chave já não serve para nada novo).
+  if (machine.revoked) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 border-t pt-4 first:border-t-0 first:pt-0" data-testid={`share-${machine.id}`}>
+        <span className="font-medium">{machine.name}</span>
+        <Badge variant="destructive">{t("machines.revoked")}</Badge>
+      </div>
+    );
+  }
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

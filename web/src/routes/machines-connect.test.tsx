@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultHubState, renderHubApp } from "@/test/hub-harness";
@@ -21,6 +21,20 @@ function stubClipboard() {
 }
 
 describe("machines connect", () => {
+  it("shows the own header title and keeps the back bar to machines", async () => {
+    renderHubApp("/machines/connect");
+    await screen.findByRole("heading", { name: "1. Rode o comando na máquina" });
+
+    // O header mostra o próprio título (e não o "Máquinas" da lista).
+    expect(screen.getByText("Conectar máquina")).toBeInTheDocument();
+
+    // A barra de volta continua: o link fica no main do conteúdo (o nav da
+    // casca tem também o item "Máquinas").
+    const mains = Array.from(document.querySelectorAll("main"));
+    const content = within(mains[mains.length - 1] as HTMLElement);
+    expect(content.getByRole("link", { name: "Máquinas" })).toHaveAttribute("href", "/machines");
+  });
+
   it("shows the command built from the origin, with a working copy button", async () => {
     const user = userEvent.setup();
     const writeText = stubClipboard();

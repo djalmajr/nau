@@ -46,6 +46,20 @@ describe("access: sharing", () => {
     );
   });
 
+  it("hides the sharing list and the form on a revoked machine", async () => {
+    renderHubApp("/access");
+    await screen.findByRole("heading", { name: "Compartilhamento" });
+
+    // A old-laptop (m5) é da Ana e está revogada: só nome + selo "revogada",
+    // sem a lista de compartilhamentos e sem o formulário de compartilhar.
+    const oldLaptop = await screen.findByTestId("share-m5");
+    expect(oldLaptop).toHaveTextContent("old-laptop");
+    expect(oldLaptop).toHaveTextContent("revogada");
+    expect(within(oldLaptop).queryByRole("form")).not.toBeInTheDocument();
+    expect(within(oldLaptop).queryByRole("button", { name: "Compartilhar" })).not.toBeInTheDocument();
+    expect(within(oldLaptop).queryByRole("textbox")).not.toBeInTheDocument();
+  });
+
   it("shares a machine by e-mail and the new share shows up", async () => {
     const user = userEvent.setup();
     renderHubApp("/access");

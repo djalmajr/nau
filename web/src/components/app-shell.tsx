@@ -368,6 +368,7 @@ export function ThemeMenu() {
 function pageTitle(pathname: string, t: (key: TranslationKey) => string): string {
   if (pathname === "/") return t("nav.overview");
   if (pathname.startsWith("/agents")) return t("nav.agents");
+  if (pathname.startsWith("/machines/connect")) return t("connect.title");
   if (pathname.startsWith("/machines")) return t("nav.machines");
   if (pathname.startsWith("/developers")) return t("nav.developers");
   if (pathname.startsWith("/projects")) return t("nav.projects");

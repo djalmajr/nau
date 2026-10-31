@@ -79,6 +79,22 @@ describe("invite", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Convite inválido ou expirado.");
   });
 
+  it("maps 400 weak_password to the password length message", async () => {
+    const user = userEvent.setup();
+    withInviteToken();
+    renderHubApp("/invite");
+
+    // A senha passa na validação local (100 caracteres, dentro de 12 a 128)
+    // mas responde 400 weak_password no servidor: 200 bytes, fora de 12 a
+    // 128. A tela mapeia o código para a mensagem de tamanho, não a genérica.
+    await user.type(await screen.findByLabelText("Nome"), "Carla Exemplo");
+    await user.type(await screen.findByLabelText("Senha"), "ç".repeat(100));
+    await user.click(screen.getByRole("button", { name: "Criar conta" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "A nova senha precisa ter de 12 a 128 caracteres.",
+    );
+  });
+
   it("maps 409 to the email-taken message", async () => {
     const user = userEvent.setup();
     withInviteToken();

@@ -48,9 +48,16 @@ export function InviteScreen() {
       navigate({ replace: true, to: "/" });
     } catch (err) {
       if (err instanceof ApiError) {
-        if (err.status === 400) setError(t("invite.invalidOrExpired"));
-        else if (err.status === 409) setError(t("invite.emailTaken"));
-        else setError(t("errors.generic"));
+        if (err.status === 400) {
+          // O servidor rejeita a senha fora de 12 a 128 bytes com o mesmo
+          // código da troca de senha: a validação local fica, mas a resposta
+          // 400 weak_password também é mapeada para a mensagem de tamanho.
+          setError(err.serverError === "weak_password" ? t("settings.password.weak") : t("invite.invalidOrExpired"));
+        } else if (err.status === 409) {
+          setError(t("invite.emailTaken"));
+        } else {
+          setError(t("errors.generic"));
+        }
       } else {
         setError(t("errors.generic"));
       }
