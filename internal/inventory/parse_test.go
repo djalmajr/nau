@@ -63,8 +63,8 @@ func TestParseAcceptsValidFixtures(t *testing.T) {
 		t.Fatalf("sessions = %+v, want one session w1", project.Sessions)
 	}
 	agents := project.Sessions[0].Agents
-	if len(agents) != 12 {
-		t.Fatalf("agents = %d, want 12", len(agents))
+	if len(agents) != 13 {
+		t.Fatalf("agents = %d, want 13", len(agents))
 	}
 	var (
 		seenStates  = map[inventory.State]int{}
@@ -108,6 +108,7 @@ func TestParseAcceptsValidFixtures(t *testing.T) {
 		inventory.ReasonNotReceived,
 		inventory.ReasonNoReport,
 		inventory.ReasonCompact,
+		inventory.ReasonOwner,
 	} {
 		if seenReasons[r] != 1 {
 			t.Errorf("reason %s appears %d times, want 1", r, seenReasons[r])

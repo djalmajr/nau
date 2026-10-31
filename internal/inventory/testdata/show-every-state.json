@@ -176,6 +176,20 @@
               "report_ready": false,
               "started_ms": 1793374000000,
               "since_ms": null
+            },
+            {
+              "terminal": "w1:p13",
+              "name": "build-3",
+              "role": "implementer",
+              "kind": "cli-b",
+              "model": "example/model-2",
+              "effort": "medium",
+              "state": "needs_you",
+              "reason": "owner",
+              "task": "Wait for the owner of the checkout service",
+              "report_ready": false,
+              "started_ms": 1793374100000,
+              "since_ms": 1793375995000
             }
           ]
         }

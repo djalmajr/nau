@@ -20,7 +20,7 @@ soho inventory --json
 
 ## Privacy
 
-A project opts in through its own `.agents/soho.conf`. soho chooses the names of the key and its values when it implements this. They are written `inventory=show|hidden|off` here.
+A project opts in through its own `.agents/soho.conf`, with the mode key `inventory=show|hidden|off` and the optional display name `inventory_name=<text>`.
 
 | Mode | What leaves the machine |
 |---|---|
@@ -29,7 +29,7 @@ A project opts in through its own `.agents/soho.conf`. soho chooses the names of
 | `off`, or no key | Nothing. The project does not appear, and its agents are not counted. |
 
 - **Fail closed.** A project with no key, an unknown value, or a configuration file that cannot be read delivers nothing.
-- **Only the project file opens.** Only the project's own `.agents/soho.conf` can set `show` or `hidden`. A user, session or environment layer may only lower the mode (`show` to `hidden`, or either to `off`), never raise it: a project without the key delivers nothing, whatever the other layers say.
+- **Only the project file opens.** Only the project's own `.agents/soho.conf` can set `show` or `hidden`. The `SOHO_INVENTORY` variable, and the user and session layers, may only lower the mode (`show` to `hidden`, or either to `off`), never raise it: a project without the key delivers nothing, whatever the other layers say.
 - **Never in the output:**
   - in any mode: brief or report content, screen content (dialog and question text included), paths (working directory, state directory, report path), environment, command output and agent arguments;
   - in addition, in `hidden` mode: workspace and tab labels. In `show` mode the project's name is the only label that leaves the machine.
@@ -89,21 +89,21 @@ One JSON object on stdout.
 
 ### Top level
 
-- `schema`: the integer 1. A field may be added without a new schema; removing or changing the meaning of a field takes a new one. Readers ignore unknown fields.
+- `schema`: the integer 1. A new value of `state` or `reason` is a change that the Nau reader accepts before the soho that prints it; a new field does not change the schema. Removing or changing the meaning of a field takes a new one. Readers ignore unknown fields.
 - `soho_version`: the version of the soho that printed the inventory. Never empty.
 - `generated_ms`: when soho read the state, in milliseconds since the epoch (UTC). The hub computes "observed N ago" from it.
-- `projects`: the projects in `show` mode that have at least one live agent. A project with no live agent is left out.
+- `projects`: the projects in `show` mode that have at least one live agent. soho discovers them from the live terminals of the machine — their working directory, the root of the git repository and the project's `.agents/soho.conf` — and keeps no index of the projects. A project with no live agent is left out.
 - `hidden`: the counts of live agents per `state` over every project in `hidden` mode. All five keys (`working`, `needs_you`, `done`, `idle`, `unknown`) are always present, at zero when there is none.
 
 ### Project
 
-- `name`: the display name. It comes from an optional name key in the project's configuration, and defaults to the base name of the project root. It is never a path or a remote URL.
+- `name`: the display name. It comes from the `inventory_name` key in the project's configuration, and defaults to the base name of the project root. It is never a path or a remote URL.
 - `sessions`: one entry per soho session of the project (the state directory `.soho/<id>`) that has a live agent.
 
 ### Session
 
 - `id`: the session id (today the terminal server's workspace id). It is opaque and only groups an orchestrator with its workers.
-- `agents`: the orchestrator of the session, then its workers in roster order.
+- `agents`: the orchestrator of the session — recorded by soho at `init` and listed first, with its `soho title` as `task` — then its workers in roster order.
 
 ### Agent
 
@@ -120,7 +120,7 @@ One JSON object on stdout.
 | `task` | string or null | The task title: the H1 of the current brief without the role prefix and the done mark, or the orchestrator's `soho title` objective. At most 120 code points, with control characters removed. `null` when there is none. |
 | `report_ready` | boolean | The worker's report for the current task exists. Always `false` for an orchestrator. |
 | `started_ms` | integer | When the agent was spawned (or, for an orchestrator, when the session started), in UTC milliseconds. |
-| `since_ms` | integer or null | When soho first saw the agent in its current `state`. `null` until soho tracks it. |
+| `since_ms` | integer or null | When soho first saw the agent in its current `state`. `null` under the terminal server; under the other host it may come from the events. The field stays in the schema. |
 
 Strings are valid UTF-8 and carry no control characters. An inventory lists at most 500 agents. Past that, soho keeps the first 500 in project, session and roster order and adds `"truncated": true` at the top level.
 
@@ -138,7 +138,8 @@ soho already distinguishes these cases. The inventory folds them into five value
 | The brief was not received | `needs_you` | `not_received` |
 | Settled with no report | `needs_you` | `no_report` |
 | A compaction was interrupted | `needs_you` | `compact` |
-| A worker whose report is ready; an orchestrator whose turn ended unseen (the terminal server's `done`) | `done` | — |
+| A job waiting for a person (`job_human_input_minutes`) | `needs_you` | `owner` |
+| A worker whose report is ready; an orchestrator whose turn ended and now waits for the owner (the terminal server's `done`) | `done` | — |
 | Idle, or idle with no report yet | `idle` | — |
 | The state cannot be read | `unknown` | — |
 | Gone (closed terminal) | not listed | — |
@@ -151,11 +152,3 @@ The hub's board columns follow `state`: Needs you, Working, Done and Idle. `unkn
 - **What it sends:** the hub receives the inventory unchanged, plus the machine identity that Nau holds. The inventory carries no machine or developer field, because Nau owns both.
 - **Retention:** the hub keeps the last inventory per machine and the state changes it derives. It never keeps more than the inventory gave it.
 - **Tests:** they use a fake `soho inventory --json` that covers every mode and every state above, so the agent and the hub can be built before soho ships the command.
-
-## Open questions for soho
-
-1. **Discovery of projects.** soho has no index of the projects on a machine. One option: `soho init` and `soho config set` record the root of each project whose mode is not `off` in a local index under the user state directory. The index never leaves the machine, and the inventory prunes the roots that no longer exist. Another option: derive the projects from the live terminals' working directories.
-2. **The orchestrator's terminal.** The roster does not list the orchestrator. Does `soho init` record its terminal in the session state, so the inventory can list it with its title?
-3. **`since_ms`.** soho has screen-activity markers but no state-transition time. Can it record the first time it saw each state, or does the terminal server expose one?
-4. **Waiting for the owner.** soho has no such state for workers (`blocked` and `question` come closest). Does a job waiting for human input (`job_human_input_minutes`) map to `needs_you` with its own reason?
-5. **Key names.** The names of the mode key, the name key and their values. The proposal above says that only the project file opens a project; the other layers may only close it.

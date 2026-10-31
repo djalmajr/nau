@@ -119,6 +119,7 @@ const (
 	ReasonNotReceived Reason = "not_received"
 	ReasonNoReport    Reason = "no_report"
 	ReasonCompact     Reason = "compact"
+	ReasonOwner       Reason = "owner"
 )
 
 // Effort is the effort level clamped by soho at spawn.
