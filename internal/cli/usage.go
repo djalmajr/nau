@@ -28,7 +28,8 @@ commands:
 exit codes:
   0   success
   2   bad usage, unknown config key
-  4   soho not found or not runnable
+  4   hub serve: the database or the listener is unavailable (doctor reports
+      the soho backend in its JSON and exits 0 without it)
 `
 
 // usageText renders the usage for the program name of env.
