@@ -248,6 +248,154 @@ func TestStaticContentTypes(t *testing.T) {
 	}
 }
 
+// TestIngestRouteBodyLimit: the ingest route, POST /api/ingest on the
+// exact path, takes the parser's document limit, and one byte over it
+// answers 413 before the handler. Every other method and path keeps
+// the default limit: one byte over it is 413 before the handler, and
+// the exact default limit passes. The limits are written as literals,
+// not the implementation's constants. The accepted bodies reach the
+// handler intact, and every answer keeps the API headers.
+func TestIngestRouteBodyLimit(t *testing.T) {
+	// The parser's limit and the default limit, as independent
+	// literals of the test.
+	const ingestLimit = 4 * 1024 * 1024
+	const defaultLimit = 1024 * 1024
+
+	st := &countingStore{}
+	s := hub.New(hub.Deps{
+		Store:   st,
+		Now:     func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+		Version: "v1",
+	}, nil)
+	type capture struct {
+		calls int
+		body  []byte
+	}
+	caps := map[string]*capture{}
+	for _, p := range []string{"/api/ingest", "/api/ingest/", "/api/ingest-extra"} {
+		c := &capture{}
+		caps[p] = c
+		s.Handle("POST", p, func(ctx context.Context, req hub.Request) hub.Response {
+			c.calls++
+			c.body = req.Body
+			return hub.Response{Status: 200, Body: []byte(`{"ok":true}`)}
+		})
+	}
+	h := New(s)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	// A client with a finite timeout: a regression that leaves the
+	// body unread must not hang the proof without its own bound.
+	client := &http.Client{Timeout: 30 * time.Second}
+	do := func(method, path string, body []byte) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(method, srv.URL+path, bytes.NewReader(body))
+		if err != nil {
+			t.Fatalf("%s %s: build the request: %v", method, path, err)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: the request: %v", method, path, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	// A valid inventory document, small.
+	doc := []byte(`{"schema":1,"soho_version":"v0.3.1","generated_ms":1793376000000,"projects":[{"name":"acme/web","sessions":[{"id":"w1","agents":[{"terminal":"w1:p1","name":"agent-1","role":"implementer","kind":"cli-b","state":"working","report_ready":false,"started_ms":1793372400000}]}]}],"hidden":{"working":0,"needs_you":0,"done":0,"idle":0,"unknown":0}}`)
+	// The same document padded with whitespace to exactly the parser's
+	// limit, the newline at the last byte: valid JSON at the boundary.
+	var sb strings.Builder
+	sb.Write(doc)
+	sb.WriteString(strings.Repeat(" ", ingestLimit-len(doc)-1))
+	sb.WriteByte('\n')
+	exact := []byte(sb.String())
+	if len(exact) != ingestLimit {
+		t.Fatalf("padded document = %d bytes, want %d", len(exact), ingestLimit)
+	}
+
+	// A small valid document reaches the ingest handler intact.
+	resp := do("POST", "/api/ingest", doc)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("small: status = %d, want 200", resp.StatusCode)
+	}
+	if c := caps["/api/ingest"]; c.calls != 1 || !bytes.Equal(c.body, doc) {
+		t.Fatalf("small: the handler calls = %d and the body intact = %v, want 1 and true", c.calls, bytes.Equal(c.body, doc))
+	}
+
+	// The valid document of exactly the parser's limit, with the
+	// newline near the end, is accepted and reaches the handler intact.
+	resp = do("POST", "/api/ingest", exact)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%d MiB: status = %d, want 200", ingestLimit>>20, resp.StatusCode)
+	}
+	if c := caps["/api/ingest"]; c.calls != 2 || !bytes.Equal(c.body, exact) {
+		t.Fatalf("%d MiB: the handler calls = %d and the body intact = %v, want 2 and true", ingestLimit>>20, c.calls, bytes.Equal(c.body, exact))
+	}
+
+	// One byte over the parser's limit is refused before the handler,
+	// with the API headers on the answer.
+	resp = do("POST", "/api/ingest", append(append([]byte(nil), exact...), ' '))
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("%d MiB + 1: status = %d, want 413", ingestLimit>>20, resp.StatusCode)
+	}
+	if c := caps["/api/ingest"]; c.calls != 2 {
+		t.Fatalf("%d MiB + 1: the handler calls = %d, want 2 (the handler never called)", ingestLimit>>20, c.calls)
+	}
+	for name, want := range map[string]string{
+		"Content-Type":           "application/json",
+		"Cache-Control":          "no-store",
+		"X-Content-Type-Options": "nosniff",
+	} {
+		if got := resp.Header.Get(name); got != want {
+			t.Fatalf("%d MiB + 1: %s = %q, want %q", ingestLimit>>20, name, got, want)
+		}
+	}
+
+	// Every other method and path keeps the default limit: one byte
+	// over it is refused before the handler, the existing endpoint
+	// included.
+	over := bytes.Repeat([]byte("a"), defaultLimit+1)
+	resp = do("GET", "/api/ingest", over)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("GET /api/ingest %d MiB + 1: status = %d, want 413", defaultLimit>>20, resp.StatusCode)
+	}
+	resp = do("POST", "/api/ingest/", over)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("POST /api/ingest/ %d MiB + 1: status = %d, want 413", defaultLimit>>20, resp.StatusCode)
+	}
+	if c := caps["/api/ingest/"]; c.calls != 0 {
+		t.Fatalf("POST /api/ingest/ %d MiB + 1: the handler calls = %d, want 0", defaultLimit>>20, c.calls)
+	}
+	resp = do("POST", "/api/ingest-extra", over)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("POST /api/ingest-extra %d MiB + 1: status = %d, want 413", defaultLimit>>20, resp.StatusCode)
+	}
+	if c := caps["/api/ingest-extra"]; c.calls != 0 {
+		t.Fatalf("POST /api/ingest-extra %d MiB + 1: the handler calls = %d, want 0", defaultLimit>>20, c.calls)
+	}
+	resp = do("POST", "/api/health", over)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("POST /api/health %d MiB + 1: status = %d, want 413", defaultLimit>>20, resp.StatusCode)
+	}
+	if st.pings != 0 {
+		t.Fatalf("POST /api/health %d MiB + 1: the handler pings = %d, want 0", defaultLimit>>20, st.pings)
+	}
+
+	// The exact default limit passes on the other paths and reaches
+	// the handler intact.
+	atDefault := bytes.Repeat([]byte("a"), defaultLimit)
+	resp = do("POST", "/api/ingest/", atDefault)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/ingest/ %d MiB: status = %d, want 200", defaultLimit>>20, resp.StatusCode)
+	}
+	if c := caps["/api/ingest/"]; c.calls != 1 || !bytes.Equal(c.body, atDefault) {
+		t.Fatalf("POST /api/ingest/ %d MiB: the handler calls = %d and the body intact = %v, want 1 and true", defaultLimit>>20, c.calls, bytes.Equal(c.body, atDefault))
+	}
+}
+
 // staticDirFS is the static fixture of the adapter tests.
 func staticDirFS(t *testing.T) fstest.MapFS {
 	t.Helper()
