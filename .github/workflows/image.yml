@@ -32,7 +32,7 @@ jobs:
         run: |
           docker build -t nau-hub:smoke \
             --build-arg VERSION="ci-${GITHUB_SHA}" \
-            --label org.opencontainers.image.source=https://github.com/djalmajr/nau \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             --label org.opencontainers.image.revision="${GITHUB_SHA}" \
             .
 
@@ -85,7 +85,8 @@ jobs:
 
       # On a push to main, publish exactly the image the smoke test just
       # ran: the same local image, tagged by the commit SHA (never
-      # latest), as the public package ghcr.io/djalmajr/nau. The login
+      # latest), as the public package ghcr.io/<owner>/<repository>
+      # (lowercase, as the registry requires). The login
       # uses the job's GITHUB_TOKEN through docker/login-action; no
       # secret goes in a command argument.
       - name: Log in to GHCR
@@ -101,7 +102,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          image="ghcr.io/djalmajr/nau:${GITHUB_SHA}"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
           docker tag nau-hub:smoke "$image"
           docker push "$image"
           digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image")
