@@ -8,11 +8,14 @@ on:
 permissions:
   contents: read
 
-# A newer pull request push cancels the older run; a push to main is
-# never canceled, so every commit of main gets its image published.
+# A newer pull request push cancels the older run of that pull
+# request. Each push to main gets a group of its own (its run id),
+# because a group keeps only one pending run and would drop a queued
+# main commit: every commit of main gets its image published, and the
+# SHA tags make their order irrelevant.
 concurrency:
-  group: image-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: image-${{ github.workflow }}-${{ github.event_name == 'push' && github.run_id || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   image:
