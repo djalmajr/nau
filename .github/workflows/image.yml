@@ -8,8 +8,13 @@ on:
 permissions:
   contents: read
 
+# A newer pull request push cancels the older run of that pull
+# request. Each push to main gets a group of its own (its run id),
+# because a group keeps only one pending run and would drop a queued
+# main commit: every commit of main gets its image published, and the
+# SHA tags make their order irrelevant.
 concurrency:
-  group: image-${{ github.workflow }}-${{ github.ref }}
+  group: image-${{ github.workflow }}-${{ github.event_name == 'push' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -17,13 +22,25 @@ jobs:
     name: Build and smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # packages: write is used only by the publish steps below, which run
+    # on a push to main; a pull request from a fork gets a read-only
+    # token whatever this block says.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Build the image
-        run: docker build -t nau-hub:smoke --build-arg VERSION="ci-${GITHUB_SHA}" .
+        run: |
+          docker build -t nau-hub:smoke \
+            --build-arg VERSION="ci-${GITHUB_SHA}" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="${GITHUB_SHA}" \
+            .
 
-      # The image is built only, never pushed. The smoke test runs the
+      # A pull request builds and smoke-tests the image only; a push to
+      # main also publishes it (below). The smoke test runs the
       # image against a containerized sqld on a private Docker network
       # with a synthetic session key generated in the job (never a real
       # secret), and checks /api/health and the served index page.
@@ -68,3 +85,29 @@ jobs:
           curl -fsS "http://127.0.0.1:${port}/" -o /tmp/index.html
           grep -qi '<!doctype html>' /tmp/index.html
           grep -qi 'id="root"' /tmp/index.html
+
+      # On a push to main, publish exactly the image the smoke test just
+      # ran: the same local image, tagged by the commit SHA (never
+      # latest), as the public package ghcr.io/<owner>/<repository>
+      # (lowercase, as the registry requires). The login
+      # uses the job's GITHUB_TOKEN through docker/login-action; no
+      # secret goes in a command argument.
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the smoke-tested image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_SHA}"
+          docker tag nau-hub:smoke "$image"
+          docker push "$image"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$image")
+          echo "published: $digest"
+          echo "Published \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
