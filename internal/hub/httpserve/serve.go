@@ -11,10 +11,14 @@ import (
 	"time"
 
 	"github.com/djalmajr/nau/internal/hub"
+	"github.com/djalmajr/nau/internal/inventory"
 )
 
 // maxBody is the limit of a request body: 1 MiB.
 const maxBody = 1 << 20
+
+// ingestRoute is the route that delivers a whole inventory document.
+const ingestRoute = "/api/ingest"
 
 // The timeouts of the server built by NewServer.
 const (
@@ -49,7 +53,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 	}
-	body, over, err := readBody(r.Body)
+	body, over, err := readBody(r.Body, bodyLimit(r))
 	if err != nil || over {
 		// Over the limit or unreadable: refuse without the handler.
 		w.WriteHeader(http.StatusRequestEntityTooLarge)
@@ -84,14 +88,29 @@ func NewServer(h http.Handler) *http.Server {
 	}
 }
 
+// bodyLimit answers the limit of one request body: the POST whose
+// path is exactly the ingest route takes the parser's document limit,
+// and every other method and path keeps the default limit. The match
+// is the exact comparison of the method and r.URL.Path, the same
+// field the core routes on: net/http already decodes the request
+// target into r.URL.Path, so the match selects exactly the requests
+// the core delivers to the ingest route, and no RawPath guard or path
+// normalization is needed to stay in parity with it.
+func bodyLimit(r *http.Request) int {
+	if r.Method == http.MethodPost && r.URL.Path == ingestRoute {
+		return inventory.MaxInputBytes
+	}
+	return maxBody
+}
+
 // readBody reads the request body up to the limit plus one byte; it
 // reports whether the body is over the limit.
-func readBody(r io.Reader) ([]byte, bool, error) {
-	data, err := io.ReadAll(io.LimitReader(r, maxBody+1))
+func readBody(r io.Reader, limit int) ([]byte, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(limit)+1))
 	if err != nil {
 		return nil, false, err
 	}
-	if len(data) > maxBody {
+	if len(data) > limit {
 		return nil, true, nil
 	}
 	return data, false, nil

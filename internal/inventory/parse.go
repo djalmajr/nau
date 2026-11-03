@@ -7,8 +7,11 @@ import (
 )
 
 const (
-	// maxInputBytes is the largest document Parse accepts: 4 MiB.
-	maxInputBytes = 4 << 20
+	// MaxInputBytes is the largest inventory document Parse accepts:
+	// 4 MiB. The readers of the document (the parser and the HTTP
+	// route that delivers it) must not refuse what it accepts, so they
+	// take this limit, without extra margin.
+	MaxInputBytes = 4 << 20
 	// maxTaskCodePoints is the contract's limit for a task title.
 	maxTaskCodePoints = 120
 	// maxAgents is the contract's limit for the whole document.
@@ -75,7 +78,7 @@ type rawHidden struct {
 // level, because adding a field does not take a new schema.
 func Parse(data []byte) (Inventory, error) {
 	var inv Inventory
-	if len(data) > maxInputBytes {
+	if len(data) > MaxInputBytes {
 		return inv, refusal("input exceeds 4 MiB")
 	}
 	if !utf8.Valid(data) {

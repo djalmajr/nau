@@ -122,7 +122,7 @@ One JSON object on stdout.
 | `started_ms` | integer | When the agent was spawned (or, for an orchestrator, when the session started), in UTC milliseconds. |
 | `since_ms` | integer or null | When soho first saw the agent in its current `state`. `null` under the terminal server; under the other host it may come from the events. The field stays in the schema. |
 
-Strings are valid UTF-8 and carry no control characters. An inventory lists at most 500 agents. Past that, soho keeps the first 500 in project, session and roster order and adds `"truncated": true` at the top level.
+Strings are valid UTF-8 and carry no control characters. An inventory lists at most 500 agents and holds at most 4 MiB. When soho stops early it keeps an ordered prefix of whole agents — in project, session and roster order, with all their fields — up to 500 and up to the 4 MiB budget, and adds `"truncated": true` at the top level. It stops at the first agent that did not fit, without cutting fields or skipping to a smaller later agent; `projects` may then be empty while `truncated` is true, and `hidden` stays complete. The 4 MiB budget counts every UTF-8 byte of the serialized JSON, newlines included: it is the contracted budget of the producer and of the reader, with zero envelope in the agent, so the hub receives exactly the bytes soho printed.
 
 ## States
 

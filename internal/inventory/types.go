@@ -25,7 +25,13 @@ type Inventory struct {
 	// Hidden counts the live agents per state over every hidden-mode
 	// project of the machine; all five keys are always present.
 	Hidden Hidden `json:"hidden"`
-	// Truncated is true when soho kept only the first 500 agents.
+	// Truncated is true when soho stopped the document early: it kept
+	// an ordered prefix of whole agents, in project, session and
+	// roster order, up to 500 and up to the MaxInputBytes document
+	// limit, and stopped at the first agent that did not fit, without
+	// cutting fields or skipping to a smaller later agent. Projects
+	// may then be empty while Truncated is true, and Hidden stays
+	// complete.
 	Truncated bool `json:"truncated,omitempty"`
 }
 
