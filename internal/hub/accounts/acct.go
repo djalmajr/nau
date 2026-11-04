@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"strings"
@@ -21,7 +23,9 @@ import (
 const (
 	perEmailMaxFailures = 5
 	globalMaxFailures   = 100
-	failureWindowMS     = int64(15 * 60 * 1000)
+	// LoginFailureWindow bounds the per-email and global login attempt budgets.
+	LoginFailureWindow = 15 * time.Minute
+	failureWindowMS    = int64(LoginFailureWindow / time.Millisecond)
 
 	InviteTTL    = 7 * 24 * time.Hour
 	RoleOwner    = "owner"
@@ -66,17 +70,34 @@ type Invite struct {
 // matching unique violation; the memory implementation sets them
 // directly.
 var (
-	ErrEmailTaken          = errors.New("accounts: the e-mail is already taken")
-	ErrAlreadyBootstrapped = errors.New("accounts: the hub is already bootstrapped")
+	ErrEmailTaken  = errors.New("accounts: the e-mail is already taken")
+	ErrOwnerExists = errors.New("accounts: the owner already exists")
+)
+
+// The root-token log lines carry no token, password or e-mail.
+const (
+	rootTokenLogWrong = "hub accounts: the root token of the recovery is invalid"
+	rootTokenLogReset = "hub accounts: the owner password was reset with the root token"
 )
 
 // AccountStore is the account storage. Every method is one unit of
-// work on the database; the multi-statement operations (the bootstrap,
+// work on the database; the multi-statement operations (the owner seed,
 // the user-plus-session create, the password change) are atomic: either
-// everything applies or nothing does.
+// everything applies or nothing does. There is exactly one owner: the
+// seed creates it on the empty database and the invites create members
+// only.
 type AccountStore interface {
 	CountUsers(ctx context.Context) (int, error)
-	BootstrapOwner(ctx context.Context, u User, s SessionRow) error
+	// SeedOwner creates the initial owner, without a session, only
+	// while the database holds no user: the conditional insert and the
+	// one-row guard run as one atomic batch, so a database with any
+	// user answers the constraint and the whole batch rolls back
+	// without writing. A constraint of the operation is
+	// ErrOwnerExists; the caller re-reads the state before deciding.
+	SeedOwner(ctx context.Context, u User) error
+	// FindOwner returns the owner, the only account with the owner
+	// role.
+	FindOwner(ctx context.Context) (User, bool, error)
 	FindUserByEmailNorm(ctx context.Context, norm string) (User, bool, error)
 	FindUserByID(ctx context.Context, id string) (User, bool, error)
 	// ReserveAttempt reserves one login attempt for the e-mail, before
@@ -121,31 +142,40 @@ type AccountStore interface {
 }
 
 // Config is the configuration of the accounts: the store, the session
-// key (at least 32 bytes), the optional one-time bootstrap token, and
-// the time and the randomness, injected so the tests are deterministic.
+// key (at least 32 bytes), the optional root token of the password
+// recovery, the optional log writer, and the time and the randomness,
+// injected so the tests are deterministic.
 type Config struct {
 	// Store is the account storage.
 	Store AccountStore
 	// SessionKey signs the session cookies.
 	SessionKey []byte
-	// BootstrapToken is the one-time token of the initial owner; the
-	// empty string disables the bootstrap route (it answers 404).
-	BootstrapToken string
+	// RootToken is the token of the password recovery: when it is set
+	// the recovery route, registered on the recovery server, answers
+	// the reset; when it is empty the route answers the 404 of a
+	// route that does not exist.
+	RootToken string
+	// Log receives the lines of the recovery route: one per wrong
+	// token and one per password reset, with no token, password or
+	// e-mail. Nil discards them.
+	Log io.Writer
 	// Now is the clock.
 	Now func() time.Time
 	// Rand is the randomness source; nil uses crypto/rand.
 	Rand io.Reader
 }
 
-// Auth is the accounts layer of the hub: the bootstrap, the login, the
-// session endpoints and the owner-issued invites, on top of one
-// AccountStore. It holds no state between requests.
+// Auth is the accounts layer of the hub: the owner seed, the login, the
+// session endpoints, the root-token password recovery and the
+// owner-issued invites, on top of one AccountStore. It holds no state
+// between requests.
 type Auth struct {
-	store          AccountStore
-	key            []byte
-	bootstrapToken string
-	now            func() time.Time
-	rand           io.Reader
+	store     AccountStore
+	key       []byte
+	rootToken string
+	log       io.Writer
+	now       func() time.Time
+	rand      io.Reader
 }
 
 // New builds the accounts layer. A session key shorter than 32
@@ -166,17 +196,20 @@ func New(cfg Config) (*Auth, error) {
 		rnd = rand.Reader
 	}
 	return &Auth{
-		store:          cfg.Store,
-		key:            cfg.SessionKey,
-		bootstrapToken: cfg.BootstrapToken,
-		now:            now,
-		rand:           rnd,
+		store:     cfg.Store,
+		key:       cfg.SessionKey,
+		rootToken: cfg.RootToken,
+		log:       cfg.Log,
+		now:       now,
+		rand:      rnd,
 	}, nil
 }
 
-// Register adds the account routes to the hub server.
+// Register adds the account routes to the public hub server: the
+// session, the password change and the invites. The recovery route is
+// not among them: it belongs to the recovery server, registered by
+// RegisterRecovery on its loopback-only listener.
 func (a *Auth) Register(s *hub.Server) {
-	s.Handle("POST", "/api/bootstrap", a.bootstrap)
 	s.Handle("GET", "/api/session", a.getSession)
 	s.Handle("POST", "/api/session", a.login)
 	s.Handle("DELETE", "/api/session", a.logout)
@@ -185,6 +218,24 @@ func (a *Auth) Register(s *hub.Server) {
 	s.Handle("GET", "/api/invites", a.RequireSession(a.listInvites))
 	s.Handle("DELETE", "/api/invites/{id}", a.RequireSession(a.revokeInvite))
 	s.Handle("POST", "/api/invites/accept", a.acceptInvite)
+}
+
+// RegisterRecovery adds the password recovery route to the recovery
+// server. The hub serve binds that server to a loopback listener that
+// is separate from the public one, so the route never exists on the
+// public port: the absence of the port is the protection, and the
+// handler answers the 404 of a route that does not exist when the
+// root token is not set.
+func (a *Auth) RegisterRecovery(s *hub.Server) {
+	s.Handle("POST", "/api/session/root-token", a.rootTokenReset)
+}
+
+// HasOwner reports whether the database has the owner account, the only
+// account with the owner role: the empty-database guard of the seed and
+// the lost-race check re-read the state through it.
+func (a *Auth) HasOwner(ctx context.Context) (bool, error) {
+	_, found, err := a.store.FindOwner(ctx)
+	return found, err
 }
 
 // RequireSession wraps a handler that needs the signed-in user: it
@@ -320,81 +371,115 @@ func (a *Auth) sessionRowAndUser(ctx context.Context, req hub.Request) (SessionR
 	return row, u, true
 }
 
-// ---- the bootstrap ---------------------------------------------------
+// ---- the owner seed --------------------------------------------------
 
-type bootstrapBody struct {
-	Token    string `json:"token"`
-	Name     string `json:"name"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-}
-
-// bootstrap creates the initial owner, exactly once, with the one-time
-// environment token. Without the variable the route does not exist
-// (404); with a user already created it answers 409; a wrong token
-// answers 401 invalid_token, compared in constant time.
-func (a *Auth) bootstrap(ctx context.Context, req hub.Request) hub.Response {
-	if a.bootstrapToken == "" {
-		return errResponse(404, "not_found")
-	}
-	if !a.checkContentType(req) {
-		return errResponse(415, "unsupported_media_type")
-	}
-	var b bootstrapBody
-	if err := decodeStrict(req.Body, &b); err != nil {
-		return errResponse(400, "bad_request")
-	}
-	count, err := a.store.CountUsers(ctx)
+// SeedOwner builds the initial owner from the given name, e-mail and
+// password and seeds it into the empty database, without a session: the
+// fresh hash and the id come out before any write, and the store keeps
+// the operation atomic, refusing it while any user exists. It reports
+// ErrOwnerExists when the database already has a user (a legacy user of
+// any other e-mail, or another seed that won the race); the caller
+// re-reads the state before deciding.
+func (a *Auth) SeedOwner(ctx context.Context, name, email, password string) error {
+	hash, err := HashPassword(a.rand, password)
 	if err != nil {
-		return errResponse(503, "unavailable")
+		return err
 	}
-	if count > 0 {
-		return errResponse(409, "already_bootstrapped")
-	}
-	if subtle.ConstantTimeCompare([]byte(b.Token), []byte(a.bootstrapToken)) != 1 {
-		return errResponse(401, "invalid_token")
-	}
-	if strings.TrimSpace(b.Name) == "" || strings.TrimSpace(b.Email) == "" {
-		return errResponse(400, "bad_request")
-	}
-	if !PolicyOK(b.Password) {
-		return errResponse(400, "weak_password")
-	}
-	hash, err := HashPassword(a.rand, b.Password)
+	id, err := a.randomID()
 	if err != nil {
-		return errResponse(503, "unavailable")
+		return err
 	}
 	now := a.now()
 	user := User{
-		Email:        strings.TrimSpace(b.Email),
-		EmailNorm:    normalizeEmail(b.Email),
-		Name:         strings.TrimSpace(b.Name),
+		ID:           id,
+		Email:        email,
+		EmailNorm:    normalizeEmail(email),
+		Name:         name,
 		PasswordHash: hash,
 		Role:         RoleOwner,
 		AuthVersion:  1,
 		CreatedMS:    now.UnixMilli(),
 	}
-	user.ID, err = a.randomID()
+	return a.store.SeedOwner(ctx, user)
+}
+
+// ---- the root-token password recovery --------------------------------
+
+type rootTokenBody struct {
+	Token string `json:"token"`
+	New   string `json:"new"`
+}
+
+// logf writes one line of the recovery route to the configured writer
+// (a nil writer discards it). The two lines carry no token, no password
+// and no e-mail.
+func (a *Auth) logf(line string) {
+	if a.log != nil {
+		_, _ = fmt.Fprintln(a.log, line)
+	}
+}
+
+// rootTokenReset redefines the password of the owner with the root
+// token, the emergency exit of a forgotten password. The route exists
+// only on the recovery listener, bound to the loopback of the hub, so
+// the public port has no such route at all. The order of the checks is
+// the contract: the 404 of a route that does not exist (the root token
+// not set) comes before the content type, and the token check,
+// compared on the SHA-256 in constant time so the length of the
+// presented token never leaks, comes before the password policy. There
+// is no attempt limit here: the public login feeds the limiter, and an
+// attacker could exhaust it and close the emergency exit; the token is
+// at least 32 bytes and the route is not reachable from the
+// public URL. The success redefines the password through the same
+// atomic change of the session: the auth version bumps, every session
+// of the owner is revoked and the new one is created.
+func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response {
+	if a.rootToken == "" {
+		return errResponse(404, "not_found")
+	}
+	if !a.checkContentType(req) {
+		return errResponse(415, "unsupported_media_type")
+	}
+	var b rootTokenBody
+	if err := decodeStrict(req.Body, &b); err != nil {
+		return errResponse(400, "bad_request")
+	}
+	got, want := sha256.Sum256([]byte(b.Token)), sha256.Sum256([]byte(a.rootToken))
+	if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+		a.logf(rootTokenLogWrong)
+		return errResponse(401, "invalid_token")
+	}
+	if !PolicyOK(b.New) {
+		return errResponse(400, "weak_password")
+	}
+	owner, found, err := a.store.FindOwner(ctx)
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
-	row, cookie, err := NewSession(a.rand, a.key, now)
+	if !found {
+		return errResponse(409, "no_owner")
+	}
+	hash, err := HashPassword(a.rand, b.New)
 	if err != nil {
 		return errResponse(503, "unavailable")
 	}
-	row.UserID = user.ID
-	row.AuthVersion = 1
-	if err := a.store.BootstrapOwner(ctx, user, row); err != nil {
-		switch {
-		case errors.Is(err, ErrAlreadyBootstrapped):
-			return errResponse(409, "already_bootstrapped")
-		case errors.Is(err, ErrEmailTaken):
-			return errResponse(409, "email_taken")
-		default:
-			return errResponse(503, "unavailable")
+	row, cookie, err := NewSession(a.rand, a.key, a.now())
+	if err != nil {
+		return errResponse(503, "unavailable")
+	}
+	row.UserID = owner.ID
+	row.AuthVersion = owner.AuthVersion + 1
+	if err := a.store.ChangePasswordWithNewSession(ctx, owner.ID, owner.AuthVersion, hash, row); err != nil {
+		// The batch failed: the guard lost the race only when a
+		// concurrent change moved the version in between; anything
+		// else is a store failure.
+		if cur, found, rerr := a.store.FindUserByID(ctx, owner.ID); rerr == nil && found && cur.AuthVersion != owner.AuthVersion {
+			return errResponse(401, "unauthenticated")
 		}
+		return errResponse(503, "unavailable")
 	}
-	return withCookie(201, SessionCookie(cookie), sessionBody(user))
+	a.logf(rootTokenLogReset)
+	return withCookie(200, SessionCookie(cookie), sessionBody(owner))
 }
 
 // ---- the session endpoints -------------------------------------------

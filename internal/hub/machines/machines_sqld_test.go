@@ -21,8 +21,8 @@ import (
 // test value, never a secret.
 const testSessionKey = "dGVzdC1zZXNzaW9uLWtleS02MjItMDAwMDAwMDAwMDAwMDAwMA=="
 
-// testBootstrapToken is the one-time bootstrap token of the suite.
-const testBootstrapToken = "test-bootstrap-622"
+// testOwnerPassword is the password of the seeded owner of the suite.
+const testOwnerPassword = "owner-password-12345"
 
 // sqldMachineTables are the tables the suite empties between the
 // scenarios: the machine tables and the tables of the layers the real
@@ -57,7 +57,7 @@ func TestSQLDMachinesScenarios(t *testing.T) {
 }
 
 // freshSQLScenario empties the tables, builds the real layers over the
-// fake clock and creates the users (the bootstrap owner and the two
+// fake clock and creates the users (the seeded owner and the two
 // members, through the real invites).
 func freshSQLScenario(t *testing.T, st store.Store) *scenario {
 	t.Helper()
@@ -75,10 +75,9 @@ func freshSQLScenario(t *testing.T, st store.Store) *scenario {
 		t.Fatalf("the session key of the suite: %v", err)
 	}
 	auth, err := accounts.New(accounts.Config{
-		Store:          accounts.NewSQL(st),
-		SessionKey:     sessionKey,
-		BootstrapToken: testBootstrapToken,
-		Now:            clock.Now,
+		Store:      accounts.NewSQL(st),
+		SessionKey: sessionKey,
+		Now:        clock.Now,
 	})
 	if err != nil {
 		t.Fatalf("accounts.New: %v", err)
@@ -98,8 +97,8 @@ func freshSQLScenario(t *testing.T, st store.Store) *scenario {
 	auth.Register(srv)
 	svc.Register(srv)
 
-	// The bootstrap owner.
-	ownerID, ownerCookie := bootstrapSQLUser(t, srv, "owner", "owner@example.test")
+	// The seeded owner.
+	ownerID, ownerCookie := seedSQLUser(t, auth, srv, "owner", "owner@example.test")
 	users := map[string]accounts.User{"owner": {ID: ownerID, Name: "owner", Email: "owner@example.test", Role: accounts.RoleOwner}}
 	cookies := map[string]string{"owner": ownerCookie}
 	for _, who := range []struct {
@@ -124,24 +123,25 @@ func freshSQLScenario(t *testing.T, st store.Store) *scenario {
 	}
 }
 
-// bootstrapSQLUser runs the bootstrap and returns the user id and the
-// session cookie.
-func bootstrapSQLUser(t *testing.T, srv *hub.Server, name, email string) (string, string) {
+// seedSQLUser seeds the owner through the store and logs in through
+// the route, returning the user id and the session cookie.
+func seedSQLUser(t *testing.T, auth *accounts.Auth, srv *hub.Server, name, email string) (string, string) {
 	t.Helper()
+	if err := auth.SeedOwner(context.Background(), name, email, testOwnerPassword); err != nil {
+		t.Fatalf("seed the owner: %v", err)
+	}
 	body, _ := json.Marshal(map[string]string{
-		"token":    testBootstrapToken,
-		"name":     name,
 		"email":    email,
-		"password": "bootstrap-password-1",
+		"password": testOwnerPassword,
 	})
 	resp := srv.Serve(context.Background(), hub.Request{
 		Method: http.MethodPost,
-		Path:   "/api/bootstrap",
+		Path:   "/api/session",
 		Header: jsonHeader(),
 		Body:   body,
 	})
-	if resp.Status != 201 {
-		t.Fatalf("bootstrap: %d %s, want 201", resp.Status, resp.Body)
+	if resp.Status != http.StatusOK {
+		t.Fatalf("owner login: %d %s, want 200", resp.Status, resp.Body)
 	}
 	return userOf(t, resp.Body), cookieOf(t, resp)
 }

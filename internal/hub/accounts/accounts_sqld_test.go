@@ -33,10 +33,9 @@ func TestSQLDConcurrencyScenarios(t *testing.T) {
 	runConcurrencyScenarios(t, func() AccountStore { return freshSQLStore(t, st) })
 }
 
-// freshSQLStore empties the account tables and the bootstrap mark, so
-// every scenario starts from the empty state the migrations create.
-// The rows of the other layers go away too, in the order that keeps
-// the foreign keys free.
+// freshSQLStore empties the account tables, so every scenario starts
+// from the empty state the migrations create. The rows of the other
+// layers go away too, in the order that keeps the foreign keys free.
 func freshSQLStore(t *testing.T, st store.Store) AccountStore {
 	t.Helper()
 	ctx := context.Background()

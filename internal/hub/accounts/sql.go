@@ -2,15 +2,15 @@ package accounts
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/djalmajr/nau/internal/hub/store"
 )
 
 // SQL is the AccountStore over the hub storage: one statement per
 // simple operation and one atomic batch per multi-statement operation
-// (the bootstrap, the user-plus-session create, the password change).
+// (the owner seed, the user-plus-session create, the password change).
 // A unique violation of the schema is translated to the sentinel error
 // the handlers turn into the contract status; every other error is a
 // store failure.
@@ -23,21 +23,19 @@ func NewSQL(s store.Store) *SQL {
 	return &SQL{store: s}
 }
 
-// mapUnique translates the unique violations of the schema to the
-// sentinel errors. The constraint name comes from the database server;
-// it is read to pick the error and never echoed to a response.
-func mapUnique(err error) error {
-	if err == nil {
-		return nil
+// mapConstraint translates a constraint failure of the store to the
+// sentinel error the handlers turn into the contract status. The store
+// never quotes the server text (a failure carries only the statement
+// number and the validated code), so the mapping is on the code alone,
+// and the caller says which sentinel a constraint of its operation
+// means. A constraint never means the batch wrote: the caller
+// re-reads the state before deciding.
+func mapConstraint(err error, sentinel error) error {
+	var se *store.StatementError
+	if errors.As(err, &se) && se.Code == "SQLITE_CONSTRAINT" {
+		return fmt.Errorf("accounts: %w", sentinel)
 	}
-	switch {
-	case strings.Contains(err.Error(), "UNIQUE constraint failed: users.email_norm"):
-		return fmt.Errorf("accounts: %w", ErrEmailTaken)
-	case strings.Contains(err.Error(), "UNIQUE constraint failed: hub_meta.key"):
-		return fmt.Errorf("accounts: %w", ErrAlreadyBootstrapped)
-	default:
-		return err
-	}
+	return err
 }
 
 // intResult reads the single integer of one result row.
@@ -221,16 +219,28 @@ func (s *SQL) CountUsers(ctx context.Context) (int, error) {
 	return int(v), err
 }
 
-// BootstrapOwner creates the initial owner with its first session in
-// one atomic batch. The hub_meta row is the race guard: its key is
-// unique, so a second concurrent bootstrap fails on it and rolls back.
-func (s *SQL) BootstrapOwner(ctx context.Context, u User, sr SessionRow) error {
+// SeedOwner creates the initial owner, without a session, in one
+// atomic batch. The insert runs only while the database holds no user,
+// and the one-row guard confirms the insert wrote exactly one row: a
+// database with any user leaves zero changes, the guard fails its
+// check, and the whole batch rolls back without writing. A constraint
+// of the operation means a user exists, and the caller re-reads the
+// state before deciding.
+func (s *SQL) SeedOwner(ctx context.Context, u User) error {
 	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `INSERT INTO hub_meta (key, value) VALUES ('bootstrapped', ?)`, Args: []store.Value{u.ID}},
-		{SQL: insertUsers, Args: userArgs(u)},
-		{SQL: insertSession, Args: sessionArgs(sr)},
+		{SQL: `INSERT INTO users (id, email_norm, email, name, password_hash, role, created_ms)
+SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)`, Args: userArgs(u)},
+		{SQL: guardCheck},
+		{SQL: guardClear},
 	})
-	return mapUnique(err)
+	return mapConstraint(err, ErrOwnerExists)
+}
+
+// FindOwner returns the owner, the only account with the owner role.
+func (s *SQL) FindOwner(ctx context.Context) (User, bool, error) {
+	res, err := s.store.Execute(ctx, store.Stmt{SQL: selectUser + ` WHERE role = ?`, Args: []store.Value{RoleOwner}})
+	u, found, rowErr := userRow(res)
+	return u, found, firstErr(err, rowErr)
 }
 
 func (s *SQL) FindUserByEmailNorm(ctx context.Context, norm string) (User, bool, error) {
@@ -258,7 +268,7 @@ func (s *SQL) ChangePasswordWithNewSession(ctx context.Context, userID string, a
 		{SQL: `UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0`, Args: []store.Value{userID}},
 		{SQL: insertSession, Args: sessionArgs(sr)},
 	})
-	return mapUnique(err)
+	return err
 }
 
 // CreateSessionForUser inserts the login session only while the user
@@ -273,14 +283,14 @@ WHERE EXISTS (SELECT 1 FROM users WHERE id = ? AND auth_version = ? AND password
 		Args: []store.Value{sr.TokenSHA, sr.UserID, sr.CreatedMS, sr.ExpiresMS, sr.AuthVersion, userID, authVersion, passwordHash},
 	})
 	if err != nil {
-		return false, mapUnique(err)
+		return false, err
 	}
 	return res.Affected == 1, nil
 }
 
 func (s *SQL) CreateSession(ctx context.Context, sr SessionRow) error {
 	_, err := s.store.Execute(ctx, store.Stmt{SQL: insertSession, Args: sessionArgs(sr)})
-	return mapUnique(err)
+	return err
 }
 
 func (s *SQL) FindSession(ctx context.Context, tokenSHA string) (SessionRow, bool, error) {
@@ -294,7 +304,7 @@ func (s *SQL) RevokeSession(ctx context.Context, tokenSHA string) error {
 		SQL:  `UPDATE sessions SET revoked = 1 WHERE token_sha = ? AND revoked = 0`,
 		Args: []store.Value{tokenSHA},
 	})
-	return mapUnique(err)
+	return err
 }
 
 // ReserveAttempt reserves one login attempt in one statement: the row
@@ -314,7 +324,7 @@ WHERE (SELECT COUNT(*) FROM login_failures WHERE email_norm = ? AND at_ms > ?) <
 		{SQL: `DELETE FROM login_failures WHERE at_ms <= ?`, Args: []store.Value{since}},
 	})
 	if err != nil {
-		return false, mapUnique(err)
+		return false, err
 	}
 	if len(res) == 0 {
 		return false, fmt.Errorf("accounts: the reservation returned no result")
@@ -329,7 +339,7 @@ func (s *SQL) RecordFailure(ctx context.Context, emailNorm string, atMS int64) e
 		{SQL: `INSERT INTO login_failures (email_norm, at_ms) VALUES (?, ?)`, Args: []store.Value{emailNorm, atMS}},
 		{SQL: `DELETE FROM login_failures WHERE at_ms <= ?`, Args: []store.Value{atMS - failureWindowMS}},
 	})
-	return mapUnique(err)
+	return err
 }
 
 func (s *SQL) ClearFailures(ctx context.Context, emailNorm string) error {
@@ -337,7 +347,7 @@ func (s *SQL) ClearFailures(ctx context.Context, emailNorm string) error {
 		SQL:  `DELETE FROM login_failures WHERE email_norm = ?`,
 		Args: []store.Value{emailNorm},
 	})
-	return mapUnique(err)
+	return err
 }
 
 func (s *SQL) CountEmailFailures(ctx context.Context, emailNorm string, sinceMS int64) (int, error) {
@@ -371,7 +381,7 @@ func (s *SQL) CreateInvite(ctx context.Context, inv Invite) error {
 			inv.ID, inv.Email, inv.EmailNorm, inv.Role, inv.TokenHash, inv.CreatedMS, inv.ExpiresMS,
 		},
 	})
-	return mapUnique(err)
+	return err
 }
 
 func (s *SQL) FindInviteByTokenHash(ctx context.Context, hash string) (Invite, bool, error) {
@@ -422,7 +432,8 @@ func (s *SQL) AcceptInviteWithSession(ctx context.Context, inviteID string, nowM
 		{SQL: insertUsers, Args: userArgs(u)},
 		{SQL: insertSession, Args: sessionArgs(sr)},
 	})
-	return mapUnique(err)
+	// A constraint of the batch means the e-mail is taken.
+	return mapConstraint(err, ErrEmailTaken)
 }
 
 func (s *SQL) RevokeInvite(ctx context.Context, id string) error {
@@ -430,7 +441,7 @@ func (s *SQL) RevokeInvite(ctx context.Context, id string) error {
 		SQL:  `UPDATE invites SET revoked = 1 WHERE id = ? AND revoked = 0`,
 		Args: []store.Value{id},
 	})
-	return mapUnique(err)
+	return err
 }
 
 // inviteValues converts one row of the invite select columns to the

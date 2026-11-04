@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ type raceStore struct {
 	password    func(context.Context, string, int64, string, SessionRow) error
 	accept      func(context.Context, string, int64, User, SessionRow) error
 	userByID    func(context.Context, string) (User, bool, error)
+	userByEmail func(context.Context, string) (User, bool, error)
 }
 
 func (r *raceStore) ReserveAttempt(c context.Context, n string, at int64) (bool, error) {
@@ -63,23 +65,32 @@ func (r *raceStore) FindUserByID(c context.Context, id string) (User, bool, erro
 	return r.AccountStore.FindUserByID(c, id)
 }
 
+func (r *raceStore) FindUserByEmailNorm(c context.Context, email string) (User, bool, error) {
+	if r.userByEmail != nil {
+		return r.userByEmail(c, email)
+	}
+	return r.AccountStore.FindUserByEmailNorm(c, email)
+}
+
 // concurrentScenario builds one scenario over the given store with the
 // real randomness, so the concurrent session ids never collide on the
 // deterministic reader.
 func concurrentScenario(t *testing.T, st AccountStore) *scenario {
 	t.Helper()
-	s := newScenario(t, st, newClock(), testBootstrapToken)
+	s := newScenario(t, st, newClock(), testRootTokenValue)
 	s.a.rand = rand.Reader
-	s.bootstrapOwner()
+	s.seedOwner()
 	return s
 }
 
-// barrierWait waits for the barrier or fails the test at the deadline.
+// barrierWait waits for the barrier or fails the test at the deadline:
+// the bound is generous under the race detector, where the goroutines
+// of the tests are an order of magnitude slower.
 func barrierWait(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("barrier timed out")
 	}
 }
@@ -91,7 +102,7 @@ func respOf(t *testing.T, ch <-chan hub.Response) hub.Response {
 	select {
 	case r := <-ch:
 		return r
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("request timed out")
 		return hub.Response{}
 	}
@@ -230,7 +241,7 @@ func testConcurrentRateLimit(t *testing.T, st AccountStore) {
 			default:
 				t.Errorf("unexpected status=%d", v)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatal("request timed out")
 		}
 	}
@@ -375,6 +386,8 @@ func testSessionAuthVersionCheck(t *testing.T, st AccountStore) {
 // tag, the real database.
 func runConcurrencyScenarios(t *testing.T, fresh func() AccountStore) {
 	t.Run("StaleLoginAfterPasswordChange", func(t *testing.T) { testStaleLoginAfterPasswordChange(t, fresh()) })
+	t.Run("RootTokenInflightLoginBudget", func(t *testing.T) { testRootTokenInflightLoginBudget(t, fresh()) })
+	t.Run("StaleRootTokenReset", func(t *testing.T) { testStaleRootTokenReset(t, fresh()) })
 	t.Run("StalePasswordChange", func(t *testing.T) { testStalePasswordChange(t, fresh()) })
 	t.Run("ConcurrentRateLimit", func(t *testing.T) { testConcurrentRateLimit(t, fresh()) })
 	t.Run("RevokedInviteRace", func(t *testing.T) { testRevokedInviteRace(t, fresh()) })
@@ -388,4 +401,136 @@ func runConcurrencyScenarios(t *testing.T, fresh func() AccountStore) {
 // guarantees.
 func TestMemoryConcurrencyScenarios(t *testing.T) {
 	runConcurrencyScenarios(t, func() AccountStore { return NewMemory() })
+}
+
+// The normal change commits inside the reset's owner-read/write window.
+func testStaleRootTokenReset(t *testing.T, base AccountStore) {
+	w := &raceStore{AccountStore: base}
+	s := newScenario(t, w, newClock(), testRootTokenValue)
+	s.seedOwner()
+	var winner hub.Response
+	var attempted SessionRow
+	var once sync.Once
+	w.password = func(ctx context.Context, id string, av int64, hash string, row SessionRow) error {
+		first := false
+		once.Do(func() { first = true })
+		if !first {
+			return base.ChangePasswordWithNewSession(ctx, id, av, hash, row)
+		}
+		attempted = row
+		winner = s.do("POST", "/api/session/password", bodyMap(map[string]string{"current": testOwnerPass, "new": "winning-owner-password"}), jsonCT, "nau_session="+s.ownerCookie)
+		if winner.Status != 204 {
+			t.Fatalf("normal change=%d", winner.Status)
+		}
+		if err := base.RecordFailure(ctx, s.owner.EmailNorm, s.clock.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		return base.ChangePasswordWithNewSession(ctx, id, av, hash, row)
+	}
+	stale := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "stale-reset-password"), jsonCT, "")
+	if stale.Status != 401 || string(stale.Body) != `{"error":"unauthenticated"}` || stale.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("stale reset=%d", stale.Status)
+	}
+	count, err := base.CountEmailFailures(context.Background(), s.owner.EmailNorm, s.clock.Now().UnixMilli()-failureWindowMS)
+	if err != nil || count != 1 {
+		t.Fatalf("stale reset cleared budget=%d err=%v", count, err)
+	}
+	if _, found, err := base.FindSession(context.Background(), attempted.TokenSHA); err != nil || found {
+		t.Fatal("stale reset created a session")
+	}
+	if got := s.do("GET", "/api/session", nil, "", "nau_session="+setCookieOf(t, winner)); got.Status != 200 {
+		t.Fatalf("winner session=%d", got.Status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, "winning-owner-password"); status != 200 {
+		t.Fatalf("winner password=%d", status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, "stale-reset-password"); status != 401 {
+		t.Fatalf("stale password=%d", status)
+	}
+}
+
+// Mutation captured: clearing reservations allows ten checks of the new credential.
+func testRootTokenInflightLoginBudget(t *testing.T, base AccountStore) {
+	w := &raceStore{AccountStore: base}
+	s := concurrentScenario(t, w)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	release := make(chan struct{})
+	arrived := make(chan struct{}, perEmailMaxFailures)
+	results := make(chan int, perEmailMaxFailures)
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	var workers sync.WaitGroup
+	t.Cleanup(func() { unblock(); cancel(); workers.Wait() })
+	var lookups atomic.Int32
+	var mu sync.Mutex
+	var versions []int64
+	w.userByEmail = func(c context.Context, email string) (User, bool, error) {
+		n := lookups.Add(1)
+		if n <= perEmailMaxFailures {
+			arrived <- struct{}{}
+			select {
+			case <-release:
+			case <-c.Done():
+				return User{}, false, c.Err()
+			}
+		}
+		u, found, err := base.FindUserByEmailNorm(c, email)
+		mu.Lock()
+		versions = append(versions, u.AuthVersion)
+		mu.Unlock()
+		return u, found, err
+	}
+	for i := 0; i < perEmailMaxFailures; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			resp := s.srv.Serve(ctx, apiReq("POST", "/api/session", bodyMap(map[string]string{"email": testOwnerEmail, "password": "wrong-new-password"}), jsonCT, ""))
+			results <- resp.Status
+		}()
+	}
+	for i := 0; i < perEmailMaxFailures; i++ {
+		barrierWait(t, arrived)
+	}
+	count := func() int {
+		t.Helper()
+		n, err := base.CountEmailFailures(ctx, s.owner.EmailNorm, s.clock.Now().UnixMilli()-failureWindowMS)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	before := count()
+	reset := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "new-security-password"), jsonCT, "")
+	afterReset := count()
+	unblock()
+	workers.Wait()
+	inflight := 0
+	for i := 0; i < perEmailMaxFailures; i++ {
+		if status := <-results; status == 401 {
+			inflight++
+		} else {
+			t.Fatalf("inflight status=%d", status)
+		}
+	}
+	afterInflight := count()
+	fresh := 0
+	for i := 0; i < perEmailMaxFailures; i++ {
+		status, _, _ := login(t, s, testOwnerEmail, "wrong-new-password")
+		if status == 401 {
+			fresh++
+		} else if status != 429 {
+			t.Fatalf("fresh status=%d", status)
+		}
+	}
+	blocked, _, _ := login(t, s, testOwnerEmail, "wrong-new-password")
+	mu.Lock()
+	allNew := len(versions) == inflight+fresh
+	for _, version := range versions {
+		allNew = allNew && version == s.owner.AuthVersion+1
+	}
+	mu.Unlock()
+	t.Logf("reserved_before_commit=%d reset=%d counted_after_commit=%d inflight_checks=%d counted_after_inflight=%d fresh_checks=%d total_new_credential_checks=%d all_lookups_new_version=%v final_status=%d", before, reset.Status, afterReset, inflight, afterInflight, fresh, inflight+fresh, allNew, blocked)
+	if before != perEmailMaxFailures || reset.Status != 200 || afterReset != perEmailMaxFailures || inflight != perEmailMaxFailures || afterInflight != perEmailMaxFailures || fresh != 0 || !allNew || blocked != 429 || lookups.Load() != perEmailMaxFailures {
+		t.Fatal("recovery changed the in-flight login budget")
+	}
 }
