@@ -73,7 +73,7 @@ What proves a change before this validation, each layer with the command that ru
 
 | Layer | Command | Runs in |
 |---|---|---|
-| Format, vet and build | `gofmt -l .`, `go vet ./...`, `go build ./...` | CI, three systems |
+| Format, vet and build | `gofmt -l` on the tracked Go files, `go vet ./...`, `go build -o <dir>/nau ./cmd/nau` | CI, three systems |
 | Unit and handlers, with the memory store | `go test -timeout=30m ./...` | CI, three systems |
 | Race detector | `go test -race -timeout=30m ./...` | CI, three systems |
 | Integration with the real database | `NAU_TEST_SQLD_URL=<url> go test -count=1 -timeout=30m -tags sqld ./internal/hub/...` | Item 5 by hand; not in CI yet |
