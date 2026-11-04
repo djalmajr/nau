@@ -163,12 +163,24 @@ $envvars
 EOF
 }
 
+# The nau directory under a config root, without a doubled slash, so two
+# spellings of one root compare equal.
+nau_dir_under() {
+    root="$1"
+    while [ "${root%/}" != "$root" ]; do
+        root="${root%/}"
+    done
+    printf '%s/nau\n' "$root"
+}
+
 # The config directory the installed service reads: the XDG_CONFIG_HOME
 # in its plist, or else ~/.config, whatever this run has in its
-# environment.
+# environment. plutil is the one of the system, whatever the PATH of
+# this run holds; it fails only on a plist without that key or that
+# launchd could not load either.
 agent_service_config_dir() {
-    if service_xdg="$(plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$AGENT_PLIST" 2>/dev/null)" && [ -n "$service_xdg" ]; then
-        printf '%s/nau\n' "$service_xdg"
+    if service_xdg="$(/usr/bin/plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$AGENT_PLIST" 2>/dev/null)" && [ -n "$service_xdg" ]; then
+        nau_dir_under "$service_xdg"
     else
         printf '%s/.config/nau\n' "$HOME"
     fi
@@ -300,7 +312,7 @@ OS="$(uname -s)"
 # The config directory the agent command reads hub.json from (the same
 # directory the nau binary resolves): XDG or ~/.config.
 if [ -n "${XDG_CONFIG_HOME:-}" ]; then
-    NAU_CONFIG_DIR="$XDG_CONFIG_HOME/nau"
+    NAU_CONFIG_DIR="$(nau_dir_under "$XDG_CONFIG_HOME")"
 else
     NAU_CONFIG_DIR="$HOME/.config/nau"
 fi

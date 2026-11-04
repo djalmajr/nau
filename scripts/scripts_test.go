@@ -9,7 +9,9 @@ package scripts_test
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1026,9 +1028,10 @@ esac
 // TestInstallShAgentRerunReadsServiceDir: a re-run without --agent keeps
 // the plist, so it waits for the health file in the directory that plist
 // gives the service, not in the one of its own environment, and warns when
-// the two differ. The plist comes from a real dry run, and the launchctl
-// fixture reads it, as the service would: it never gets told the path the
-// installer expects.
+// the two differ. The plist comes from a real dry run. The directory the
+// service writes to comes from that plist too, through a parser of its own:
+// the fixture never gets told the path the installer expects, and a plutil
+// on the PATH that always fails proves the installer does not rely on it.
 func TestInstallShAgentRerunReadsServiceDir(t *testing.T) {
 	sh := shAvailable(t)
 	if runtime.GOOS != "darwin" {
@@ -1047,13 +1050,8 @@ func TestInstallShAgentRerunReadsServiceDir(t *testing.T) {
 case "$1" in
 kickstart | bootstrap)
     sleep 1.1
-    if xdg="$(plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$FAKE_LAUNCHCTL_PLIST" 2>/dev/null)" && [ -n "$xdg" ]; then
-        dir="$xdg/nau"
-    else
-        dir="$HOME/.config/nau"
-    fi
-    mkdir -p "$dir"
-    date > "$dir/agent-state.json"
+    mkdir -p "$FAKE_LAUNCHCTL_SERVICE_DIR"
+    date > "$FAKE_LAUNCHCTL_SERVICE_DIR/agent-state.json"
     ;;
 esac
 exit 0
@@ -1067,6 +1065,8 @@ exit 0
 		{name: "service with XDG, run without it", serviceXDG: "service & xdg", wantWarning: true},
 		{name: "service and run with different XDG", serviceXDG: "service & xdg", runXDG: "run & xdg", wantWarning: true},
 		{name: "service and run with the same XDG", serviceXDG: "same & xdg", runXDG: "same & xdg"},
+		{name: "the run spells the same XDG with a trailing slash", serviceXDG: "same & xdg", runXDG: "same & xdg/"},
+		{name: "the service spells the same XDG with a trailing slash", serviceXDG: "same & xdg//", runXDG: "same & xdg"},
 		{name: "neither with XDG"},
 	}
 	for _, tc := range cases {
@@ -1087,12 +1087,14 @@ exit 0
 				filepath.Join(goDir, "go"):          helperBytes,
 				filepath.Join(backendDir, "soho"):   helperBytes,
 				filepath.Join(fakeBin, "launchctl"): []byte(launchctl),
+				filepath.Join(fakeBin, "plutil"):    []byte("#!/bin/sh\nexit 1\n"),
 			} {
 				if err := os.WriteFile(path, data, 0700); err != nil {
 					t.Fatal(err)
 				}
 			}
 			plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
+			var serviceDirFromPlist string
 			// configDir is the nau directory for an XDG value of the case.
 			configDir := func(xdg string) string {
 				if xdg == "" {
@@ -1108,10 +1110,11 @@ exit 0
 					"TMP=" + tmp,
 					"PATH=" + strings.Join([]string{fakeBin, goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
 					"INSTALL_FIXTURE_NAU=" + nau,
-					"FAKE_LAUNCHCTL_PLIST=" + plist,
+					"FAKE_LAUNCHCTL_SERVICE_DIR=" + serviceDirFromPlist,
 				}
 				if xdg != "" {
-					env = append(env, "XDG_CONFIG_HOME="+filepath.Join(root, xdg))
+					// Not filepath.Join, which would clean a trailing slash.
+					env = append(env, "XDG_CONFIG_HOME="+root+"/"+xdg)
 				}
 				return env
 			}
@@ -1144,6 +1147,10 @@ exit 0
 			if err := os.WriteFile(plist, []byte(plistContent), 0600); err != nil {
 				t.Fatal(err)
 			}
+			serviceDirFromPlist = filepath.Join(home, ".config", "nau")
+			if xdg := plistXDGConfigHome(t, []byte(plistContent)); xdg != "" {
+				serviceDirFromPlist = filepath.Join(xdg, "nau")
+			}
 			runDir := configDir(tc.runXDG)
 			_, stderr := run(tc.runXDG)
 			if !strings.Contains(stderr, "nau install: agent running") {
@@ -1167,6 +1174,37 @@ exit 0
 				t.Fatalf("the install did not complete: %v", err)
 			}
 		})
+	}
+}
+
+// plistXDGConfigHome returns the value of the XDG_CONFIG_HOME key of a plist,
+// or "" without that key.
+func plistXDGConfigHome(t *testing.T, data []byte) string {
+	t.Helper()
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	var text string
+	afterKey := false
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("the plist does not parse: %v\n%s", err, data)
+		}
+		switch el := tok.(type) {
+		case xml.CharData:
+			text = string(el)
+		case xml.EndElement:
+			switch el.Name.Local {
+			case "key":
+				afterKey = text == "XDG_CONFIG_HOME"
+			case "string":
+				if afterKey {
+					return text
+				}
+			}
+		}
 	}
 }
 
