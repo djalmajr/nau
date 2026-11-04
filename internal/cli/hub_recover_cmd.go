@@ -159,7 +159,7 @@ func recoverConfirm(env Env, body []byte) int {
 		Email  string `json:"email"`
 	}{Status: "recovered", Email: got.User.Email})
 	_, _ = fmt.Fprintf(env.Stdout, "%s\n", line)
-	_, _ = fmt.Fprintf(env.Stderr, "hub recover: the recovery does not reset the login limit: if the attempts were spent, the login answers 429 for up to %d minutes\n", accounts.LoginFailureWindow/time.Minute)
+	_, _ = fmt.Fprintf(env.Stderr, "hub recover: the recovery does not reset the login limit: if the attempts were spent, the login answers 429 for up to %d minutes after the attempts stop\n", accounts.LoginFailureWindow/time.Minute)
 	return 0
 }
 

@@ -69,7 +69,7 @@ func runRecover(t *testing.T, stdin string, args ...string) (string, string, int
 		Sleep:     sleepCtx,
 	}
 	exit := Run(append([]string{"hub", "recover"}, args...), env)
-	const warning = "hub recover: the recovery does not reset the login limit: if the attempts were spent, the login answers 429 for up to 15 minutes\n"
+	const warning = "hub recover: the recovery does not reset the login limit: if the attempts were spent, the login answers 429 for up to 15 minutes after the attempts stop\n"
 	if exit == 0 {
 		if strings.Count(out.String(), "\n") != 1 || errb.String() != warning {
 			t.Fatalf("success stdout=%q stderr=%q", out.String(), errb.String())

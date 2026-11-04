@@ -30,7 +30,7 @@ The route `POST /api/session/root-token` is not part of the public API: the hub 
 - 409 `{"error":"no_owner"}` when no account exists yet;
 - 404 `{"error":"not_found"}` when the hub runs without the root token.
 
-Recovery does not reset the login limit: if the attempts were spent, login answers 429 for up to 15 minutes.
+Recovery does not reset the login limit: if the attempts were spent, login answers 429 for up to 15 minutes after the attempts stop.
 
 The operator reaches it from the machine that runs the hub, or through a port-forward of the recovery port, with `nau hub recover --url http://127.0.0.1:<recovery port>`, which reads the root token and the new password from stdin, one per line, and refuses a url that is not a loopback host before any request.
 
