@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultHubState, renderHubApp } from "@/test/hub-harness";
@@ -9,6 +9,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 // O clipboard do jsdom não existe; stub com espia para provar o que seria
@@ -226,6 +227,36 @@ describe("connect machine dialog", () => {
       await vi.advanceTimersByTimeAsync(1100);
     });
     expect(within(dialog).getByRole("button", { name: "Copiar" })).toBeInTheDocument();
+  });
+
+  it("starts from zero when reopened during the exit animation, before the popup unmounts", async () => {
+    const user = userEvent.setup();
+    const { release } = await submitAndHold(user);
+    const firstInput = screen.getByLabelText("Código XXXX-XXXX");
+
+    // O setup do jsdom diz que não há animação, e o popup desmontaria ao
+    // fechar. Aqui a saída fica pendente, como os 100 ms do navegador.
+    const exit = new Promise<void>(() => {});
+    vi.spyOn(Element.prototype, "getAnimations").mockReturnValue([{ finished: exit } as unknown as Animation]);
+    await user.keyboard("{Escape}");
+    const popup = screen.getByText("Conectar máquina", { selector: "h2" }).closest('[data-slot="dialog-content"]');
+    await waitFor(() => expect(popup).toHaveAttribute("data-closed"));
+    expect(firstInput).toBeInTheDocument();
+
+    // Reabre com o popup ainda montado: é o que Tab e Enter fazem no navegador.
+    const trigger = document.querySelector<HTMLElement>('[data-slot="dialog-trigger"]');
+    if (!trigger) throw new Error("trigger not found");
+    fireEvent.click(trigger);
+    const input = await screen.findByLabelText("Código XXXX-XXXX");
+    expect(input).not.toBe(firstInput);
+    expect(input).toHaveValue("");
+
+    await act(async () => {
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Código XXXX-XXXX")).toHaveValue("");
   });
 
   it("shows the button with the empty list and opens the dialog from it", async () => {

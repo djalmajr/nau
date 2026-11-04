@@ -16,16 +16,25 @@ import { useI18n } from "@/lib/i18n";
 import { useConfirmPairing } from "@/lib/queries";
 
 /** Modal "Conectar máquina": o título é fixo, para o modal ter nome acessível
- *  em todos os passos, e o conteúdo vive em `ConnectMachineBody`. O popup só
- *  existe aberto, então o corpo desmonta ao fechar por qualquer caminho e cada
- *  abertura começa do zero: um envio ou uma cópia em andamento não alcança a
- *  abertura seguinte. O POST não é cancelado; se ele confirmar a máquina, a
- *  lista por trás atualiza do mesmo jeito (a invalidação vive na mutação). */
+ *  em todos os passos, e o conteúdo vive em `ConnectMachineBody`. Cada abertura
+ *  monta um corpo novo (a `key`): o popup continua montado durante a animação de
+ *  saída, e Escape, Tab e Enter reabrem o modal dentro dela. Assim, um envio ou
+ *  uma cópia em andamento nunca alcança a abertura seguinte. O POST não é
+ *  cancelado; se ele confirmar a máquina, a lista por trás atualiza do mesmo
+ *  jeito (a invalidação vive na mutação). */
 export function ConnectMachineDialog() {
   const { t } = useI18n();
+  const [open, setOpen] = React.useState(false);
+  const [opening, setOpening] = React.useState(0);
 
   return (
-    <Dialog>
+    <Dialog
+      onOpenChange={(value) => {
+        setOpen(value);
+        if (value) setOpening((current) => current + 1);
+      }}
+      open={open}
+    >
       <DialogTrigger render={<Button size="sm" />}>
         <Plus className="size-4" />
         {t("machines.connect")}
@@ -34,7 +43,7 @@ export function ConnectMachineDialog() {
         <DialogHeader>
           <DialogTitle>{t("connect.title")}</DialogTitle>
         </DialogHeader>
-        <ConnectMachineBody />
+        <ConnectMachineBody key={opening} />
       </DialogContent>
     </Dialog>
   );
