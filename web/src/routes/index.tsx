@@ -1,8 +1,10 @@
 import * as React from "react";
 import { createRoute, Link } from "@tanstack/react-router";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { AppShell } from "@/components/app-shell";
 import { PageError, PageLoading } from "@/components/page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { STATE_ORDER } from "@/lib/agents";
 import type { AgentState, OverviewPerMachine, OverviewResponse } from "@/lib/api";
 import { useI18n, type Locale, type TranslationKey } from "@/lib/i18n";
@@ -47,7 +49,7 @@ function OverviewContent({ data }: { data: OverviewResponse }) {
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatCard
           label={t("overview.needsYou")}
-          valueClassName="text-primary"
+          valueClassName={data.counts.needs_you > 0 ? "text-primary" : undefined}
           value={data.counts.needs_you}
         />
         <StatCard label={t("overview.working")} value={data.counts.working} />
@@ -224,9 +226,10 @@ function MachineCard({
   );
 }
 
-/** Trabalho nas últimas 24 h: 24 barras (elementos simples, sem biblioteca
- *  de gráfico), valor acessível em cada barra e rótulo da hora no início,
- *  no meio e no fim. */
+/** Trabalho nas últimas 24 h: gráfico de barras real (recharts, pelo
+ *  ChartContainer do projeto), uma barra por hora em `var(--primary)`,
+ *  lista acessível `sr-only` com o valor de cada hora e a mensagem de
+ *  vazio quando nenhum agente está trabalhando. */
 function Working24h({
   hours,
   locale,
@@ -236,45 +239,58 @@ function Working24h({
   locale: Locale;
   t: ReturnType<typeof useI18n>["t"];
 }) {
-  const max = hours.reduce((best, hour) => Math.max(best, hour.working), 1);
-  const first = hours[0];
-  const middle = hours[Math.floor(hours.length / 2)];
-  const last = hours[hours.length - 1];
+  const max = hours.reduce((best, hour) => Math.max(best, hour.working), 0);
+  const data = hours.map((hour) => ({
+    label: hourLabel(hour.hour_ms, locale),
+    working: hour.working,
+  }));
+  const config = React.useMemo<ChartConfig>(
+    () => ({ working: { label: t("overview.working"), color: "var(--primary)" } }),
+    [t],
+  );
 
   return (
     <section className="space-y-2" aria-label={t("overview.working24h")}>
       <h2 className="text-sm font-medium">{t("overview.working24h")}</h2>
       <Card size="sm">
         <CardContent>
-          <div className="flex h-24 items-end gap-[2px]">
-            {hours.map((hour) => {
-              const label = t("overview.working24hBar", {
-                count: hour.working,
-                hour: hourLabel(hour.hour_ms, locale),
-              });
-              return (
-                <div
-                  aria-label={label}
-                  className="flex h-full flex-1 items-end rounded-sm"
-                  key={hour.hour_ms}
-                  role="img"
-                  title={label}
-                >
-                  <div
-                    className="w-full rounded-sm bg-primary/80"
-                    style={{ height: `${Math.max(4, Math.round((hour.working / max) * 100))}%` }}
+          {max === 0 ? (
+            <p className="text-sm text-muted-foreground">{t("overview.working24hEmpty")}</p>
+          ) : (
+            <>
+              <ChartContainer className="aspect-auto h-40 w-full" config={config}>
+                <BarChart data={data} margin={{ right: 4, top: 8 }}>
+                  <CartesianGrid vertical={false} strokeDasharray="2 4" className="stroke-border/60" />
+                  <XAxis dataKey="label" tickLine={false} axisLine={{ className: "stroke-border" }} />
+                  <YAxis allowDecimals={false} width="auto" tickLine={false} axisLine={false} />
+                  <ChartTooltip
+                    content={
+                      <ChartTooltipContent
+                        formatter={(value, _name, item) =>
+                          t("overview.working24hBar", {
+                            count: Number(value),
+                            hour: String(item?.payload?.label ?? ""),
+                          })
+                        }
+                        hideLabel
+                      />
+                    }
                   />
-                </div>
-              );
-            })}
-          </div>
-          {first && middle && last ? (
-            <div className="mt-1.5 flex justify-between text-[10px] tabular-nums text-muted-foreground">
-              <span>{hourLabel(first.hour_ms, locale)}</span>
-              <span>{hourLabel(middle.hour_ms, locale)}</span>
-              <span>{hourLabel(last.hour_ms, locale)}</span>
-            </div>
-          ) : null}
+                  <Bar dataKey="working" fill="var(--primary)" isAnimationActive={false} />
+                </BarChart>
+              </ChartContainer>
+              <ul className="sr-only">
+                {hours.map((hour) => (
+                  <li key={hour.hour_ms}>
+                    {t("overview.working24hBar", {
+                      count: hour.working,
+                      hour: hourLabel(hour.hour_ms, locale),
+                    })}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </CardContent>
       </Card>
     </section>

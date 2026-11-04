@@ -66,10 +66,10 @@ export function PrivacyPage() {
             }}
           />
         ) : (
-          <div className="max-w-3xl space-y-6">
+          <div className="space-y-6">
             <section className="space-y-2">
-              <h2 className="text-sm font-medium text-muted-foreground">{t("privacy.modes")}</h2>
-              <div className="space-y-3">
+              <h2 className="text-sm font-medium">{t("privacy.modes")}</h2>
+              <div className="grid gap-3 md:grid-cols-3">
                 <ModeCard icon={Eye} label={t("privacy.mode.show")} text={t("privacy.mode.show.text")} />
                 <ModeCard icon={EyeOff} label={t("privacy.mode.hidden")} text={t("privacy.mode.hidden.text")} />
                 <ModeCard icon={ShieldCheck} label={t("privacy.mode.never")} text={t("privacy.mode.never.text")} />
@@ -77,13 +77,13 @@ export function PrivacyPage() {
             </section>
 
             <section className="space-y-1.5">
-              <h2 className="text-sm font-medium text-muted-foreground">{t("privacy.where")}</h2>
+              <h2 className="text-sm font-medium">{t("privacy.where")}</h2>
               <WhereChoiceText />
             </section>
 
             <section className="space-y-1.5">
-              <h2 className="text-sm font-medium text-muted-foreground">{t("privacy.neverLeaves")}</h2>
-              <ul className="grid list-inside list-disc gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+              <h2 className="text-sm font-medium">{t("privacy.neverLeaves")}</h2>
+              <ul className="grid list-inside list-disc gap-1 text-sm sm:grid-cols-2">
                 <li>{t("privacy.neverLeaves.brief")}</li>
                 <li>{t("privacy.neverLeaves.report")}</li>
                 <li>{t("privacy.neverLeaves.screen")}</li>
@@ -94,7 +94,7 @@ export function PrivacyPage() {
             </section>
 
             <section className="space-y-2">
-              <h2 className="text-sm font-medium text-muted-foreground">{t("privacy.preview")}</h2>
+              <h2 className="text-sm font-medium">{t("privacy.preview")}</h2>
               <Card size="sm">
                 <CardContent>
                   {preview === null ? (
@@ -125,7 +125,7 @@ function WhereChoiceText() {
   const [beforePath, afterPath] = t("privacy.where.text", { path: placeholder }).split(placeholder);
 
   return (
-    <p className="text-sm text-muted-foreground">
+    <p className="text-sm">
       {beforePath}
       <code className="rounded-sm bg-muted px-1.5 py-0.5 font-mono text-xs">{`.agents/soho.conf`}</code>
       {afterPath}
@@ -152,7 +152,7 @@ function ModeCard({
           <Badge className="w-fit" variant="secondary">
             {label}
           </Badge>
-          <p className="text-sm text-muted-foreground">{text}</p>
+          <p className="text-sm">{text}</p>
         </div>
       </CardContent>
     </Card>

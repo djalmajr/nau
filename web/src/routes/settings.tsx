@@ -37,7 +37,7 @@ export function SettingsPage() {
   return (
     <RequireSession>
       <AppShell>
-        <div className="max-w-2xl space-y-8">
+        <div className="flex flex-col gap-4">
           <AccountCard name={sessionName(session.data)} email={session.data.email} />
           <PasswordCard />
           <Card>
@@ -147,7 +147,7 @@ function PasswordCard() {
       </CardHeader>
       <CardContent>
         <form className="space-y-3" noValidate onSubmit={(event) => void onSubmit(event)}>
-          <div className="space-y-1.5">
+          <div className="max-w-md space-y-1.5">
             <Label htmlFor="password-current">{t("settings.password.current")}</Label>
             <Input
               autoComplete="current-password"
@@ -157,7 +157,7 @@ function PasswordCard() {
               value={current}
             />
           </div>
-          <div className="space-y-1.5">
+          <div className="max-w-md space-y-1.5">
             <Label htmlFor="password-new">{t("settings.password.new")}</Label>
             <Input
               autoComplete="new-password"
@@ -167,7 +167,7 @@ function PasswordCard() {
               value={next}
             />
           </div>
-          <div className="space-y-1.5">
+          <div className="max-w-md space-y-1.5">
             <Label htmlFor="password-confirm">{t("settings.password.confirm")}</Label>
             <Input
               autoComplete="new-password"

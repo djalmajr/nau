@@ -20,6 +20,20 @@ describe("privacy", () => {
     );
   });
 
+  it("fills the page width and lines the mode cards up in three columns", async () => {
+    renderHubApp("/privacy");
+    await screen.findByRole("heading", { name: "Os três modos" });
+
+    // O contêiner da página não tem restrição de largura
+    expect(document.querySelector(".max-w-3xl")).toBeNull();
+    // Os três modos ficam na mesma grade: 1 coluna estreita, 3 em telas largas
+    const grid = screen.getByText("Exibir").closest(".grid");
+    expect(grid).not.toBeNull();
+    expect(grid?.className).toContain("md:grid-cols-3");
+    expect(grid).toHaveTextContent("Oculto");
+    expect(grid).toHaveTextContent("Não entregar");
+  });
+
   it("explains where the choice lives, with the path as code", async () => {
     renderHubApp("/privacy");
     await screen.findByRole("heading", { name: "Onde a escolha mora" });
