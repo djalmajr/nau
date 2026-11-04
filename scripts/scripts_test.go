@@ -1023,6 +1023,153 @@ esac
 	}
 }
 
+// TestInstallShAgentRerunReadsServiceDir: a re-run without --agent keeps
+// the plist, so it waits for the health file in the directory that plist
+// gives the service, not in the one of its own environment, and warns when
+// the two differ. The plist comes from a real dry run, and the launchctl
+// fixture reads it, as the service would: it never gets told the path the
+// installer expects.
+func TestInstallShAgentRerunReadsServiceDir(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau")
+	helper := filepath.Join(buildDir, "helper")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const launchctl = `#!/bin/sh
+case "$1" in
+kickstart | bootstrap)
+    sleep 1.1
+    if xdg="$(plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$FAKE_LAUNCHCTL_PLIST" 2>/dev/null)" && [ -n "$xdg" ]; then
+        dir="$xdg/nau"
+    else
+        dir="$HOME/.config/nau"
+    fi
+    mkdir -p "$dir"
+    date > "$dir/agent-state.json"
+    ;;
+esac
+exit 0
+`
+	cases := []struct {
+		name               string
+		serviceXDG, runXDG string // relative to the fixture root; empty leaves the variable out
+		wantWarning        bool
+	}{
+		{name: "service without XDG, run with it", runXDG: "run & xdg", wantWarning: true},
+		{name: "service with XDG, run without it", serviceXDG: "service & xdg", wantWarning: true},
+		{name: "service and run with different XDG", serviceXDG: "service & xdg", runXDG: "run & xdg", wantWarning: true},
+		{name: "service and run with the same XDG", serviceXDG: "same & xdg", runXDG: "same & xdg"},
+		{name: "neither with XDG"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "fixture space")
+			home := filepath.Join(root, "home space")
+			fakeBin := filepath.Join(root, "fake space")
+			goDir := filepath.Join(root, "go space")
+			backendDir := filepath.Join(root, "backend space")
+			tmp := filepath.Join(root, "temp space")
+			bin := filepath.Join(root, "bin space")
+			for _, dir := range []string{home, fakeBin, goDir, backendDir, tmp, bin} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path, data := range map[string][]byte{
+				filepath.Join(goDir, "go"):          helperBytes,
+				filepath.Join(backendDir, "soho"):   helperBytes,
+				filepath.Join(fakeBin, "launchctl"): []byte(launchctl),
+			} {
+				if err := os.WriteFile(path, data, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
+			// configDir is the nau directory for an XDG value of the case.
+			configDir := func(xdg string) string {
+				if xdg == "" {
+					return filepath.Join(home, ".config", "nau")
+				}
+				return filepath.Join(root, xdg, "nau")
+			}
+			envFor := func(xdg string) []string {
+				env := []string{
+					"HOME=" + home,
+					"TMPDIR=" + tmp,
+					"TEMP=" + tmp,
+					"TMP=" + tmp,
+					"PATH=" + strings.Join([]string{fakeBin, goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+					"INSTALL_FIXTURE_NAU=" + nau,
+					"FAKE_LAUNCHCTL_PLIST=" + plist,
+				}
+				if xdg != "" {
+					env = append(env, "XDG_CONFIG_HOME="+filepath.Join(root, xdg))
+				}
+				return env
+			}
+			run := func(xdg string, args ...string) (string, string) {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, sh, append([]string{"install.sh", "--bin-dir", bin}, args...)...)
+				cmd.WaitDelay = time.Second
+				cmd.Env = envFor(xdg)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("install.sh %v: %v\n%s%s", args, err, stdout.String(), stderr.String())
+				}
+				return stdout.String(), stderr.String()
+			}
+			// The service as a real install leaves it.
+			serviceDir := configDir(tc.serviceXDG)
+			if err := os.MkdirAll(serviceDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(serviceDir, "hub.json"), []byte("{}\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			plistContent, _ := run(tc.serviceXDG, "--agent-dry-run")
+			if err := os.MkdirAll(filepath.Dir(plist), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(plist, []byte(plistContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runDir := configDir(tc.runXDG)
+			_, stderr := run(tc.runXDG)
+			if !strings.Contains(stderr, "nau install: agent running") {
+				t.Fatalf("the health wait did not see the service:\n%s", stderr)
+			}
+			if _, err := os.Stat(filepath.Join(serviceDir, "agent-state.json")); err != nil {
+				t.Fatalf("the service did not write its health file: %v", err)
+			}
+			warning := "nau install: warning: the agent service reads " + serviceDir + ", not " + runDir + "; run the installer with --agent to move it\n"
+			if got := strings.Contains(stderr, warning); got != tc.wantWarning {
+				t.Fatalf("warning present = %v, want %v; looked for %q in:\n%s", got, tc.wantWarning, warning, stderr)
+			}
+			if !tc.wantWarning && strings.Contains(stderr, "the agent service reads") {
+				t.Fatalf("a warning with the service in its own directory:\n%s", stderr)
+			}
+			after, err := os.ReadFile(plist)
+			if err != nil || !bytes.Equal(after, []byte(plistContent)) {
+				t.Fatalf("the re-run rewrote the plist: %v\n%s", err, after)
+			}
+			if _, err := os.Stat(filepath.Join(bin, "nau")); err != nil {
+				t.Fatalf("the install did not complete: %v", err)
+			}
+		})
+	}
+}
+
 func TestInstallPs1Parses(t *testing.T) {
 	powershell := powershellAvailable(t)
 	// Parse the script with the PowerShell parser and fail when the

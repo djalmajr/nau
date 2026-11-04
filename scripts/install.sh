@@ -163,6 +163,17 @@ $envvars
 EOF
 }
 
+# The config directory the installed service reads: the XDG_CONFIG_HOME
+# in its plist, or else ~/.config, whatever this run has in its
+# environment.
+agent_service_config_dir() {
+    if service_xdg="$(plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$AGENT_PLIST" 2>/dev/null)" && [ -n "$service_xdg" ]; then
+        printf '%s/nau\n' "$service_xdg"
+    else
+        printf '%s/.config/nau\n' "$HOME"
+    fi
+}
+
 # Wait for the agent to write a fresh health file under a wall deadline
 # of 20 s. The agent writes the file before its first read, so a file
 # newer than the restart moment proves the service started; the check
@@ -383,6 +394,14 @@ if [ "$OS" = "Darwin" ] && [ "$AGENT" -eq 1 ]; then
         agent_install_service
     fi
 elif [ "$OS" = "Darwin" ] && [ -f "$AGENT_PLIST" ]; then
+    # The plist stays as it is, so the service keeps reading its own
+    # directory: the health file to wait for is the one in there, even
+    # when XDG_CONFIG_HOME changed after the service was installed.
+    SERVICE_CONFIG_DIR="$(agent_service_config_dir)"
+    AGENT_STATE="$SERVICE_CONFIG_DIR/agent-state.json"
+    if [ "$SERVICE_CONFIG_DIR" != "$NAU_CONFIG_DIR" ]; then
+        echo "nau install: warning: the agent service reads $SERVICE_CONFIG_DIR, not $NAU_CONFIG_DIR; run the installer with --agent to move it" >&2
+    fi
     agent_restart_service 0
 fi
 
