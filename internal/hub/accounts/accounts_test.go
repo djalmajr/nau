@@ -211,7 +211,8 @@ func runAccountsScenarios(t *testing.T, fresh func() AccountStore) {
 	t.Run("SeedOwner", func(t *testing.T) { testSeedOwner(t, fresh) })
 	t.Run("RootToken", func(t *testing.T) { testRootToken(t, fresh) })
 	t.Run("RootTokenClearsOwnerFailures", func(t *testing.T) { testRootTokenClearsOwnerFailures(t, fresh) })
-	t.Run("RootTokenClearFailureError", func(t *testing.T) { testRootTokenClearFailureError(t, fresh) })
+	t.Run("RootTokenNoSeparateClear", func(t *testing.T) { testRootTokenNoSeparateClear(t, fresh) })
+	t.Run("RootTokenBudgetAfterReset", func(t *testing.T) { testRootTokenBudgetAfterReset(t, fresh) })
 	t.Run("SessionContract", func(t *testing.T) { testSessionContract(t, fresh) })
 	t.Run("LoginErrors", func(t *testing.T) { testLoginErrors(t, fresh) })
 	t.Run("RateLimitPerEmail", func(t *testing.T) { testRateLimitPerEmail(t, fresh) })
@@ -1099,47 +1100,110 @@ func testRootTokenClearsOwnerFailures(t *testing.T, fresh func() AccountStore) {
 	}
 }
 
-type clearFailureStore struct {
+type recoveryStore struct {
 	AccountStore
-	fail bool
+	clearCalls int
+	lookups    int
+	afterReset func()
+	resetErr   error
 }
 
-func (s *clearFailureStore) ClearFailures(ctx context.Context, email string) error {
-	if s.fail {
-		return errors.New("synthetic clear failure")
-	}
+func (s *recoveryStore) ClearFailures(ctx context.Context, email string) error {
+	s.clearCalls++
 	return s.AccountStore.ClearFailures(ctx, email)
 }
 
-// Mutation captured: returning 503 after a committed reset loses the usable cookie.
-func testRootTokenClearFailureError(t *testing.T, fresh func() AccountStore) {
-	st := &clearFailureStore{AccountStore: fresh()}
+func (s *recoveryStore) FindUserByEmailNorm(ctx context.Context, email string) (User, bool, error) {
+	s.lookups++
+	return s.AccountStore.FindUserByEmailNorm(ctx, email)
+}
+
+func (s *recoveryStore) ResetPasswordWithNewSession(ctx context.Context, id, email string, av int64, hash string, row SessionRow) error {
+	if s.resetErr != nil {
+		return s.resetErr
+	}
+	err := s.AccountStore.ResetPasswordWithNewSession(ctx, id, email, av, hash, row)
+	if err == nil && s.afterReset != nil {
+		s.afterReset()
+	}
+	return err
+}
+
+func testRootTokenNoSeparateClear(t *testing.T, fresh func() AccountStore) {
+	st := &recoveryStore{AccountStore: fresh()}
 	s := newScenario(t, st, newClock(), testRootTokenValue)
 	s.seedOwner()
-	st.fail = true
+	st.clearCalls = 0
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "recovered-owner-pass-2"), jsonCT, "")
+	if resp.Status != 200 || st.clearCalls != 0 {
+		t.Fatalf("recovery=%d separate_clears=%d, want 200 and zero", resp.Status, st.clearCalls)
+	}
+	setCookieOf(t, resp)
+}
+
+// The hook runs public logins after the credential commit but before recovery returns.
+func testRootTokenBudgetAfterReset(t *testing.T, fresh func() AccountStore) {
+	st := &recoveryStore{AccountStore: fresh()}
+	s := newScenario(t, st, newClock(), testRootTokenValue)
+	s.seedOwner()
 	const newPass = "recovered-owner-pass-2"
-	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
-	if resp.Status != 200 {
-		t.Fatalf("recovery after clear failure = %d, want 200", resp.Status)
-	}
-	cookie := setCookieOf(t, resp)
-	if got := s.do("GET", "/api/session", nil, "", "nau_session="+cookie); got.Status != 200 {
-		t.Fatalf("recovery cookie = %d, want 200", got.Status)
-	}
-	const clearLog = "hub accounts: the login failures of the owner were not cleared"
-	if s.log.String() != clearLog+"\n"+rootTokenLogReset+"\n" {
-		t.Fatalf("unexpected recovery log: %q", s.log.String())
-	}
-	for _, secret := range []string{testRootTokenValue, testOwnerPass, newPass, testOwnerEmail} {
-		if strings.Contains(s.log.String(), secret) {
-			t.Fatal("recovery log contains a credential")
+	st.afterReset = func() {
+		st.lookups = 0
+		for i := 0; i < perEmailMaxFailures; i++ {
+			if status, _, _ := login(t, s, testOwnerEmail, "wrong-new-password"); status != 401 {
+				t.Fatalf("guess %d=%d", i, status)
+			}
+		}
+		if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 429 || st.lookups != perEmailMaxFailures {
+			t.Fatalf("budget before return: status=%d lookups=%d", status, st.lookups)
 		}
 	}
-	st.fail = false
-	if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 200 {
-		t.Fatalf("new password = %d, want 200", status)
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
+	if resp.Status != 200 {
+		t.Fatalf("recovery=%d", resp.Status)
 	}
-	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 401 {
-		t.Fatalf("old password = %d, want 401", status)
+	before := st.lookups
+	if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 429 || st.lookups != before {
+		t.Fatalf("budget after return: status=%d lookups=%d, want 429 without verification", status, st.lookups)
+	}
+}
+
+func assertRecoveryUnchanged(t *testing.T, s *scenario, resp hub.Response, failures int) {
+	t.Helper()
+	if resp.Status != 503 || string(resp.Body) != `{"error":"unavailable"}` || resp.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("failed reset=%d cookie=%v", resp.Status, resp.Header.Get("Set-Cookie") != "")
+	}
+	owner, found, err := s.store.FindOwner(context.Background())
+	if err != nil || !found || owner.PasswordHash != s.owner.PasswordHash || owner.AuthVersion != s.owner.AuthVersion {
+		t.Fatal("failed reset changed the credential")
+	}
+	count, err := s.store.CountEmailFailures(context.Background(), s.owner.EmailNorm, s.clock.Now().UnixMilli()-failureWindowMS)
+	if err != nil || count != failures {
+		t.Fatalf("failures=%d err=%v, want %d", count, err, failures)
+	}
+	if got := s.do("GET", "/api/session", nil, "", "nau_session="+s.ownerCookie); got.Status != 200 {
+		t.Fatalf("old session=%d", got.Status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, "recovered-owner-pass-2"); status != 401 {
+		t.Fatalf("new password after failure=%d", status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 200 {
+		t.Fatalf("old password after failure=%d", status)
+	}
+}
+
+func TestMemoryRootTokenResetStoreError(t *testing.T) {
+	st := &recoveryStore{AccountStore: NewMemory()}
+	s := newScenario(t, st, newClock(), testRootTokenValue)
+	s.seedOwner()
+	if status, _, _ := login(t, s, testOwnerEmail, "wrong-password"); status != 401 {
+		t.Fatal(status)
+	}
+	st.resetErr = errors.New("synthetic reset failure")
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "recovered-owner-pass-2"), jsonCT, "")
+	assertRecoveryUnchanged(t, s, resp, 1)
+	st.resetErr = nil
+	if resp = s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "recovered-owner-pass-2"), jsonCT, ""); resp.Status != 200 {
+		t.Fatalf("retry=%d", resp.Status)
 	}
 }

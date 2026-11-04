@@ -52,3 +52,55 @@ func freshSQLStore(t *testing.T, st store.Store) AccountStore {
 	}
 	return NewSQL(st)
 }
+
+// Mutation captured: a separate cleanup cannot roll back the committed credential.
+func TestSQLDRootTokenResetDeleteFailureIsAtomic(t *testing.T) {
+	st := hubtest.SQLD(t)
+	s := newScenario(t, freshSQLStore(t, st), newClock(), testRootTokenValue)
+	s.seedOwner()
+	if status, _, _ := login(t, s, testOwnerEmail, "wrong-password"); status != 401 {
+		t.Fatal(status)
+	}
+	ctx := context.Background()
+	const drop = "DROP TRIGGER IF EXISTS test_reset_delete"
+	t.Cleanup(func() {
+		if _, err := st.Execute(ctx, store.Stmt{SQL: drop}); err != nil {
+			t.Errorf("drop trigger: %v", err)
+		}
+	})
+	if _, err := st.Execute(ctx, store.Stmt{SQL: "CREATE TRIGGER test_reset_delete BEFORE DELETE ON login_failures BEGIN SELECT RAISE(ABORT, 'test'); END"}); err != nil {
+		t.Fatal(err)
+	}
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "recovered-owner-pass-2"), jsonCT, "")
+	// The helper checks the retained budget before successful login clears it.
+	if resp.Status != 503 || resp.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("reset with aborting delete=%d", resp.Status)
+	}
+	owner, found, err := s.store.FindOwner(ctx)
+	if err != nil || !found || owner.PasswordHash != s.owner.PasswordHash || owner.AuthVersion != s.owner.AuthVersion {
+		t.Fatal("delete failure changed credential")
+	}
+	count, err := s.store.CountEmailFailures(ctx, s.owner.EmailNorm, s.clock.Now().UnixMilli()-failureWindowMS)
+	if err != nil || count != 1 {
+		t.Fatalf("retained failures=%d err=%v", count, err)
+	}
+	if got := s.do("GET", "/api/session", nil, "", "nau_session="+s.ownerCookie); got.Status != 200 {
+		t.Fatalf("old session=%d", got.Status)
+	}
+	if !VerifyPassword(testOwnerPass, owner.PasswordHash) || VerifyPassword("recovered-owner-pass-2", owner.PasswordHash) {
+		t.Fatal("password changed after abort")
+	}
+	if _, err := st.Execute(ctx, store.Stmt{SQL: drop}); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 200 {
+		t.Fatalf("old password login=%d", status)
+	}
+	if resp = s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "recovered-owner-pass-2"), jsonCT, ""); resp.Status != 200 {
+		t.Fatalf("retry=%d", resp.Status)
+	}
+	setCookieOf(t, resp)
+	if status, _, _ := login(t, s, testOwnerEmail, "recovered-owner-pass-2"); status != 200 {
+		t.Fatalf("new password login=%d", status)
+	}
+}

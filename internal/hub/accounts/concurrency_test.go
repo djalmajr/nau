@@ -24,6 +24,7 @@ type raceStore struct {
 	reserve     func(context.Context, string, int64) (bool, error)
 	createLogin func(context.Context, SessionRow, string, int64, string) (bool, error)
 	password    func(context.Context, string, int64, string, SessionRow) error
+	reset       func(context.Context, string, string, int64, string, SessionRow) error
 	accept      func(context.Context, string, int64, User, SessionRow) error
 	userByID    func(context.Context, string) (User, bool, error)
 }
@@ -47,6 +48,13 @@ func (r *raceStore) ChangePasswordWithNewSession(c context.Context, id string, a
 		return r.password(c, id, av, hash, s)
 	}
 	return r.AccountStore.ChangePasswordWithNewSession(c, id, av, hash, s)
+}
+
+func (r *raceStore) ResetPasswordWithNewSession(c context.Context, id, email string, av int64, hash string, row SessionRow) error {
+	if r.reset != nil {
+		return r.reset(c, id, email, av, hash, row)
+	}
+	return r.AccountStore.ResetPasswordWithNewSession(c, id, email, av, hash, row)
 }
 
 func (r *raceStore) AcceptInviteWithSession(c context.Context, id string, nowMS int64, u User, s SessionRow) error {
@@ -377,6 +385,7 @@ func testSessionAuthVersionCheck(t *testing.T, st AccountStore) {
 // tag, the real database.
 func runConcurrencyScenarios(t *testing.T, fresh func() AccountStore) {
 	t.Run("StaleLoginAfterPasswordChange", func(t *testing.T) { testStaleLoginAfterPasswordChange(t, fresh()) })
+	t.Run("StaleRootTokenReset", func(t *testing.T) { testStaleRootTokenReset(t, fresh()) })
 	t.Run("StalePasswordChange", func(t *testing.T) { testStalePasswordChange(t, fresh()) })
 	t.Run("ConcurrentRateLimit", func(t *testing.T) { testConcurrentRateLimit(t, fresh()) })
 	t.Run("RevokedInviteRace", func(t *testing.T) { testRevokedInviteRace(t, fresh()) })
@@ -390,4 +399,44 @@ func runConcurrencyScenarios(t *testing.T, fresh func() AccountStore) {
 // guarantees.
 func TestMemoryConcurrencyScenarios(t *testing.T) {
 	runConcurrencyScenarios(t, func() AccountStore { return NewMemory() })
+}
+
+// The normal change commits inside the reset's owner-read/write window.
+func testStaleRootTokenReset(t *testing.T, base AccountStore) {
+	w := &raceStore{AccountStore: base}
+	s := newScenario(t, w, newClock(), testRootTokenValue)
+	s.seedOwner()
+	var winner hub.Response
+	var attempted SessionRow
+	w.reset = func(ctx context.Context, id, email string, av int64, hash string, row SessionRow) error {
+		attempted = row
+		winner = s.do("POST", "/api/session/password", bodyMap(map[string]string{"current": testOwnerPass, "new": "winning-owner-password"}), jsonCT, "nau_session="+s.ownerCookie)
+		if winner.Status != 204 {
+			t.Fatalf("normal change=%d", winner.Status)
+		}
+		if err := base.RecordFailure(ctx, email, s.clock.Now().UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		return base.ResetPasswordWithNewSession(ctx, id, email, av, hash, row)
+	}
+	stale := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "stale-reset-password"), jsonCT, "")
+	if stale.Status != 401 || string(stale.Body) != `{"error":"unauthenticated"}` || stale.Header.Get("Set-Cookie") != "" {
+		t.Fatalf("stale reset=%d", stale.Status)
+	}
+	count, err := base.CountEmailFailures(context.Background(), s.owner.EmailNorm, s.clock.Now().UnixMilli()-failureWindowMS)
+	if err != nil || count != 1 {
+		t.Fatalf("stale reset cleared budget=%d err=%v", count, err)
+	}
+	if _, found, err := base.FindSession(context.Background(), attempted.TokenSHA); err != nil || found {
+		t.Fatal("stale reset created a session")
+	}
+	if got := s.do("GET", "/api/session", nil, "", "nau_session="+setCookieOf(t, winner)); got.Status != 200 {
+		t.Fatalf("winner session=%d", got.Status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, "winning-owner-password"); status != 200 {
+		t.Fatalf("winner password=%d", status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, "stale-reset-password"); status != 401 {
+		t.Fatalf("stale password=%d", status)
+	}
 }

@@ -74,9 +74,8 @@ var (
 
 // The root-token log lines carry no token, password or e-mail.
 const (
-	rootTokenLogWrong       = "hub accounts: the root token of the recovery is invalid"
-	rootTokenLogReset       = "hub accounts: the owner password was reset with the root token"
-	rootTokenLogClearFailed = "hub accounts: the login failures of the owner were not cleared"
+	rootTokenLogWrong = "hub accounts: the root token of the recovery is invalid"
+	rootTokenLogReset = "hub accounts: the owner password was reset with the root token"
 )
 
 // AccountStore is the account storage. Every method is one unit of
@@ -119,6 +118,9 @@ type AccountStore interface {
 	// meantime the whole batch rolls back and the error is the guard
 	// failure the caller classifies by re-reading the user.
 	ChangePasswordWithNewSession(ctx context.Context, userID string, authVersion int64, passwordHash string, s SessionRow) error
+	// ResetPasswordWithNewSession performs the same guarded rotation and
+	// clears this e-mail's login failures in the same atomic operation.
+	ResetPasswordWithNewSession(ctx context.Context, userID, emailNorm string, authVersion int64, passwordHash string, s SessionRow) error
 	CreateSession(ctx context.Context, s SessionRow) error
 	FindSession(ctx context.Context, tokenSHA string) (SessionRow, bool, error)
 	RevokeSession(ctx context.Context, tokenSHA string) error
@@ -468,7 +470,7 @@ func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response
 	}
 	row.UserID = owner.ID
 	row.AuthVersion = owner.AuthVersion + 1
-	if err := a.store.ChangePasswordWithNewSession(ctx, owner.ID, owner.AuthVersion, hash, row); err != nil {
+	if err := a.store.ResetPasswordWithNewSession(ctx, owner.ID, owner.EmailNorm, owner.AuthVersion, hash, row); err != nil {
 		// The batch failed: the guard lost the race only when a
 		// concurrent change moved the version in between; anything
 		// else is a store failure.
@@ -476,9 +478,6 @@ func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response
 			return errResponse(401, "unauthenticated")
 		}
 		return errResponse(503, "unavailable")
-	}
-	if err := a.store.ClearFailures(ctx, owner.EmailNorm); err != nil {
-		a.logf(rootTokenLogClearFailed)
 	}
 	a.logf(rootTokenLogReset)
 	return withCookie(200, SessionCookie(cookie), sessionBody(owner))

@@ -32,8 +32,8 @@ commands:
                                     NAU_HUB_DB_TOKEN); on the empty database the initial
                                     owner is seeded from NAU_HUB_OWNER_NAME,
                                     NAU_HUB_OWNER_EMAIL and NAU_HUB_OWNER_PASSWORD (ignored
-                                    once a user exists); NAU_HUB_ROOT_TOKEN (at least 32
-                                    characters when set) opens the password recovery route,
+                                    once a user exists); NAU_HUB_ROOT_TOKEN (at least 32 bytes
+                                    and not blank when set) opens the password recovery route,
                                     served only on the recovery listener, which binds to the
                                     loopback by default (127.0.0.1:7441, the host of
                                     --recovery-listen must be a literal loopback ip)

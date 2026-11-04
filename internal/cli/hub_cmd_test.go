@@ -351,12 +351,7 @@ type httpResponse struct {
 	headers http.Header
 }
 
-// hubProbeClient is the client of the serve probes: the connections
-// close after every response (no keep-alive), so a clean shutdown
-// never waits for a pooled connection of the test.
-var hubProbeClient = &http.Client{
-	Transport: &http.Transport{DisableKeepAlives: true},
-}
+var hubProbeClient = &http.Client{}
 
 func doPost(t *testing.T, url, body string) httpResponse {
 	t.Helper()

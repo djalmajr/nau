@@ -166,8 +166,9 @@ func recoverConfirm(env Env, body []byte) int {
 // of the recovery port of the hub without following redirects, and
 // confirms with the e-mail of the owner. The url must be the loopback
 // of the recovery port, so the token and the password never travel to
-// a remote or named host; and they never reach the output, even on
-// the error paths. A bad usage, a terminal stdin, a missing or empty
+// a remote or named host. The command never prints the token or the
+// password on its own; the e-mail of the success line comes from the
+// answer of the hub. A bad usage, a terminal stdin, a missing or empty
 // line, or a url that is not a loopback url exits 2, and a refused or
 // unreachable hub exits 4.
 func cmdHubRecover(args []string, env Env) int {
