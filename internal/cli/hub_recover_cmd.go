@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,11 +83,17 @@ func parseRecoverArgs(args []string) (hubURL string, ok bool) {
 	return hubURL, urlSet
 }
 
-// validRecoverURL reports whether the hub url is an http or https url
-// with a host.
+// validRecoverURL reports whether the recovery url is an http or https
+// url whose host is a literal loopback ip (127.0.0.1, [::1]): the
+// recovery route lives on the recovery port of the hub, bound to its
+// loopback, and a remote or named host can never reach it.
 func validRecoverURL(raw string) bool {
 	u, err := url.Parse(raw)
-	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
 
 // stdinIsTerminal reports whether stdin is a terminal device: reading
@@ -156,10 +163,12 @@ func recoverConfirm(env Env, body []byte) int {
 // cmdHubRecover redefines the password of the owner of a running hub
 // with the root token: it reads the token and the new password, one
 // per line, from stdin (never the terminal), calls the recovery route
-// of the hub without following redirects, and confirms with the
-// e-mail of the owner. The token and the password never reach the
-// output, even on the error paths; a bad usage, a terminal stdin, a
-// missing or empty line or a bad url exits 2, and a refused or
+// of the recovery port of the hub without following redirects, and
+// confirms with the e-mail of the owner. The url must be the loopback
+// of the recovery port, so the token and the password never travel to
+// a remote or named host; and they never reach the output, even on
+// the error paths. A bad usage, a terminal stdin, a missing or empty
+// line, or a url that is not a loopback url exits 2, and a refused or
 // unreachable hub exits 4.
 func cmdHubRecover(args []string, env Env) int {
 	hubURL, ok := parseRecoverArgs(args)
@@ -168,7 +177,7 @@ func cmdHubRecover(args []string, env Env) int {
 		return 2
 	}
 	if !validRecoverURL(hubURL) {
-		fail(env, 2, "hub recover: the hub url must be an http:// or https:// url")
+		fail(env, 2, "hub recover: the url must be the loopback recovery port of the hub (127.0.0.1 or [::1]): point the port-forward at the recovery port and define NAU_HUB_ROOT_TOKEN on the hub")
 		return 2
 	}
 	if stdinIsTerminal(env.Stdin) {
@@ -208,7 +217,7 @@ func cmdHubRecover(args []string, env Env) int {
 	case http.StatusOK:
 		return recoverConfirm(env, body)
 	case http.StatusNotFound:
-		fail(env, 4, "hub recover: the call must reach the hub directly (port-forward), and NAU_HUB_ROOT_TOKEN must be defined on the hub")
+		fail(env, 4, "hub recover: the port-forward must point at the recovery port of the hub, and NAU_HUB_ROOT_TOKEN must be defined on the hub")
 		return 4
 	case http.StatusUnauthorized:
 		fail(env, 4, "hub recover: the root token is not valid")

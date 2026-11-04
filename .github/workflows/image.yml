@@ -47,12 +47,12 @@ jobs:
 
       # A pull request builds and smoke-tests the image only; a push to
       # main or of a version tag also publishes it (below). The smoke
-      # test runs the
-      # image against a containerized sqld on a private Docker network
-      # with synthetic owner and recovery variables generated in the
-      # job (never real secrets), and checks /api/health, the served
-      # index page, the login of the seeded owner, and the refusal of
-      # the recovery route from outside the loopback of the hub.
+      # test runs the image against a containerized sqld on a private
+      # Docker network with synthetic owner and recovery variables
+      # generated in the job (never real secrets), and checks
+      # /api/health, the served index page, the login of the seeded
+      # owner, and the absence of the recovery route on the public
+      # port.
       - name: Smoke test against a containerized sqld
         shell: bash
         run: |
@@ -113,16 +113,16 @@ jobs:
             docker logs nau-hub-app
             exit 1
           fi
-          # The recovery route is not reachable from here: the
-          # connection comes through the published port, not from the
-          # loopback of the container, so even the right synthetic
-          # token gets the 404 of an unknown route.
+          # The recovery route does not exist on the public port: the
+          # hub serves it only on its recovery listener, bound to the
+          # loopback inside the container, so the right synthetic token
+          # gets the 404 of an unknown route on the public port.
           root_code=$(curl -s -o /dev/null -w '%{http_code}' \
             -X POST -H 'content-type: application/json' \
             -d "{\"token\":\"${root_token}\",\"new\":\"${owner_pass}\"}" \
             "http://127.0.0.1:${port}/api/session/root-token")
           if [ "$root_code" != "404" ]; then
-            echo "the recovery route answered $root_code, want 404 (not the loopback)"
+            echo "the recovery route answered $root_code, want 404 (the route is not on the public port)"
             exit 1
           fi
 

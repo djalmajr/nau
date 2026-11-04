@@ -74,12 +74,14 @@ func concurrentScenario(t *testing.T, st AccountStore) *scenario {
 	return s
 }
 
-// barrierWait waits for the barrier or fails the test at the deadline.
+// barrierWait waits for the barrier or fails the test at the deadline:
+// the bound is generous under the race detector, where the goroutines
+// of the tests are an order of magnitude slower.
 func barrierWait(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	select {
 	case <-ch:
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("barrier timed out")
 	}
 }
@@ -91,7 +93,7 @@ func respOf(t *testing.T, ch <-chan hub.Response) hub.Response {
 	select {
 	case r := <-ch:
 		return r
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("request timed out")
 		return hub.Response{}
 	}
@@ -230,7 +232,7 @@ func testConcurrentRateLimit(t *testing.T, st AccountStore) {
 			default:
 				t.Errorf("unexpected status=%d", v)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(30 * time.Second):
 			t.Fatal("request timed out")
 		}
 	}

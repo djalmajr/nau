@@ -28,9 +28,8 @@ func NewSQL(s store.Store) *SQL {
 // never quotes the server text (a failure carries only the statement
 // number and the validated code), so the mapping is on the code alone,
 // and the caller says which sentinel a constraint of its operation
-// means: only the unique tables of its own statements are involved.
-// Every other error, and a code that is not a constraint, is a store
-// failure and is returned as is.
+// means. A constraint never means the batch wrote: the caller
+// re-reads the state before deciding.
 func mapConstraint(err error, sentinel error) error {
 	var se *store.StatementError
 	if errors.As(err, &se) && se.Code == "SQLITE_CONSTRAINT" {
@@ -221,16 +220,19 @@ func (s *SQL) CountUsers(ctx context.Context) (int, error) {
 }
 
 // SeedOwner creates the initial owner, without a session, in one
-// atomic batch. The hub_meta row is the race guard: its key is unique,
-// so a second concurrent seed fails on it and rolls back, and the
-// e-mail unique constraint refuses a taken e-mail the same way.
+// atomic batch. The insert runs only while the database holds no user,
+// and the one-row guard confirms the insert wrote exactly one row: a
+// database with any user leaves zero changes, the guard fails its
+// check, and the whole batch rolls back without writing. A constraint
+// of the operation means a user exists, and the caller re-reads the
+// state before deciding.
 func (s *SQL) SeedOwner(ctx context.Context, u User) error {
 	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `INSERT INTO hub_meta (key, value) VALUES ('owner_seeded', ?)`, Args: []store.Value{u.ID}},
-		{SQL: insertUsers, Args: userArgs(u)},
+		{SQL: `INSERT INTO users (id, email_norm, email, name, password_hash, role, created_ms)
+SELECT ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM users)`, Args: userArgs(u)},
+		{SQL: guardCheck},
+		{SQL: guardClear},
 	})
-	// A constraint of the batch means the guard or the e-mail is
-	// taken: an owner was seeded in between, and the race is lost.
 	return mapConstraint(err, ErrOwnerExists)
 }
 

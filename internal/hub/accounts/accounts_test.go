@@ -30,6 +30,7 @@ type scenario struct {
 	store       AccountStore
 	a           *Auth
 	srv         *hub.Server
+	recSrv      *hub.Server
 	key         []byte
 	clock       *mutableNow
 	log         *bytes.Buffer
@@ -64,8 +65,10 @@ func (r *countingReader) Read(p []byte) (int, error) {
 }
 
 // newScenario builds one scenario over the given store with the
-// deterministic clock, the root token of the recovery route and the
-// client ip header the tests exercise with the 404 table.
+// deterministic clock and the root token of the recovery route. The
+// public server carries the account routes; the recovery server
+// carries the recovery route alone, the same split the hub serve makes
+// between the public listener and the recovery listener.
 func newScenario(t *testing.T, store AccountStore, clock *mutableNow, rootToken string) *scenario {
 	t.Helper()
 	key := make([]byte, 32)
@@ -74,20 +77,21 @@ func newScenario(t *testing.T, store AccountStore, clock *mutableNow, rootToken 
 	}
 	log := &bytes.Buffer{}
 	a, err := New(Config{
-		Store:          store,
-		SessionKey:     key,
-		RootToken:      rootToken,
-		ClientIPHeader: "X-Test-Client-IP",
-		Log:            log,
-		Now:            clock.Now,
-		Rand:           &countingReader{},
+		Store:      store,
+		SessionKey: key,
+		RootToken:  rootToken,
+		Log:        log,
+		Now:        clock.Now,
+		Rand:       &countingReader{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	srv := hub.New(hub.Deps{Now: clock.Now, Version: "test"}, nil)
 	a.Register(srv)
-	return &scenario{t: t, store: store, a: a, srv: srv, key: key, clock: clock, log: log,
+	recSrv := hub.New(hub.Deps{Now: clock.Now, Version: "test"}, nil)
+	a.RegisterRecovery(recSrv)
+	return &scenario{t: t, store: store, a: a, srv: srv, recSrv: recSrv, key: key, clock: clock, log: log,
 		ownerPass: testOwnerPass}
 }
 
@@ -109,30 +113,11 @@ func (s *scenario) do(method, path string, body []byte, ct, cookie string) hub.R
 	return s.srv.Serve(context.Background(), apiReq(method, path, body, ct, cookie))
 }
 
-// headerWith builds the header of the route tests from name and value
-// pairs; the names are lowercased by the header, as received.
-func headerWith(pairs ...string) hub.Header {
-	h := make(hub.Header)
-	for i := 0; i+1 < len(pairs); i += 2 {
-		h.Set(pairs[i], pairs[i+1])
-	}
-	return h
-}
-
-// loopbackHeaders is the header of the connection of the loopback of
-// the test, the one the root-token route requires.
-func loopbackHeaders() hub.Header {
-	return headerWith(hub.RemoteIPHeader, "127.0.0.1")
-}
-
-// doHeaders runs one request with the extra headers of the route
-// tests (the connection ip, the headers of a proxy in the way).
-func (s *scenario) doHeaders(method, path string, body []byte, ct, cookie string, extra hub.Header) hub.Response {
-	req := apiReq(method, path, body, ct, cookie)
-	for k, v := range extra {
-		req.Header[k] = v
-	}
-	return s.srv.Serve(context.Background(), req)
+// doRec runs one request against the recovery server, the one the hub
+// serve binds to the loopback recovery listener: the recovery route
+// exists only there.
+func (s *scenario) doRec(method, path string, body []byte, ct, cookie string) hub.Response {
+	return s.recSrv.Serve(context.Background(), apiReq(method, path, body, ct, cookie))
 }
 
 // rootBody is the body of the root-token route.
@@ -252,9 +237,11 @@ func TestMemoryAccountsScenarios(t *testing.T) {
 
 // testSeedOwner covers the store contract of the owner seed: the empty
 // store has no owner, the seed creates it (the login works, the
-// restart with another password does not change the account) and the
-// second seed is ErrOwnerExists; with a member in the store the owner
-// is still the only owner.
+// restart with another password does not change the account) and
+// the second seed is ErrOwnerExists; with a member in the store
+// the owner is still the only owner; and a legacy database that
+// holds a user of another e-mail and no owner refuses the seed
+// without writing.
 func testSeedOwner(t *testing.T, fresh func() AccountStore) {
 	clock := newClock()
 	ctx := context.Background()
@@ -301,6 +288,62 @@ func testSeedOwner(t *testing.T, fresh func() AccountStore) {
 	if err != nil || !found || u2.ID != u.ID {
 		t.Fatalf("FindOwner with a member: found=%v id=%q err=%v, want the same owner", found, u2.ID, err)
 	}
+	// A legacy database with a user of another e-mail and no owner
+	// (a user created outside the seed flow) refuses the seed, with
+	// no write: the e-mail does not need to match.
+	legacy := newScenario(t, fresh(), newClock(), "")
+	memberHash, err := HashPassword(&countingReader{}, testMemberPass)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	tok := make([]byte, sessionIDSize)
+	copy(tok, []byte("legacy-invite-token"))
+	inv := Invite{
+		ID:        "legacy-invite",
+		Email:     testMemberEmail,
+		EmailNorm: normalizeEmail(testMemberEmail),
+		Role:      RoleMember,
+		TokenHash: sha256Hex(tok),
+		CreatedMS: fixedNow().UnixMilli(),
+		ExpiresMS: fixedNow().Add(time.Hour).UnixMilli(),
+	}
+	if err := legacy.store.CreateInvite(ctx, inv); err != nil {
+		t.Fatalf("CreateInvite: %v", err)
+	}
+	member := User{
+		ID:           "legacy-member",
+		Email:        testMemberEmail,
+		EmailNorm:    inv.EmailNorm,
+		Name:         testMemberName,
+		PasswordHash: memberHash,
+		Role:         RoleMember,
+		AuthVersion:  1,
+		CreatedMS:    fixedNow().UnixMilli(),
+	}
+	sess, _, err := NewSession(&countingReader{}, legacy.key, fixedNow())
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	sess.UserID = member.ID
+	sess.AuthVersion = 1
+	if err := legacy.store.AcceptInviteWithSession(ctx, inv.ID, fixedNow().UnixMilli(), member, sess); err != nil {
+		t.Fatalf("AcceptInviteWithSession: %v", err)
+	}
+	// The seed is refused and nothing is written: the user is still
+	// the only user, and there is no owner.
+	if err := legacy.a.SeedOwner(ctx, testOwnerName, testOwnerEmail, testOwnerPass); !errors.Is(err, ErrOwnerExists) {
+		t.Fatalf("SeedOwner on the legacy database = %v, want ErrOwnerExists", err)
+	}
+	count, err := legacy.store.CountUsers(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("CountUsers after the refused seed = %d err=%v, want 1", count, err)
+	}
+	if _, found, err := legacy.store.FindOwner(ctx); err != nil || found {
+		t.Fatalf("FindOwner after the refused seed: found=%v err=%v, want none", found, err)
+	}
+	if u, found, err := legacy.store.FindUserByEmailNorm(ctx, inv.EmailNorm); err != nil || !found || u.Role != RoleMember {
+		t.Fatalf("the legacy member moved: found=%v err=%v", found, err)
+	}
 }
 
 // assertRoot404 requires that the response is the 404 of the unknown
@@ -312,75 +355,53 @@ func assertRoot404(t *testing.T, resp, unknown hub.Response) {
 	}
 }
 
-// testRootToken covers the root-token route in the table of the
-// decision: the 404 of the refused request (the token absent, each
-// forwarding header, the configured header, the connection not the
-// loopback or absent), all with the body of the unknown route; the
-// 415 and the 400 of the invalid body; the 401 of the wrong token,
-// with or without the right length, before the password policy, and
-// without any write; the 400 of the weak password, without any write;
-// the 409 of the absent owner; and the success that redefines the
-// password, revokes the other sessions and answers with the cookie.
+// testRootToken covers the root-token route on the recovery server:
+// the public server has no such route at all, the 404 of the unknown
+// route; with the root token absent, the route answers the 404 of the
+// unknown route on the recovery server too; with it set, the 415 and
+// the 400 of the invalid body; the 401 of the wrong token, with or
+// without the right length, before the password policy, and without
+// any write; the 400 of the weak password, without any write; the 409
+// of the absent owner; and the success that redefines the password,
+// revokes the old session and answers with the cookie.
 func testRootToken(t *testing.T, fresh func() AccountStore) {
 	clock := newClock()
 	ctx := context.Background()
-	// The reference 404 of an unknown /api/ route.
+	// The reference 404 of an unknown /api/ route, and the public
+	// server: the recovery route is not registered there at all, so
+	// even the right token and body get the same 404, in the wrong
+	// method as in the right one.
 	sref := newScenario(t, fresh(), clock, testRootTokenValue)
 	unknown := sref.do("POST", "/api/no-such-route", []byte(`{"x":1}`), jsonCT, "")
 	if unknown.Status != 404 || string(unknown.Body) != `{"error":"not_found"}` {
 		t.Fatalf("the reference 404 = %d %s, want 404 not_found", unknown.Status, unknown.Body)
 	}
-	// Without the variable the route does not exist: the same 404, even
-	// from the loopback with the right body.
+	assertRoot404(t, sref.do("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, ""), unknown)
+	assertRoot404(t, sref.do("GET", "/api/session/root-token", nil, "", ""), unknown)
+	// Without the variable the route does not exist on the recovery
+	// server either: the same 404, even with the right body.
 	s := newScenario(t, fresh(), clock, "")
-	assertRoot404(t, s.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, "", loopbackHeaders()), unknown)
-	// With the variable: each forwarding header, the configured header
-	// and a connection that is not the loopback (or is absent) are the
-	// same 404, the rest of the request being valid in every case.
+	assertRoot404(t, s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, ""), unknown)
+	// With the variable: the 415 without the content type, and the 400
+	// of the invalid body.
 	s = newScenario(t, fresh(), clock, testRootTokenValue)
-	for name, extra := range map[string][]string{
-		"forwarded":         {"forwarded", "for=127.0.0.1"},
-		"x-forwarded-for":   {"x-forwarded-for", "10.0.0.1"},
-		"x-forwarded-host":  {"x-forwarded-host", "hub"},
-		"x-forwarded-proto": {"x-forwarded-proto", "https"},
-		"x-real-ip":         {"x-real-ip", "10.0.0.1"},
-		"cf-connecting-ip":  {"cf-connecting-ip", "10.0.0.1"},
-		"true-client-ip":    {"true-client-ip", "10.0.0.1"},
-		"configured header": {"X-Test-Client-IP", "127.0.0.1"},
-		"ipv4 not loopback": {hub.RemoteIPHeader, "10.0.0.1"},
-		"ipv6 not loopback": {hub.RemoteIPHeader, "fd00::1"},
-		"ip absent":         {},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var h hub.Header
-			if name != "ip absent" {
-				h = loopbackHeaders()
-			}
-			for i := 0; i+1 < len(extra); i += 2 {
-				h.Set(extra[i], extra[i+1])
-			}
-			assertRoot404(t, s.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, "", h), unknown)
-		})
-	}
-	// The 415 without the content type, and the 400 of the invalid
-	// body, after the 404 checks passed.
-	resp := s.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), "", "", loopbackHeaders())
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), "", "")
 	if resp.Status != 415 || string(resp.Body) != `{"error":"unsupported_media_type"}` {
 		t.Fatalf("no content type: %d %s, want 415", resp.Status, resp.Body)
 	}
-	resp = s.doHeaders("POST", "/api/session/root-token",
-		[]byte(`{"token":"`+testRootTokenValue+`","new":"`+testOwnerPass+`","extra":1}`), jsonCT, "", loopbackHeaders())
+	resp = s.doRec("POST", "/api/session/root-token",
+		[]byte(`{"token":"`+testRootTokenValue+`","new":"`+testOwnerPass+`","extra":1}`), jsonCT, "")
 	if resp.Status != 400 || string(resp.Body) != `{"error":"bad_request"}` {
 		t.Fatalf("unknown field: %d %s, want 400 bad_request", resp.Status, resp.Body)
 	}
-	resp = s.doHeaders("POST", "/api/session/root-token", []byte(`not json`), jsonCT, "", loopbackHeaders())
+	resp = s.doRec("POST", "/api/session/root-token", []byte(`not json`), jsonCT, "")
 	if resp.Status != 400 || string(resp.Body) != `{"error":"bad_request"}` {
 		t.Fatalf("invalid json: %d %s, want 400 bad_request", resp.Status, resp.Body)
 	}
 	// The absent owner: on the empty store the right token and the
 	// right password are the 409 no_owner, before any write.
 	sEmpty := newScenario(t, fresh(), clock, testRootTokenValue)
-	resp = sEmpty.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, "", loopbackHeaders())
+	resp = sEmpty.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, testOwnerPass), jsonCT, "")
 	if resp.Status != 409 || string(resp.Body) != `{"error":"no_owner"}` {
 		t.Fatalf("without an owner: %d %s, want 409 no_owner", resp.Status, resp.Body)
 	}
@@ -400,7 +421,7 @@ func testRootToken(t *testing.T, fresh func() AccountStore) {
 			if name == "wrong+weak" {
 				newPass = "short"
 			}
-			resp := s.doHeaders("POST", "/api/session/root-token", rootBody(token, newPass), jsonCT, "", loopbackHeaders())
+			resp := s.doRec("POST", "/api/session/root-token", rootBody(token, newPass), jsonCT, "")
 			if resp.Status != 401 || string(resp.Body) != `{"error":"invalid_token"}` {
 				t.Fatalf("%s: %d %s, want 401 invalid_token", name, resp.Status, resp.Body)
 			}
@@ -415,7 +436,7 @@ func testRootToken(t *testing.T, fresh func() AccountStore) {
 		})
 	}
 	// The right token with a weak password is 400 and writes nothing.
-	resp = s.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, "short"), jsonCT, "", loopbackHeaders())
+	resp = s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, "short"), jsonCT, "")
 	if resp.Status != 400 || string(resp.Body) != `{"error":"weak_password"}` {
 		t.Fatalf("weak password: %d %s, want 400 weak_password", resp.Status, resp.Body)
 	}
@@ -423,10 +444,10 @@ func testRootToken(t *testing.T, fresh func() AccountStore) {
 	if status != 200 {
 		t.Fatalf("the 400 wrote something: login = %d %s, want 200", status, body)
 	}
-	// The success: the 200 with the cookie, the old sessions revoked,
-	// the old password out and the new one in.
+	// The success: the 200 with the cookie, the old session revoked in
+	// the store, the old password out and the new one in.
 	const newPass = "new-new-pass-pass-1"
-	resp = s.doHeaders("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "", loopbackHeaders())
+	resp = s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
 	if resp.Status != 200 {
 		t.Fatalf("the reset = %d %s, want 200", resp.Status, resp.Body)
 	}
@@ -444,7 +465,25 @@ func testRootToken(t *testing.T, fresh func() AccountStore) {
 	}
 	resp = s.do("GET", "/api/session", nil, "", "nau_session="+freshCookie)
 	if resp.Status != 200 {
-		t.Fatalf("the new session = %d, want 200", resp.Status)
+		t.Fatalf("the new session = %d %s, want 200", resp.Status, resp.Body)
+	}
+	// The revocation is in the store: the row of the old session
+	// carries revoked, and the row of the new one does not.
+	oldSHA, ok := ParseSession(s.ownerCookie, s.key)
+	if !ok {
+		t.Fatal("the old cookie does not parse")
+	}
+	oldRow, found, err := s.store.FindSession(ctx, oldSHA)
+	if err != nil || !found || !oldRow.Revoked {
+		t.Fatalf("the old session row: found=%v revoked=%v err=%v, want revoked", found, oldRow.Revoked, err)
+	}
+	newSHA, ok := ParseSession(freshCookie, s.key)
+	if !ok {
+		t.Fatal("the new cookie does not parse")
+	}
+	newRow, found, err := s.store.FindSession(ctx, newSHA)
+	if err != nil || !found || newRow.Revoked {
+		t.Fatalf("the new session row: found=%v revoked=%v err=%v, want live", found, newRow.Revoked, err)
 	}
 	status, body, _ = login(t, s, testOwnerEmail, testOwnerPass)
 	if status != 401 {
@@ -1012,9 +1051,9 @@ func testStrictBody(t *testing.T, fresh func() AccountStore) {
 		t.Fatalf("empty body: %d %s, want 400", resp.Status, resp.Body)
 	}
 	// The unknown field is refused on the root-token route too, on the
-	// loopback of the test.
-	resp = s.doHeaders("POST", "/api/session/root-token",
-		[]byte(`{"token":"`+testRootTokenValue+`","new":"`+testOwnerPass+`","extra":1}`), jsonCT, "", loopbackHeaders())
+	// recovery server of the test.
+	resp = s.doRec("POST", "/api/session/root-token",
+		[]byte(`{"token":"`+testRootTokenValue+`","new":"`+testOwnerPass+`","extra":1}`), jsonCT, "")
 	if resp.Status != 400 || string(resp.Body) != `{"error":"bad_request"}` {
 		t.Fatalf("root-token unknown field: %d %s, want 400", resp.Status, resp.Body)
 	}

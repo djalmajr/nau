@@ -27,19 +27,20 @@ import (
 )
 
 const (
-	hubDefaultListen   = "127.0.0.1:7440"
-	hubStartupTimeout  = 10 * time.Second
-	hubShutdownTimeout = 10 * time.Second
-	hubEnvDBURL        = "NAU_HUB_DB_URL"
-	hubEnvDBToken      = "NAU_HUB_DB_TOKEN"
-	hubEnvCronToken    = "NAU_HUB_CRON_TOKEN"
-	hubEnvSessionKey   = "NAU_HUB_SESSION_KEY"
-	hubEnvOwnerName    = "NAU_HUB_OWNER_NAME"
-	hubEnvOwnerEmail   = "NAU_HUB_OWNER_EMAIL"
-	hubEnvOwnerPass    = "NAU_HUB_OWNER_PASSWORD"
-	hubEnvRootToken    = "NAU_HUB_ROOT_TOKEN"
-	hubEnvClientIPHdr  = "NAU_HUB_CLIENT_IP_HEADER"
-	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>] | hub recover --url <url>"
+	hubDefaultListen         = "127.0.0.1:7440"
+	hubDefaultRecoveryListen = "127.0.0.1:7441"
+	hubStartupTimeout        = 10 * time.Second
+	hubShutdownTimeout       = 10 * time.Second
+	hubEnvDBURL              = "NAU_HUB_DB_URL"
+	hubEnvDBToken            = "NAU_HUB_DB_TOKEN"
+	hubEnvCronToken          = "NAU_HUB_CRON_TOKEN"
+	hubEnvSessionKey         = "NAU_HUB_SESSION_KEY"
+	hubEnvOwnerName          = "NAU_HUB_OWNER_NAME"
+	hubEnvOwnerEmail         = "NAU_HUB_OWNER_EMAIL"
+	hubEnvOwnerPass          = "NAU_HUB_OWNER_PASSWORD"
+	hubEnvRootToken          = "NAU_HUB_ROOT_TOKEN"
+	hubEnvClientIPHdr        = "NAU_HUB_CLIENT_IP_HEADER"
+	hubUsage                 = "usage: hub serve [--listen <host:port>] [--web <dir>] [--recovery-listen <host:port>] | hub recover --url <url>"
 )
 
 // newHubStore builds the hub store over the sqld URL; the tests replace
@@ -55,10 +56,12 @@ var hubServeListen = net.Listen
 // hubFlags is the parsed form of the hub serve arguments: each flag in
 // the space form, at most once.
 type hubFlags struct {
-	listen    string
-	listenSet bool
-	web       string
-	webSet    bool
+	listen            string
+	listenSet         bool
+	web               string
+	webSet            bool
+	recoveryListen    string
+	recoveryListenSet bool
 }
 
 // parseHubFlags accepts only the flags, in the space form, each at most
@@ -79,11 +82,30 @@ func parseHubFlags(args []string) (hubFlags, bool) {
 			}
 			f.web, f.webSet = args[i+1], true
 			i++
+		case "--recovery-listen":
+			if f.recoveryListenSet || i+1 >= len(args) {
+				return f, false
+			}
+			f.recoveryListen, f.recoveryListenSet = args[i+1], true
+			i++
 		default:
 			return f, false
 		}
 	}
 	return f, true
+}
+
+// validRecoveryListen reports whether the recovery listener address is
+// a loopback host and port: the recovery port must bind to the loopback
+// of the hub, a literal loopback ip (127.0.0.1, [::1]), so a remote
+// connection never reaches the recovery route.
+func validRecoveryListen(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // hubServeContext is the signal-bound context of the hub server; the
@@ -96,12 +118,13 @@ var hubServeContext = func() (context.Context, context.CancelFunc) {
 // without a session. It returns the exit code: 0 when the hub may
 // start, 2 when an owner variable is missing, empty or fails the
 // password policy (the stderr line names the variable, never the
-// value), and 4 when the database does not answer the count or the
-// seed. With a user already created the owner variables are ignored
-// and the warnings say so on stderr, the same way it says when there
-// is no root token and no way to recover the access of an existing
-// account. A seed that lost the race to another instance counts as
-// the success.
+// value), and 4 when the database does not answer the count, the
+// owner read or the seed, or holds users and no owner. With a user
+// already created and the owner confirmed, the owner variables are
+// ignored and the warnings say so on stderr, the same way it says when
+// there is no root token and no way to recover the access of an
+// existing account. A seed that lost the race to another instance
+// counts as the success only when the re-read confirms the owner.
 func seedOwnerOfEmptyHub(env Env, auth *accounts.Auth, st store.Store, ctx context.Context) int {
 	acc := accounts.NewSQL(st)
 	count, err := acc.CountUsers(ctx)
@@ -110,6 +133,15 @@ func seedOwnerOfEmptyHub(env Env, auth *accounts.Auth, st store.Store, ctx conte
 		return 4
 	}
 	if count > 0 {
+		owner, err := auth.HasOwner(ctx)
+		if err != nil {
+			fail(env, 4, "hub serve: the owner read: "+err.Error())
+			return 4
+		}
+		if !owner {
+			fail(env, 4, "hub serve: the database has users but no owner")
+			return 4
+		}
 		if env.Getenv(hubEnvOwnerName) != "" || env.Getenv(hubEnvOwnerEmail) != "" || env.Getenv(hubEnvOwnerPass) != "" {
 			_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: %s, %s and %s are ignored while a user already exists\n",
 				env.program(), hubEnvOwnerName, hubEnvOwnerEmail, hubEnvOwnerPass)
@@ -130,8 +162,10 @@ func seedOwnerOfEmptyHub(env Env, auth *accounts.Auth, st store.Store, ctx conte
 		fail(env, 2, "hub serve: "+hubEnvOwnerEmail+" is required")
 		return 2
 	}
+	// The password keeps its original bytes for a valid value; a
+	// whitespace-only value is a missing variable, not a weak one.
 	pass := env.Getenv(hubEnvOwnerPass)
-	if pass == "" {
+	if strings.TrimSpace(pass) == "" {
 		fail(env, 2, "hub serve: "+hubEnvOwnerPass+" is required")
 		return 2
 	}
@@ -139,9 +173,23 @@ func seedOwnerOfEmptyHub(env Env, auth *accounts.Auth, st store.Store, ctx conte
 		fail(env, 2, "hub serve: "+hubEnvOwnerPass+" must be 12 to 128 bytes")
 		return 2
 	}
-	if err := auth.SeedOwner(ctx, name, email, pass); err != nil && !errors.Is(err, accounts.ErrOwnerExists) {
-		fail(env, 4, "hub serve: the owner seed: "+err.Error())
-		return 4
+	if err := auth.SeedOwner(ctx, name, email, pass); err != nil {
+		if !errors.Is(err, accounts.ErrOwnerExists) {
+			fail(env, 4, "hub serve: the owner seed: "+err.Error())
+			return 4
+		}
+		// A user was created between the count and the insert and the
+		// seed lost the race: the hub starts only when the re-read
+		// confirms the user is the owner.
+		owner, err := auth.HasOwner(ctx)
+		if err != nil {
+			fail(env, 4, "hub serve: the owner read: "+err.Error())
+			return 4
+		}
+		if !owner {
+			fail(env, 4, "hub serve: the database has users but no owner")
+			return 4
+		}
 	}
 	return 0
 }
@@ -178,6 +226,10 @@ func cmdHubServe(args []string, env Env) int {
 	listen := f.listen
 	if !f.listenSet {
 		listen = hubDefaultListen
+	}
+	recoveryListen := f.recoveryListen
+	if !f.recoveryListenSet {
+		recoveryListen = hubDefaultRecoveryListen
 	}
 	var static fs.FS
 	// closeRoot releases the web root; it stays nil without --web. Until
@@ -244,6 +296,13 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 2, "hub serve: "+hubEnvRootToken+" must be at least 32 characters")
 		return 2
 	}
+	// The recovery port binds to the loopback of the hub only: the
+	// address must be a literal loopback ip and port, checked with the
+	// other validations, before any connection opens.
+	if !validRecoveryListen(recoveryListen) {
+		fail(env, 2, "hub serve: --recovery-listen must be a literal loopback host:port")
+		return 2
+	}
 	st, err := newHubStore(dbURL, token)
 	if err != nil {
 		fail(env, 2, "hub serve: "+err.Error())
@@ -262,12 +321,11 @@ func cmdHubServe(args []string, env Env) int {
 	// reaches here: New only fails on a key shorter than 32 bytes. The
 	// recovery lines go to stderr through the log writer.
 	auth, err := accounts.New(accounts.Config{
-		Store:          accounts.NewSQL(st),
-		SessionKey:     sessionKey,
-		RootToken:      rootToken,
-		ClientIPHeader: env.Getenv(hubEnvClientIPHdr),
-		Log:            env.Stderr,
-		Now:            env.Now,
+		Store:      accounts.NewSQL(st),
+		SessionKey: sessionKey,
+		RootToken:  rootToken,
+		Log:        env.Stderr,
+		Now:        env.Now,
 	})
 	if err != nil {
 		migCancel()
@@ -339,6 +397,27 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 4, "hub serve: cannot listen on "+listen)
 		return 4
 	}
+	// The recovery listener: it opens only when the root token is set,
+	// on the loopback address the flag just validated, before the
+	// serving line. A failure closes the public listener that is
+	// already open and exits 4; without the token nothing opens.
+	var recLn net.Listener
+	var recAddr string
+	if rootToken != "" {
+		recLn, err = hubServeListen("tcp", recoveryListen)
+		if err != nil {
+			_ = ln.Close()
+			fail(env, 4, "hub serve: cannot listen on "+recoveryListen)
+			return 4
+		}
+		if ta, ok := recLn.Addr().(*net.TCPAddr); !ok || ta.Port <= 0 {
+			_ = recLn.Close()
+			_ = ln.Close()
+			fail(env, 4, "hub serve: cannot listen on "+recoveryListen)
+			return 4
+		}
+		recAddr = recLn.Addr().String()
+	}
 	// The version is the same value the `nau version` command prints:
 	// keep this resolution in sync with cmdVersion.
 	v := version
@@ -357,6 +436,17 @@ func cmdHubServe(args []string, env Env) int {
 	auth.Register(srvHub)
 	mach.Register(srvHub)
 	liveBoard.Register(srvHub)
+	// The recovery server serves the password recovery route alone, on
+	// its own loopback listener: no static files, no events stream and
+	// no ip header wrapper, and no cron token. The sessions it creates
+	// are the same store rows the public server resolves, so the new
+	// cookie works on the public port right away.
+	var recSrv *http.Server
+	if recLn != nil {
+		recHub := hub.New(hub.Deps{Store: st, Now: env.Now, Version: v}, nil)
+		auth.RegisterRecovery(recHub)
+		recSrv = httpserve.NewServer(httpserve.New(recHub))
+	}
 	// The adapter keeps no state of the connection: this wrapper sets
 	// the ip of the connection (the RemoteAddr without the port) in
 	// the header the machine connect reads as the client of the
@@ -366,7 +456,11 @@ func cmdHubServe(args []string, env Env) int {
 	inner := httpserve.WithEvents(httpserve.New(srvHub), liveEvents)
 	ctx, cancel := hubServeContext()
 	defer cancel()
-	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
+	if recAddr != "" {
+		_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q,"recovery_listen":%q}`+"\n", ln.Addr().String(), recAddr)
+	} else {
+		_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
+	}
 
 	srv := httpserve.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(machines.RemoteIPHeader)
@@ -375,11 +469,16 @@ func cmdHubServe(args []string, env Env) int {
 		}
 		inner.ServeHTTP(w, r)
 	}))
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	serving = true
 	go func() {
 		errCh <- srv.Serve(ln)
 	}()
+	if recSrv != nil {
+		go func() {
+			errCh <- recSrv.Serve(recLn)
+		}()
+	}
 	code := 0
 	select {
 	case <-ctx.Done():
@@ -387,13 +486,18 @@ func cmdHubServe(args []string, env Env) int {
 		// clean Shutdown does not wait the lifetime of a stream.
 		liveEvents.Stop()
 	case err := <-errCh:
-		// The listener failed before any shutdown: the serving line is
+		// A listener failed before any shutdown: the serving line is
 		// already on stdout, so only stderr says why.
 		_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: %v\n", env.program(), err)
 		code = 4
 	}
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), hubShutdownTimeout)
 	err = srv.Shutdown(shutdownCtx)
+	if recSrv != nil {
+		if rerr := recSrv.Shutdown(shutdownCtx); rerr != nil && err == nil {
+			err = rerr
+		}
+	}
 	shutdownCancel()
 	if err != nil {
 		_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: shutdown: %v\n", env.program(), err)

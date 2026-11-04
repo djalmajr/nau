@@ -8,7 +8,7 @@ import (
 )
 
 // Memory is the in-memory AccountStore of the tests: it mirrors the
-// SQL semantics (the unique e-mail, the hub_meta owner seed guard,
+// SQL semantics (the unique e-mail, the empty-users owner seed guard,
 // the attempt reservation under the two limits, the conditional
 // session create, the auth-version condition of the password change
 // and the atomic invite accept) with a mutex, so the scenarios of
@@ -25,7 +25,6 @@ type Memory struct {
 	invites      map[string]Invite     // by id
 	invitesByTok map[string]Invite     // by token_hash
 	failures     map[string][]int64    // by email_norm
-	seeded       bool
 }
 
 // NewMemory builds the empty in-memory account store.
@@ -47,18 +46,16 @@ func (m *Memory) CountUsers(context.Context) (int, error) {
 }
 
 // SeedOwner creates the initial owner, without a session, only while
-// no user exists: the guard and the write run under the same lock that
-// reads the state, like the atomic batch of the SQL.
+// the store holds no user: the check and the write run under the same
+// lock that reads the state, like the atomic batch of the SQL. Any
+// existing user refuses the seed with ErrOwnerExists and nothing is
+// written.
 func (m *Memory) SeedOwner(_ context.Context, u User) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.seeded {
+	if len(m.users) > 0 {
 		return fmt.Errorf("accounts: %w", ErrOwnerExists)
 	}
-	if _, taken := m.users[u.EmailNorm]; taken {
-		return fmt.Errorf("accounts: %w", ErrEmailTaken)
-	}
-	m.seeded = true
 	m.users[u.EmailNorm] = u
 	m.usersByID[u.ID] = u
 	return nil

@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"strings"
 	"time"
 
@@ -81,20 +80,6 @@ const (
 	rootTokenLogReset = "hub accounts: the owner password was reset with the root token"
 )
 
-// forwardedHeaders are the headers that say the request crossed a proxy
-// in front of the hub: the root-token route is reachable only directly
-// from the loopback of the hub, so any of them (or the configured client
-// ip header) answers the 404 of a route that does not exist.
-var forwardedHeaders = []string{
-	"forwarded",
-	"x-forwarded-for",
-	"x-forwarded-host",
-	"x-forwarded-proto",
-	"x-real-ip",
-	"cf-connecting-ip",
-	"true-client-ip",
-}
-
 // AccountStore is the account storage. Every method is one unit of
 // work on the database; the multi-statement operations (the owner seed,
 // the user-plus-session create, the password change) are atomic: either
@@ -104,9 +89,11 @@ var forwardedHeaders = []string{
 type AccountStore interface {
 	CountUsers(ctx context.Context) (int, error)
 	// SeedOwner creates the initial owner, without a session, only
-	// while the database holds no user: the empty-database guard is
-	// atomic, so a second concurrent seed fails with ErrOwnerExists
-	// and nothing applies. A taken e-mail is ErrEmailTaken.
+	// while the database holds no user: the conditional insert and the
+	// one-row guard run as one atomic batch, so a database with any
+	// user answers the constraint and the whole batch rolls back
+	// without writing. A constraint of the operation is
+	// ErrOwnerExists; the caller re-reads the state before deciding.
 	SeedOwner(ctx context.Context, u User) error
 	// FindOwner returns the owner, the only account with the owner
 	// role.
@@ -156,21 +143,18 @@ type AccountStore interface {
 
 // Config is the configuration of the accounts: the store, the session
 // key (at least 32 bytes), the optional root token of the password
-// recovery, the trusted client ip header, the optional log writer, and
-// the time and the randomness, injected so the tests are
-// deterministic.
+// recovery, the optional log writer, and the time and the randomness,
+// injected so the tests are deterministic.
 type Config struct {
 	// Store is the account storage.
 	Store AccountStore
 	// SessionKey signs the session cookies.
 	SessionKey []byte
-	// RootToken is the token of the password recovery; the empty
-	// string disables the recovery route (it answers 404).
+	// RootToken is the token of the password recovery: when it is set
+	// the recovery route, registered on the recovery server, answers
+	// the reset; when it is empty the route answers the 404 of a
+	// route that does not exist.
 	RootToken string
-	// ClientIPHeader is the name of the header the proxy in front of
-	// the hub sets with the client ip; the recovery route treats its
-	// presence as the mark of a proxied request (404).
-	ClientIPHeader string
 	// Log receives the lines of the recovery route: one per wrong
 	// token and one per password reset, with no token, password or
 	// e-mail. Nil discards them.
@@ -186,13 +170,12 @@ type Config struct {
 // owner-issued invites, on top of one AccountStore. It holds no state
 // between requests.
 type Auth struct {
-	store          AccountStore
-	key            []byte
-	rootToken      string
-	clientIPHeader string
-	log            io.Writer
-	now            func() time.Time
-	rand           io.Reader
+	store     AccountStore
+	key       []byte
+	rootToken string
+	log       io.Writer
+	now       func() time.Time
+	rand      io.Reader
 }
 
 // New builds the accounts layer. A session key shorter than 32
@@ -213,27 +196,46 @@ func New(cfg Config) (*Auth, error) {
 		rnd = rand.Reader
 	}
 	return &Auth{
-		store:          cfg.Store,
-		key:            cfg.SessionKey,
-		rootToken:      cfg.RootToken,
-		clientIPHeader: cfg.ClientIPHeader,
-		log:            cfg.Log,
-		now:            now,
-		rand:           rnd,
+		store:     cfg.Store,
+		key:       cfg.SessionKey,
+		rootToken: cfg.RootToken,
+		log:       cfg.Log,
+		now:       now,
+		rand:      rnd,
 	}, nil
 }
 
-// Register adds the account routes to the hub server.
+// Register adds the account routes to the public hub server: the
+// session, the password change and the invites. The recovery route is
+// not among them: it belongs to the recovery server, registered by
+// RegisterRecovery on its loopback-only listener.
 func (a *Auth) Register(s *hub.Server) {
 	s.Handle("GET", "/api/session", a.getSession)
 	s.Handle("POST", "/api/session", a.login)
 	s.Handle("DELETE", "/api/session", a.logout)
 	s.Handle("POST", "/api/session/password", a.RequireSession(a.changePassword))
-	s.Handle("POST", "/api/session/root-token", a.rootTokenReset)
 	s.Handle("POST", "/api/invites", a.RequireSession(a.createInvite))
 	s.Handle("GET", "/api/invites", a.RequireSession(a.listInvites))
 	s.Handle("DELETE", "/api/invites/{id}", a.RequireSession(a.revokeInvite))
 	s.Handle("POST", "/api/invites/accept", a.acceptInvite)
+}
+
+// RegisterRecovery adds the password recovery route to the recovery
+// server. The hub serve binds that server to a loopback listener that
+// is separate from the public one, so the route never exists on the
+// public port: the absence of the port is the protection, and the
+// handler answers the 404 of a route that does not exist when the
+// root token is not set.
+func (a *Auth) RegisterRecovery(s *hub.Server) {
+	s.Handle("POST", "/api/session/root-token", a.rootTokenReset)
+}
+
+// HasOwner reports whether the database has the owner account, the only
+// account with the owner role: the empty-database guard of the seed and
+// the lost-race check re-read the state through it.
+func (a *Auth) HasOwner(ctx context.Context) (bool, error) {
+	_, found, err := a.store.FindOwner(ctx)
+	return found, err
 }
 
 // RequireSession wraps a handler that needs the signed-in user: it
@@ -373,10 +375,11 @@ func (a *Auth) sessionRowAndUser(ctx context.Context, req hub.Request) (SessionR
 
 // SeedOwner builds the initial owner from the given name, e-mail and
 // password and seeds it into the empty database, without a session: the
-// fresh hash and the id come out before any write, and the empty-database
-// guard of the store keeps the operation atomic. It reports
-// ErrOwnerExists when a user already exists or another seed won the
-// race, and ErrEmailTaken when the e-mail is taken.
+// fresh hash and the id come out before any write, and the store keeps
+// the operation atomic, refusing it while any user exists. It reports
+// ErrOwnerExists when the database already has a user (a legacy user of
+// any other e-mail, or another seed that won the race); the caller
+// re-reads the state before deciding.
 func (a *Auth) SeedOwner(ctx context.Context, name, email, password string) error {
 	hash, err := HashPassword(a.rand, password)
 	if err != nil {
@@ -407,30 +410,6 @@ type rootTokenBody struct {
 	New   string `json:"new"`
 }
 
-// rootTokenRefused reports whether the request must be answered with
-// the 404 of a route that does not exist: the route is reachable only
-// while the root token is configured, from the loopback of the hub, and
-// without any mark of a proxy in front. The connection ip comes from
-// the internal header the hub serve adapter sets after dropping the
-// client value, so the client cannot forge it; the presence of any
-// forwarding header, or of the configured client ip header, says the
-// request crossed a proxy (or claims to).
-func (a *Auth) rootTokenRefused(req hub.Request) bool {
-	if a.rootToken == "" {
-		return true
-	}
-	for _, h := range forwardedHeaders {
-		if req.Header.Get(h) != "" {
-			return true
-		}
-	}
-	if a.clientIPHeader != "" && req.Header.Get(a.clientIPHeader) != "" {
-		return true
-	}
-	ip := net.ParseIP(req.Header.Get(hub.RemoteIPHeader))
-	return ip == nil || !ip.IsLoopback()
-}
-
 // logf writes one line of the recovery route to the configured writer
 // (a nil writer discards it). The two lines carry no token, no password
 // and no e-mail.
@@ -441,11 +420,12 @@ func (a *Auth) logf(line string) {
 }
 
 // rootTokenReset redefines the password of the owner with the root
-// token, the emergency exit of a forgotten password. The order of the
-// checks is the contract: the 404 of the refused request (no token
-// configured, a proxy in the way, or a connection that is not the
-// loopback of the hub) comes before the content type, and the token
-// check, compared on the SHA-256 in constant time so the length of the
+// token, the emergency exit of a forgotten password. The route exists
+// only on the recovery listener, bound to the loopback of the hub, so
+// the public port has no such route at all. The order of the checks is
+// the contract: the 404 of a route that does not exist (the root token
+// not set) comes before the content type, and the token check,
+// compared on the SHA-256 in constant time so the length of the
 // presented token never leaks, comes before the password policy. There
 // is no attempt limit here: the public login feeds the limiter, and an
 // attacker could exhaust it and close the emergency exit; the token is
@@ -454,7 +434,7 @@ func (a *Auth) logf(line string) {
 // atomic change of the session: the auth version bumps, every session
 // of the owner is revoked and the new one is created.
 func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response {
-	if a.rootTokenRefused(req) {
+	if a.rootToken == "" {
 		return errResponse(404, "not_found")
 	}
 	if !a.checkContentType(req) {

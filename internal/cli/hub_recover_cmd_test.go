@@ -128,7 +128,7 @@ func TestHubRecoverRefusals(t *testing.T) {
 		body       string
 		wantStderr string
 	}{
-		{"not found", 404, `{"error":"not_found"}`, "port-forward"},
+		{"not found", 404, `{"error":"not_found"}`, "recovery port"},
 		{"not found", 404, `{"error":"not_found"}`, "NAU_HUB_ROOT_TOKEN"},
 		{"wrong token", 401, `{"error":"invalid_token"}`, "the root token is not valid"},
 		{"weak password", 400, `{"error":"weak_password"}`, "the new password must be 12 to 128 bytes"},
@@ -194,31 +194,101 @@ func TestHubRecoverBadSuccessBody(t *testing.T) {
 	}
 }
 
+// TestHubRecoverNonLoopbackURLIsRefused refuses a url that is not the
+// loopback of the recovery port: the exit is 2 before any request and
+// before the stdin is read, and the stderr says the port-forward must
+// point at the recovery port.
+func TestHubRecoverNonLoopbackURLIsRefused(t *testing.T) {
+	stdin := recoverTestToken + "\n" + recoverTestPass + "\n"
+	for _, url := range []string{
+		"http://192.0.2.1:7441",
+		"https://hub.example.test",
+		"http://localhost:7441",
+		"http://[fd00::1]:7441",
+		"http://0.0.0.0:7441",
+	} {
+		t.Run(url, func(t *testing.T) {
+			rt := &fakeRecoverRT{status: 200, body: `{}`}
+			in := &countingStdin{r: strings.NewReader(stdin)}
+			var out, errb bytes.Buffer
+			env := Env{
+				Stdin:     in,
+				Stdout:    &out,
+				Stderr:    &errb,
+				Getenv:    func(string) string { return "" },
+				Environ:   func() []string { return fakeChildEnv },
+				ConfigDir: t.TempDir(),
+				Now:       func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+				Sleep:     sleepCtx,
+			}
+			exit := Run(append([]string{"hub", "recover"}, "--url", url), env)
+			if exit != 2 {
+				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", exit, out.String(), errb.String())
+			}
+			if !strings.Contains(errb.String(), "recovery port") {
+				t.Fatalf("stderr = %q, want the recovery port in the message", errb.String())
+			}
+			if rt.calls != 0 {
+				t.Fatalf("the request ran: %d calls, want 0", rt.calls)
+			}
+			if in.reads != 0 {
+				t.Fatalf("the stdin was read: %d reads, want 0", in.reads)
+			}
+			assertNoLeak(t, out.String(), errb.String())
+		})
+	}
+}
+
+// countingStdin is the stdin of the recover tests that counts the
+// reads: the refusal of a bad url must not consume the secrets.
+type countingStdin struct {
+	r     *strings.Reader
+	reads int
+}
+
+func (c *countingStdin) Read(p []byte) (int, error) {
+	c.reads++
+	return c.r.Read(p)
+}
+
+// TestHubRecoverLoopbackURLsWork runs the recovery against the loopback
+// of the recovery port in the two spellings, over the fake hub: the
+// request reaches the recovery route of the given url.
+func TestHubRecoverLoopbackURLsWork(t *testing.T) {
+	for _, u := range []string{"http://127.0.0.1:7441", "http://[::1]:7441"} {
+		t.Run(u, func(t *testing.T) {
+			rt := &fakeRecoverRT{status: 200, body: `{"user":{"email":"ana@example.test"}}`}
+			withRecoverRoundTrip(t, rt, func() {
+				stdout, stderr, exit := runRecover(t, recoverTestToken+"\n"+recoverTestPass+"\n", "--url", u)
+				if exit != 0 {
+					t.Fatalf("exit = %d, want 0 (stdout %q, stderr %q)", exit, stdout, stderr)
+				}
+				if rt.lastURL != u+"/api/session/root-token" {
+					t.Fatalf("the request url = %q, want %q", rt.lastURL, u)
+				}
+				assertNoLeak(t, stdout, stderr)
+			})
+		})
+	}
+}
+
 // TestHubRecoverBadUsage exits 2 on the malformed calls: the url
-// missing or malformed, the extra argument and the repeated flag.
+// missing or malformed, the remote or named host, the extra argument
+// and the repeated flag.
 func TestHubRecoverBadUsage(t *testing.T) {
 	stdin := recoverTestToken + "\n" + recoverTestPass + "\n"
 	for name, args := range map[string][]string{
-		"missing --url":     {},
-		"no value":          {"--url"},
-		"repeated --url":    {"--url", "http://127.0.0.1:7440", "--url", "http://127.0.0.1:7440"},
-		"extra argument":    {"--url", "http://127.0.0.1:7440", "extra"},
-		"bad scheme":        {"--url", "ftp://127.0.0.1:7440"},
-		"no host":           {"--url", "http://"},
-		"not a url":         {"--url", "not a url"},
-		"loopback https ok": {"--url", "https://hub.example.test"},
+		"missing --url":  {},
+		"no value":       {"--url"},
+		"repeated --url": {"--url", "http://127.0.0.1:7440", "--url", "http://127.0.0.1:7440"},
+		"extra argument": {"--url", "http://127.0.0.1:7440", "extra"},
+		"bad scheme":     {"--url", "ftp://127.0.0.1:7440"},
+		"no host":        {"--url", "http://"},
+		"not a url":      {"--url", "not a url"},
+		"remote host":    {"--url", "http://hub.example.test:7441"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			stdout, stderr, exit := runRecover(t, stdin, args...)
-			if name == "loopback https ok" {
-				// The https url is valid: without a round tripper the
-				// real client answers a connection refused, and the
-				// refusal is the exit 4, not the 2 of the usage.
-				if exit != 4 {
-					t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
-				}
-				return
-			}
 			if exit != 2 {
 				t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", exit, stdout, stderr)
 			}

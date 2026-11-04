@@ -16,14 +16,20 @@ Every endpoint below needs a session (`GET /api/session`), and it answers 401 `{
   - 204 with a new session cookie; every other session of the user ends;
   - 401 when `current` is wrong;
   - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes.
-- **`POST /api/session/root-token`:** body `{"token":"...","new":"..."}`. The password recovery, enabled when the hub runs with the root token set. It exists only over the loopback: a request that reaches the hub through a proxy, including a forwarding header, answers the 404 of an unknown route. Answers:
-  - 200 with the same body as `GET`, and the server sets the session cookie; every other session of the owner ends;
-  - 401 `{"error":"invalid_token"}` when `token` is wrong;
-  - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes;
-  - 409 `{"error":"no_owner"}` when no account exists yet;
-  - 404 `{"error":"not_found"}` when the hub runs without the root token, or the connection is not the loopback.
 
 Every `POST`, `PUT` and `DELETE` under `/api/` needs `Content-Type: application/json`, and answers 415 `{"error":"unsupported_media_type"}` without it.
+
+## Password recovery
+
+The route `POST /api/session/root-token` is not part of the public API: the hub serves it only on its recovery port, the listener `hub serve` opens bound to the loopback when `NAU_HUB_ROOT_TOKEN` is set (default `127.0.0.1:7441`, `--recovery-listen <host:port>` to move it, always a literal loopback ip). The public port answers the 404 of an unknown route for the path, and no recovery listener is opened without the token. Body `{"token":"...","new":"..."}`; the reset is the root token plus the new password. It needs no session. Answers:
+
+- 200 with the same body as `GET /api/session`, and the server sets the session cookie; every other session of the owner ends;
+- 401 `{"error":"invalid_token"}` when `token` is wrong;
+- 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes;
+- 409 `{"error":"no_owner"}` when no account exists yet;
+- 404 `{"error":"not_found"}` when the hub runs without the root token.
+
+The operator reaches it from the machine that runs the hub, or through a port-forward of the recovery port, with `nau hub recover --url http://127.0.0.1:<recovery port>`, which reads the root token and the new password from stdin, one per line, and refuses a url that is not a loopback host before any request.
 
 ## Shared shapes
 
