@@ -91,13 +91,14 @@ export function FilterBar({
         options={projects}
         value={value.project}
       />
-      {/* A busca ocupa a largura disponível (sem sair do viewport em 320/
-          375 px) e no máximo 320 px — a mesma escala (80) do w-80 anterior:
-          em 1366 continua na linha dos selects e em 800/640/375/320 vai para
-          a linha própria, inteira. O placeholder curto ("Tarefa ou agente")
+      {/* Abaixo de lg a busca tem 320 px (sem sair do viewport em 320/375 px) e
+          em 800/375/320 vai para a linha própria, inteira. De lg para cima o
+          seletor de visão divide a linha com os filtros, então ela encolhe até
+          192 px para os dois caberem, e em 1366 continua na linha dos selects.
+          O placeholder curto ("Tarefa ou agente")
           cabe nos dois idiomas, inclusive na fonte de 16 px do breakpoint
           móvel; o nome acessível continua o rótulo completo (aria-label). */}
-      <div className="relative w-80 max-w-full">
+      <div className="relative w-80 max-w-full lg:w-auto lg:min-w-48 lg:max-w-80 lg:flex-1">
         <Search
           aria-hidden
           className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"

@@ -1,6 +1,6 @@
-// Canal ao vivo do quadro (lib/live): o stream por aba, a pílula do status,
-// a invalidação das queries do quadro no evento `board` e a recaída por
-// consulta GET /api/live quando o stream não abre.
+// Canal ao vivo do quadro (lib/live): o stream por aba, o status do canal
+// (lib/live-status), a invalidação das queries do quadro no evento `board`
+// e a recaída por consulta GET /api/live quando o stream não abre.
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { screen, waitFor } from "@testing-library/react";
@@ -89,7 +89,7 @@ afterEach(() => {
 });
 
 describe("canal ao vivo do quadro", () => {
-  it("abre o stream para a conta logada e a pílula fica \"Ao vivo\"", async () => {
+  it("abre o stream para a conta logada e o status fica 'live'", async () => {
     const state = defaultHubState();
     renderHubApp("/agents", state);
     // A lista de agentes já renderizou (a sessão foi semeada pelo harness).
@@ -98,10 +98,8 @@ describe("canal ao vivo do quadro", () => {
     const es = FakeEventSource.last;
     expect(es).toBeDefined();
     expect(es?.url).toBe("/api/events");
-    // O stream abriu: a pílula do header vira "Ao vivo" (em duas versões
-    // de largura: a visível e a sr-only).
+    // O stream abriu: o status do canal vira "live".
     act(() => es?.dispatch("open"));
-    expect((await screen.findAllByText("Ao vivo")).length).toBeGreaterThan(0);
     expect(liveStatusSnapshot()).toBe("live");
   });
 
@@ -132,17 +130,16 @@ describe("canal ao vivo do quadro", () => {
     expect(agentsCalls()).toBe(afterSame);
   });
 
-  it("mostra \"Reconectando\" na queda e fecha o stream após três falhas seguidas", async () => {
+  it("reconecta na queda e fecha o stream após três falhas seguidas", async () => {
     renderHubApp("/agents", defaultHubState());
     await screen.findByText("Retry declined cards in the checkout worker");
     const es = FakeEventSource.last;
     act(() => es?.dispatch("open"));
-    await screen.findAllByText("Ao vivo");
+    expect(liveStatusSnapshot()).toBe("live");
 
-    // O stream caiu e o EventSource tenta reconectar: a pílula acompanha.
+    // O stream caiu e o EventSource tenta reconectar: o status acompanha.
     es!.readyState = FakeEventSource.CONNECTING;
     act(() => es?.dispatch("error"));
-    expect((await screen.findAllByText("Reconectando")).length).toBeGreaterThan(0);
     expect(liveStatusSnapshot()).toBe("reconnecting");
     expect(es!.isClosed).toBe(false);
 
@@ -151,7 +148,6 @@ describe("canal ao vivo do quadro", () => {
     act(() => es?.dispatch("error"));
     expect(es!.isClosed).toBe(false);
     act(() => es?.dispatch("error"));
-    await screen.findAllByText("Offline");
     expect(liveStatusSnapshot()).toBe("offline");
     expect(es!.isClosed).toBe(true);
     // Nenhuma instância nova (o EventSource não reabriu sozinho).
@@ -165,13 +161,22 @@ describe("canal ao vivo do quadro", () => {
     const es = FakeEventSource.last;
 
     // O servidor rejeitou o stream (401, 503 ou 429): o EventSource fica
-    // CLOSED e não tenta de novo — a pílula é "Offline" e a recaída assume.
+    // CLOSED e não tenta de novo — o status é "offline" e a recaída assume.
     es!.readyState = FakeEventSource.CLOSED;
     act(() => es?.dispatch("error"));
-    await screen.findAllByText("Offline");
-    await waitFor(() =>
-      expect(state.calls.some((call) => call.url === "/api/live")).toBe(true),
+    expect(liveStatusSnapshot()).toBe("offline");
+    // A recaída só consulta /api/live com o canal renderizado no status
+    // "offline" (a query fica desabilitada até a re-render); a primeira
+    // leitura é a linha de base (v1), sem invalidar o quadro.
+    await waitFor(
+      () =>
+        expect(
+          queryClient.getQueriesData({ predicate: (query) => query.queryKey[0] === "live" })[0]?.[1],
+        ).toBeDefined(),
     );
+    // Flush da render: o canal aplica a linha de base (v1) no efeito, antes
+    // de a leitura de v2 invalidar o quadro.
+    await act(async () => {});
 
     // A leitura da recaída mudou de versão: as queries do quadro invalidam
     // (a nova tarefa chega na tela), como no evento `board`.
@@ -191,7 +196,7 @@ describe("canal ao vivo do quadro", () => {
     await screen.findByText("Retry declined cards in the checkout worker");
     const es = FakeEventSource.last;
     act(() => es?.dispatch("open"));
-    await screen.findAllByText("Ao vivo");
+    expect(liveStatusSnapshot()).toBe("live");
 
     // Logout real pelo menu da conta: DELETE no hub, limpa o cache de
     // queries (o que o handler central de 401 também faz) e navega para o
@@ -223,7 +228,7 @@ describe("canal ao vivo do quadro", () => {
     await screen.findByText("Retry declined cards in the checkout worker");
     const esU1 = FakeEventSource.last;
     act(() => esU1?.dispatch("open"));
-    await screen.findAllByText("Ao vivo");
+    expect(liveStatusSnapshot()).toBe("live");
 
     // Troca de conta: a sessão vira o membro; o canal fecha o stream da
     // conta anterior e abre um para a nova.

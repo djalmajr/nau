@@ -32,7 +32,6 @@ import { AgentsPage } from "@/routes/agents";
 import { AgentDetailPage } from "@/routes/agents-detail";
 import { DevelopersPage } from "@/routes/developers";
 import { InviteScreen } from "@/components/invite";
-import { MachinesConnectPage } from "@/routes/machines-connect";
 import { MachinesPage } from "@/routes/machines";
 import { OverviewPage } from "@/routes/index";
 import { PrivacyPage } from "@/routes/privacy";
@@ -81,6 +80,8 @@ export interface HubApiState {
    *  hífen/caixa); `pairingFail` (ex.: 400, 429) tem precedência. */
   pairingCode: string;
   pairingFail?: number;
+  /** Quando definido, o POST /api/pairings/confirm só responde depois dela. */
+  pairingGate?: Promise<void>;
   /** Usuário da sessão (GET /api/session). */
   sessionUser: SessionUser;
   /** Status do GET /api/session quando definido (ex.: 401 — o caminho real
@@ -223,6 +224,7 @@ export function fakeHubFetch(state: HubApiState) {
       return jsonResponse(404, { error: "not_found" });
     }
     if (url === "/api/pairings/confirm") {
+      if (state.pairingGate) await state.pairingGate;
       if (state.pairingFail !== undefined) {
         return jsonResponse(state.pairingFail, {
           error: state.pairingFail === 429 ? "rate_limited" : "invalid_code",
@@ -342,11 +344,6 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
     validateSearch: parseAgentsSearch,
   });
   const machinesRoute = createRoute({ component: MachinesPage, getParentRoute: () => rootRoute, path: "/machines" });
-  const machinesConnectRoute = createRoute({
-    component: MachinesConnectPage,
-    getParentRoute: () => rootRoute,
-    path: "/machines/connect",
-  });
   const developersRoute = createRoute({
     component: DevelopersPage,
     getParentRoute: () => rootRoute,
@@ -371,7 +368,6 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
       agentsRoute,
       agentDetailRoute,
       machinesRoute,
-      machinesConnectRoute,
       developersRoute,
       projectsRoute,
       privacyRoute,

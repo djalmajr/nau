@@ -4,7 +4,6 @@ import { Route as indexRoute } from "./routes/index";
 import { Route as agentsRoute } from "./routes/agents";
 import { Route as agentDetailRoute } from "./routes/agents-detail";
 import { Route as machinesRoute } from "./routes/machines";
-import { Route as machinesConnectRoute } from "./routes/machines-connect";
 import { Route as developersRoute } from "./routes/developers";
 import { Route as projectsRoute } from "./routes/projects";
 import { Route as privacyRoute } from "./routes/privacy";
@@ -19,7 +18,6 @@ const routeTree = rootRoute.addChildren([
   agentsRoute,
   agentDetailRoute,
   machinesRoute,
-  machinesConnectRoute,
   developersRoute,
   projectsRoute,
   privacyRoute,

@@ -1,7 +1,7 @@
-// Status do canal ao vivo do quadro, partilhado entre o canal (lib/live) e
-// a pílula do header. O estado é um valor de módulo (um por aba): o canal
-// escreve, a pílula lê, e nenhum dos dois precisa de conhecer o outro além
-// deste store.
+// Status do canal ao vivo do quadro (lib/live). O estado é um valor de
+// módulo (um por aba): o canal escreve, os assinantes leem (o intervalo do
+// quadro em lib/queries e as caixas de teste), e nenhuma das partes precisa
+// de conhecer as outras além deste store.
 import * as React from "react";
 
 export type LiveStatus = "live" | "reconnecting" | "offline";
@@ -36,9 +36,9 @@ export function liveStatusSnapshot(): LiveStatus {
   return snapshot();
 }
 
-/** A pílula do header assina o status do canal: "Ao vivo" com o stream
- *  aberto, "Reconectando" quando ele cai e tenta de novo, "Offline" quando
- *  não há stream. */
+/** Assina o status do canal: "live" com o stream aberto, "reconnecting"
+ *  quando ele cai e tenta de novo e "offline" quando não há stream (a
+ *  leitura que o intervalo do quadro usa em lib/queries). */
 export function useLiveStatus(): LiveStatus {
   return React.useSyncExternalStore(subscribe, snapshot);
 }

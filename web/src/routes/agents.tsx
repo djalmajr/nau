@@ -41,7 +41,6 @@ export function AgentsPage() {
     [search.developer, search.machine, search.project, search.q],
   );
   const hasFilters = Boolean(filters.developer || filters.machine || filters.project || filters.q);
-  const view = effectiveView(search);
 
   /** Atualiza a URL (replace: filtro é estado transitório, não histórico). */
   const update = React.useCallback(
@@ -83,9 +82,7 @@ export function AgentsPage() {
 
   return (
     <RequireSession>
-      <AppShell
-        headerActions={<ViewToggle onChange={(nextView) => update({ view: nextView })} value={view} />}
-      >
+      <AppShell>
         {isPending ? (
           <PageLoading />
         ) : error || !data ? (
@@ -116,7 +113,7 @@ function AgentsContent({
   data: AgentsResponse;
   filters: AgentFilters;
   hasFilters: boolean;
-  onChange: (patch: Partial<AgentFilters>) => void;
+  onChange: (patch: { view?: AgentsSearch["view"] } & Partial<AgentFilters>) => void;
   t: ReturnType<typeof useI18n>["t"];
   search: AgentsSearch;
 }) {
@@ -131,13 +128,24 @@ function AgentsContent({
 
   return (
     <div className="space-y-4">
-      <FilterBar
-        developers={options.developers}
-        machines={options.machines}
-        onChange={onChange}
-        projects={options.projects}
-        value={filters}
-      />
+      {/* O seletor Board | Lista fica na mesma linha do FilterBar, à
+          direita, e os filtros ocupam o espaço que sobra; abaixo de lg ele
+          desce para a própria linha. O estado continua na URL
+          (view=board|list). */}
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 lg:flex-1">
+          <FilterBar
+            developers={options.developers}
+            machines={options.machines}
+            onChange={onChange}
+            projects={options.projects}
+            value={filters}
+          />
+        </div>
+        <div className="shrink-0 self-end lg:self-auto">
+          <ViewToggle onChange={(nextView) => onChange({ view: nextView })} value={effectiveView(search)} />
+        </div>
+      </div>
       {!hasAny ? (
         <PageEmpty
           icon={Bot}

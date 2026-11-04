@@ -1,14 +1,13 @@
 import * as React from "react";
-import { createRoute, Link } from "@tanstack/react-router";
+import { createRoute } from "@tanstack/react-router";
 import { AppShell } from "@/components/app-shell";
 import { PageEmpty, PageError, PageLoading } from "@/components/page";
 import { MachineCard } from "@/components/machines/machine-card";
-import { buttonVariants } from "@/components/ui/button";
+import { ConnectMachineDialog } from "@/components/machines/connect-machine-dialog";
 import { ServerCog } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { useMachines } from "@/lib/queries";
 import { RequireSession, useSession } from "@/lib/session";
-import { cn } from "@/lib/utils";
 import { Route as rootRoute } from "./__root";
 
 export const Route = createRoute({
@@ -17,8 +16,9 @@ export const Route = createRoute({
   path: "/machines",
 });
 
-/** Máquinas: as próprias e as compartilhadas com o usuário. O botão do
- *  cabeçalho leva ao fluxo "Conectar máquina". */
+/** Máquinas: as próprias e as compartilhadas com o usuário. O botão
+ *  "Conectar máquina" abre um modal no conteúdo da página (não há mais
+ *  ação no cabeçalho global). */
 export function MachinesPage() {
   const { t } = useI18n();
   const session = useSession();
@@ -31,37 +31,40 @@ export function MachinesPage() {
 
   return (
     <RequireSession>
-      <AppShell
-        headerActions={
-          <Link className={cn(buttonVariants({ size: "sm" }))} to="/machines/connect">
-            {t("machines.connect")}
-          </Link>
-        }
-      >
-      {isPending ? (
-        <PageLoading />
-      ) : error || !data ? (
-        <PageError onRetry={() => void refetch()} />
-      ) : machines.length === 0 ? (
-        <PageEmpty icon={ServerCog} message={t("machines.empty")} />
-      ) : (
-        <div className="space-y-6">
-          {own.length > 0 ? (
-            <MachinesSection title={t("machines.ownSection")}>
-              {own.map((machine) => (
-                <MachineCard key={machine.id} machine={machine} own />
-              ))}
-            </MachinesSection>
-          ) : null}
-          {shared.length > 0 ? (
-            <MachinesSection title={t("machines.sharedSection")}>
-              {shared.map((machine) => (
-                <MachineCard key={machine.id} machine={machine} own={false} />
-              ))}
-            </MachinesSection>
-          ) : null}
-        </div>
-      )}
+      <AppShell>
+        {isPending ? (
+          <PageLoading />
+        ) : error || !data ? (
+          <PageError onRetry={() => void refetch()} />
+        ) : (
+          <div className="space-y-4">
+            {/* O botão aparece com a página carregada (inclusive na lista
+                vazia) e não em PageLoading nem em PageError. */}
+            <div className="flex justify-end">
+              <ConnectMachineDialog />
+            </div>
+            {machines.length === 0 ? (
+              <PageEmpty icon={ServerCog} message={t("machines.empty")} />
+            ) : (
+              <div className="space-y-6">
+                {own.length > 0 ? (
+                  <MachinesSection title={t("machines.ownSection")}>
+                    {own.map((machine) => (
+                      <MachineCard key={machine.id} machine={machine} own />
+                    ))}
+                  </MachinesSection>
+                ) : null}
+                {shared.length > 0 ? (
+                  <MachinesSection title={t("machines.sharedSection")}>
+                    {shared.map((machine) => (
+                      <MachineCard key={machine.id} machine={machine} own={false} />
+                    ))}
+                  </MachinesSection>
+                ) : null}
+              </div>
+            )}
+          </div>
+        )}
       </AppShell>
     </RequireSession>
   );
