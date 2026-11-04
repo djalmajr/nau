@@ -81,12 +81,10 @@ func buildIdentity(dir, name, importPath string) (string, error) {
 }
 
 // cfgDirFor returns the nau config dir the child resolves from
-// its explicit environment; it matches os.UserConfigDir for the standard
+// its explicit environment; it matches EnvFromOS for the standard
 // per-OS variables the test sets (HOME, XDG_CONFIG_HOME, APPDATA).
 func cfgDirFor(root string) string {
 	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(root, "home", "Library", "Application Support", "nau")
 	case "windows":
 		return filepath.Join(root, "appdata", "nau")
 	default:

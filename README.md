@@ -20,7 +20,7 @@ powershell -File scripts\install.ps1 [-Ref main] [-BinDir $env:USERPROFILE\.loca
 
 On every install, the script requests `nau config set --if-automatic herdr_soho_bin <absolute path>` for the backend found on the `PATH`. An explicit selection or an unsafe candidate leaves the configuration bytes unchanged and emits a stderr warning or explanation with exit 0, so installation continues.
 
-On macOS, `--agent` (and `-Agent` in the PowerShell script) installs or rewrites the user service that runs `nau agent run`, and (re)starts it; `--remove-agent` / `-RemoveAgent` stops and removes it, and `--agent-dry-run` / `-AgentDryRun` print the unit it would install and exit. The service is created only when the config directory holds a `hub.json` (written by `nau connect`); without it the script warns and keeps the node usable.
+On macOS, `--agent` (and `-Agent` in the PowerShell script) installs or rewrites the user service that runs `nau agent run`, and (re)starts it; `--remove-agent` / `-RemoveAgent` stops and removes it, and `--agent-dry-run` / `-AgentDryRun` print the unit it would install and exit. The service is created only when the config directory holds a `hub.json` (written by `nau connect`); without it the script warns and keeps the node usable. When `XDG_CONFIG_HOME` is set, the macOS service carries it, so the service reads the same directory as `nau connect`.
 
 For development, from a checkout of the module `github.com/djalmajr/nau`:
 
@@ -32,7 +32,7 @@ The binary must be on your `PATH`.
 
 ## Configuration
 
-`nau` keeps its configuration in the `nau` directory under the user's configuration directory. Two keys exist:
+`nau` keeps its configuration in the `nau` directory: on macOS and Linux `$XDG_CONFIG_HOME/nau` or else `~/.config/nau`, on Windows `%AppData%\nau`. Two keys exist:
 
 - `machine_label` — the label the machine reports. Set it with `nau config set machine_label <label>`.
 - `herdr_soho_bin` — the backend selection. Only the empty value is automatic and resolves to `soho` on the `PATH`; any stored non-empty value is explicit and used as is.
