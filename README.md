@@ -75,6 +75,8 @@ docker build -t nau-hub:<tag> .
 
 The image runs as a non-root user on `gcr.io/distroless/static-debian12:nonroot`, listens on port `7440`, and starts `nau hub serve --listen 0.0.0.0:7440 --web /srv/web`; the cluster runs the health probes against `/api/health`, so the image carries no `HEALTHCHECK`.
 
+Every push to `main` publishes the image as `ghcr.io/<owner>/<repository>:<commit sha>`, reporting the version `ci-<commit sha>`. A release is a tag `vX.Y.Z` on a commit of `main`, pushed after the image of that commit is published: it builds the image again reporting that version, and publishes it as `:vX.Y.Z` and `:<commit sha>`. The hub shows the version at `GET /api/version` and in Settings.
+
 The secrets always come from the environment, never from the image. The environment surface of the hub is:
 
 - `NAU_HUB_DB_URL` — the URL of the sqld database the hub reads and writes.
