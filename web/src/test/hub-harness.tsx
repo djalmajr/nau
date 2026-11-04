@@ -80,6 +80,8 @@ export interface HubApiState {
    *  hífen/caixa); `pairingFail` (ex.: 400, 429) tem precedência. */
   pairingCode: string;
   pairingFail?: number;
+  /** Quando definido, o POST /api/pairings/confirm só responde depois dela. */
+  pairingGate?: Promise<void>;
   /** Usuário da sessão (GET /api/session). */
   sessionUser: SessionUser;
   /** Status do GET /api/session quando definido (ex.: 401 — o caminho real
@@ -222,6 +224,7 @@ export function fakeHubFetch(state: HubApiState) {
       return jsonResponse(404, { error: "not_found" });
     }
     if (url === "/api/pairings/confirm") {
+      if (state.pairingGate) await state.pairingGate;
       if (state.pairingFail !== undefined) {
         return jsonResponse(state.pairingFail, {
           error: state.pairingFail === 429 ? "rate_limited" : "invalid_code",
