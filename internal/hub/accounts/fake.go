@@ -143,33 +143,6 @@ func (m *Memory) ChangePasswordWithNewSession(_ context.Context, userID string, 
 	return nil
 }
 
-// ResetPasswordWithNewSession rotates and clears failures under one lock.
-func (m *Memory) ResetPasswordWithNewSession(_ context.Context, userID, emailNorm string, authVersion int64, passwordHash string, sr SessionRow) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	u, ok := m.usersByID[userID]
-	if !ok {
-		return fmt.Errorf("accounts: the user is not found")
-	}
-	if u.AuthVersion != authVersion {
-		// The conditional update changed no row: the guard failure.
-		return fmt.Errorf("accounts: the auth version moved")
-	}
-	u.PasswordHash = passwordHash
-	u.AuthVersion++
-	m.usersByID[userID] = u
-	m.users[u.EmailNorm] = u
-	for sha, srw := range m.sessions {
-		if srw.UserID == userID && !srw.Revoked {
-			srw.Revoked = true
-			m.sessions[sha] = srw
-		}
-	}
-	m.sessions[sr.TokenSHA] = sr
-	delete(m.failures, emailNorm)
-	return nil
-}
-
 // CreateSessionForUser inserts the session only while the user still
 // carries the verified auth version and password hash, under the same
 // lock that reads them: the condition and the write are one unit of

@@ -271,20 +271,6 @@ func (s *SQL) ChangePasswordWithNewSession(ctx context.Context, userID string, a
 	return err
 }
 
-// ResetPasswordWithNewSession includes the owner failure cleanup in the
-// guarded rotation batch, so later reservations cannot be erased by it.
-func (s *SQL) ResetPasswordWithNewSession(ctx context.Context, userID, emailNorm string, authVersion int64, passwordHash string, sr SessionRow) error {
-	_, err := s.store.Batch(ctx, []store.Stmt{
-		{SQL: `UPDATE users SET password_hash = ?, auth_version = auth_version + 1 WHERE id = ? AND auth_version = ?`, Args: []store.Value{passwordHash, userID, authVersion}},
-		{SQL: guardCheck},
-		{SQL: guardClear},
-		{SQL: `UPDATE sessions SET revoked = 1 WHERE user_id = ? AND revoked = 0`, Args: []store.Value{userID}},
-		{SQL: insertSession, Args: sessionArgs(sr)},
-		{SQL: `DELETE FROM login_failures WHERE email_norm = ?`, Args: []store.Value{emailNorm}},
-	})
-	return err
-}
-
 // CreateSessionForUser inserts the login session only while the user
 // still carries the verified auth version and password hash: the
 // INSERT … SELECT … WHERE EXISTS is one statement, so a rotation

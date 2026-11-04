@@ -23,7 +23,9 @@ import (
 const (
 	perEmailMaxFailures = 5
 	globalMaxFailures   = 100
-	failureWindowMS     = int64(15 * 60 * 1000)
+	// LoginFailureWindow bounds the per-email and global login attempt budgets.
+	LoginFailureWindow = 15 * time.Minute
+	failureWindowMS    = int64(LoginFailureWindow / time.Millisecond)
 
 	InviteTTL    = 7 * 24 * time.Hour
 	RoleOwner    = "owner"
@@ -118,9 +120,6 @@ type AccountStore interface {
 	// meantime the whole batch rolls back and the error is the guard
 	// failure the caller classifies by re-reading the user.
 	ChangePasswordWithNewSession(ctx context.Context, userID string, authVersion int64, passwordHash string, s SessionRow) error
-	// ResetPasswordWithNewSession performs the same guarded rotation and
-	// clears this e-mail's login failures in the same atomic operation.
-	ResetPasswordWithNewSession(ctx context.Context, userID, emailNorm string, authVersion int64, passwordHash string, s SessionRow) error
 	CreateSession(ctx context.Context, s SessionRow) error
 	FindSession(ctx context.Context, tokenSHA string) (SessionRow, bool, error)
 	RevokeSession(ctx context.Context, tokenSHA string) error
@@ -470,7 +469,7 @@ func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response
 	}
 	row.UserID = owner.ID
 	row.AuthVersion = owner.AuthVersion + 1
-	if err := a.store.ResetPasswordWithNewSession(ctx, owner.ID, owner.EmailNorm, owner.AuthVersion, hash, row); err != nil {
+	if err := a.store.ChangePasswordWithNewSession(ctx, owner.ID, owner.AuthVersion, hash, row); err != nil {
 		// The batch failed: the guard lost the race only when a
 		// concurrent change moved the version in between; anything
 		// else is a store failure.

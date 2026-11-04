@@ -69,6 +69,14 @@ func runRecover(t *testing.T, stdin string, args ...string) (string, string, int
 		Sleep:     sleepCtx,
 	}
 	exit := Run(append([]string{"hub", "recover"}, args...), env)
+	const warning = "hub recover: the recovery does not reset the login limit: if the attempts were spent, the login answers 429 for up to 15 minutes\n"
+	if exit == 0 {
+		if strings.Count(out.String(), "\n") != 1 || errb.String() != warning {
+			t.Fatalf("success stdout=%q stderr=%q", out.String(), errb.String())
+		}
+	} else if strings.Contains(errb.String(), "the recovery does not reset the login limit") {
+		t.Fatal("recovery warning on an error path")
+	}
 	return out.String(), errb.String(), exit
 }
 
@@ -234,6 +242,9 @@ func TestHubRecoverNonLoopbackURLIsRefused(t *testing.T) {
 			if in.reads != 0 {
 				t.Fatalf("the stdin was read: %d reads, want 0", in.reads)
 			}
+			if strings.Contains(errb.String(), "the recovery does not reset the login limit") {
+				t.Fatal("recovery warning on URL refusal")
+			}
 			assertNoLeak(t, out.String(), errb.String())
 		})
 	}
@@ -387,6 +398,9 @@ func TestHubRecoverTerminalStdinIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "not the terminal") {
 		t.Fatalf("stderr = %q", errb.String())
+	}
+	if strings.Contains(errb.String(), "the recovery does not reset the login limit") {
+		t.Fatal("recovery warning on terminal refusal")
 	}
 	assertNoLeak(t, out.String(), errb.String())
 }

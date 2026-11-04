@@ -29,9 +29,10 @@ Check every precondition first and record the exact command, version and output 
    2. Start: `nau hub serve --listen 127.0.0.1:<port> --recovery-listen 127.0.0.1:<port>` with `NAU_HUB_DB_URL`, `NAU_HUB_SESSION_KEY`, `NAU_HUB_OWNER_NAME`, `NAU_HUB_OWNER_EMAIL`, `NAU_HUB_OWNER_PASSWORD` and `NAU_HUB_ROOT_TOKEN`. The serving line names both ports, `GET /api/health` answers ok, and `GET /api/version` carries the reviewed SHA.
    3. The seeded owner: `POST /api/session` answers 200, and `GET /api/session` with that cookie answers the owner.
    4. The public port: `POST /api/session/root-token` with the right token answers 404.
-   5. Recovery: `nau hub recover --url http://127.0.0.1:<recovery port>` with a remote url exits 2 with no request; with a wrong token it exits 4 and the password still works. After the login attempts of the owner are exhausted (429), the right token exits 0, the old cookie and the old password are refused, and the new password logs in.
+   5. Recovery: `nau hub recover --url http://127.0.0.1:<recovery port>` with a remote url exits 2 with no request; with a wrong token it exits 4 and the password still works; with the right token it exits 0, the old cookie and the old password are refused, and the new password logs in.
    6. The state a user has: SIGTERM closes both ports, and a new start on the same database, with other owner variables, keeps the owner and its password.
-   7. When `web/` changed: the changed screens in a real browser, served by the candidate with `--web`, in the light and dark themes. Record what was seen at each screen.
+   7. The login limit: after the attempts of the owner are spent (429), the right token exits 0 and the login stays at 429, since the recovery does not reset the limit.
+   8. When `web/` changed: the changed screens in a real browser, served by the candidate with `--web`, in the light and dark themes. Record what was seen at each screen.
 
 ## 4. Evidence template
 
@@ -47,7 +48,7 @@ nau version (command, stdout, exit):
 nau help (first lines and the full output attached):
 nau config set / get / list (commands, stdout, exit):
 nau doctor (stdout, exit):
-nau hub, sub-items 1 to 7 of item 5 (commands, exit codes and HTTP statuses, the SHA from /api/version; no secret values):
+nau hub, sub-items 1 to 8 of item 5 (commands, exit codes and HTTP statuses, the SHA from /api/version; no secret values):
 
 Result per item (PASS | FAIL | NOT RUN | BLOCKED, with the reason):
   1 build and version (required):

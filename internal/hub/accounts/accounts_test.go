@@ -210,7 +210,7 @@ func login(t *testing.T, s *scenario, email, password string) (int, []byte, hub.
 func runAccountsScenarios(t *testing.T, fresh func() AccountStore) {
 	t.Run("SeedOwner", func(t *testing.T) { testSeedOwner(t, fresh) })
 	t.Run("RootToken", func(t *testing.T) { testRootToken(t, fresh) })
-	t.Run("RootTokenClearsOwnerFailures", func(t *testing.T) { testRootTokenClearsOwnerFailures(t, fresh) })
+	t.Run("RootTokenPreservesLoginBudget", func(t *testing.T) { testRootTokenPreservesLoginBudget(t, fresh) })
 	t.Run("RootTokenNoSeparateClear", func(t *testing.T) { testRootTokenNoSeparateClear(t, fresh) })
 	t.Run("RootTokenBudgetAfterReset", func(t *testing.T) { testRootTokenBudgetAfterReset(t, fresh) })
 	t.Run("SessionContract", func(t *testing.T) { testSessionContract(t, fresh) })
@@ -1069,34 +1069,48 @@ func testStrictBody(t *testing.T, fresh func() AccountStore) {
 	}
 }
 
-// Mutation captured: omitting the recovery clear leaves the owner locked out.
-func testRootTokenClearsOwnerFailures(t *testing.T, fresh func() AccountStore) {
+// Mutation captured: any recovery cleanup reopens an exhausted budget.
+func testRootTokenPreservesLoginBudget(t *testing.T, fresh func() AccountStore) {
 	s := newScenario(t, fresh(), newClock(), testRootTokenValue)
 	s.seedOwner()
+	invite := s.createInvite(t, s.ownerCookie, testMemberEmail)
+	s.acceptInvite(t, invite.Token, testMemberName, testMemberPass)
 	for _, email := range []string{testMemberEmail, testOwnerEmail} {
 		for i := 0; i < perEmailMaxFailures; i++ {
 			if status, _, _ := login(t, s, email, "wrong-password"); status != 401 {
-				t.Fatalf("failed attempt %d = %d, want 401", i, status)
+				t.Fatalf("failed attempt %d=%d", i, status)
 			}
 		}
 	}
 	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 429 {
-		t.Fatalf("blocked owner = %d, want 429", status)
+		t.Fatalf("blocked owner=%d", status)
 	}
 	const newPass = "recovered-owner-pass-2"
 	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
 	if resp.Status != 200 {
-		t.Fatalf("recovery = %d, want 200", resp.Status)
+		t.Fatalf("recovery=%d", resp.Status)
 	}
 	setCookieOf(t, resp)
+	assertBlocked := func() {
+		t.Helper()
+		for _, attempt := range []struct{ email, password string }{{testOwnerEmail, newPass}, {testOwnerEmail, testOwnerPass}, {testMemberEmail, testMemberPass}} {
+			if status, _, _ := login(t, s, attempt.email, attempt.password); status != 429 {
+				t.Fatalf("retained budget=%d, want 429", status)
+			}
+		}
+	}
+	assertBlocked()
+	s.clock.advance(11 * time.Minute)
+	assertBlocked()
+	s.clock.advance(4*time.Minute + time.Millisecond)
 	if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 200 {
-		t.Fatalf("recovered owner login = %d, want 200", status)
+		t.Fatalf("new password after window=%d", status)
 	}
 	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 401 {
-		t.Fatalf("old password = %d, want 401", status)
+		t.Fatalf("old password after window=%d", status)
 	}
-	if status, _, _ := login(t, s, testMemberEmail, testMemberPass); status != 429 {
-		t.Fatalf("other email budget = %d, want 429", status)
+	if status, _, _ := login(t, s, testMemberEmail, testMemberPass); status != 200 {
+		t.Fatalf("other email after window=%d", status)
 	}
 }
 
@@ -1118,11 +1132,11 @@ func (s *recoveryStore) FindUserByEmailNorm(ctx context.Context, email string) (
 	return s.AccountStore.FindUserByEmailNorm(ctx, email)
 }
 
-func (s *recoveryStore) ResetPasswordWithNewSession(ctx context.Context, id, email string, av int64, hash string, row SessionRow) error {
+func (s *recoveryStore) ChangePasswordWithNewSession(ctx context.Context, id string, av int64, hash string, row SessionRow) error {
 	if s.resetErr != nil {
 		return s.resetErr
 	}
-	err := s.AccountStore.ResetPasswordWithNewSession(ctx, id, email, av, hash, row)
+	err := s.AccountStore.ChangePasswordWithNewSession(ctx, id, av, hash, row)
 	if err == nil && s.afterReset != nil {
 		s.afterReset()
 	}

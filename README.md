@@ -46,7 +46,7 @@ Every command prints exactly one JSON line on stdout and its diagnostics on stde
 - `doctor` — print the status line: the version, the config directory, the machine label and the soho backend block (read-only).
 - `hub serve [--listen <host:port>] [--web <dir>] [--recovery-listen <host:port>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`); behind a proxy, the client address of the pairing API can be taken from a trusted header named by `NAU_HUB_CLIENT_IP_HEADER` (otherwise the hub uses the connection address, which the CLI overwrites to prevent spoofing); on the empty database it seeds the initial owner from `NAU_HUB_OWNER_NAME`, `NAU_HUB_OWNER_EMAIL` and `NAU_HUB_OWNER_PASSWORD` (the variables are ignored once a user exists), and `NAU_HUB_ROOT_TOKEN` (at least 32 bytes and not blank when set) opens the password recovery route on the recovery listener, which binds to the loopback by default (`127.0.0.1:7441`, the host of `--recovery-listen` must be a literal loopback ip) and is the only listener that serves the route.
 
-Recovery clears only the owner's login failures; if other e-mails exhaust the global login budget, login still answers 429 until the window expires.
+Recovery does not reset the login limit: if the attempts were spent, login answers 429 for up to 15 minutes.
 
 - `hub recover --url <url>` — recover the account access of a running hub: the url is the loopback of the recovery port (the port-forward of the recovery listener), the command refuses any remote or named host before any request, it reads the root token and the new password from stdin, one per line, and never prints the token or the password on its own; the e-mail of the success line comes from the answer of the hub.
 - `GET /api/live` — the board version of the signed-in developer (32 hex characters) as `{"version":...}`, the polling path of a hub without streaming; it is computed from fresh reads of the database, with `Cache-Control: no-store`.
@@ -119,7 +119,7 @@ read -rs newpass
 printf '%s\n%s\n' "$token" "$newpass" | nau hub recover --url http://127.0.0.1:7441
 ```
 
-The success prints one JSON line with the e-mail of the owner. The token and the password never appear on the output, on any path, and a terminal stdin is refused so the typed text is never echoed.
+The success prints one JSON line with the e-mail of the owner. The command never prints the token or the password on its own; the e-mail comes from the answer of the hub, and a terminal stdin is refused so the typed text is never echoed.
 
 ## Status
 
