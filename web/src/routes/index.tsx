@@ -163,7 +163,7 @@ function StatCard({
   );
 }
 
-/** Ponto de estado nas contagens por máquina (mesmas cores da pílula, sem
+/** Ponto de estado nas contagens por máquina (sem
  *  disputa de cor: só o ponto, o rótulo usa o texto normal). */
 const STATE_DOT_CLASSES: Record<AgentState, string> = {
   needs_you: "bg-primary",

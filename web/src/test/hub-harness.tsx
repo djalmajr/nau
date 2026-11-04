@@ -32,7 +32,6 @@ import { AgentsPage } from "@/routes/agents";
 import { AgentDetailPage } from "@/routes/agents-detail";
 import { DevelopersPage } from "@/routes/developers";
 import { InviteScreen } from "@/components/invite";
-import { MachinesConnectPage } from "@/routes/machines-connect";
 import { MachinesPage } from "@/routes/machines";
 import { OverviewPage } from "@/routes/index";
 import { PrivacyPage } from "@/routes/privacy";
@@ -342,11 +341,6 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
     validateSearch: parseAgentsSearch,
   });
   const machinesRoute = createRoute({ component: MachinesPage, getParentRoute: () => rootRoute, path: "/machines" });
-  const machinesConnectRoute = createRoute({
-    component: MachinesConnectPage,
-    getParentRoute: () => rootRoute,
-    path: "/machines/connect",
-  });
   const developersRoute = createRoute({
     component: DevelopersPage,
     getParentRoute: () => rootRoute,
@@ -371,7 +365,6 @@ export function renderHubApp(initial: string, state?: HubApiState): HubApp {
       agentsRoute,
       agentDetailRoute,
       machinesRoute,
-      machinesConnectRoute,
       developersRoute,
       projectsRoute,
       privacyRoute,

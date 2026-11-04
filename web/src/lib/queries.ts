@@ -2,7 +2,7 @@
 // chega pelo canal de lib/live: com o stream aberto, as queries do quadro
 // deixam de refazer em intervalo (o evento `board` invalida); sem stream,
 // o intervalo de 15 s de hoje volta e a recaída consulta GET /api/live
-// (a pílula do header acompanha o status em lib/live-status).
+// (o status do canal fica em lib/live-status).
 // O `signal` da query vai até o fetch (lib/api) e a id do usuário, que já
 // está na chave, vai junto na chamada: o 401 atrasado de uma conta anterior
 // é cancelado no clear() e/ou ignorado pelo handler central.

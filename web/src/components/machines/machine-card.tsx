@@ -6,7 +6,7 @@ import { relativeTime } from "@/lib/time";
 import { cn } from "@/lib/utils";
 import { RevokeMachineAction } from "./revoke-machine-action";
 
-/** Ponto online/offline + rótulo, no padrão da pílula do header (token do
+/** Ponto online/offline + rótulo (token do
  *  design system, sem cor fora de variável). */
 function OnlineDot({ online, label }: { online: boolean; label: string }) {
   return (
