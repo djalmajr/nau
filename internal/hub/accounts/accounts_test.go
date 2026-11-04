@@ -40,7 +40,7 @@ type scenario struct {
 }
 
 // The scenario credentials are fixed test values, never secrets. The
-// root token is at least 32 characters, the shape the serve requires.
+// root token is at least 32 bytes, the shape the serve requires.
 const (
 	testRootTokenValue = "test-root-token-0000000000000000000000"
 	testOwnerEmail     = "owner@example.test"
@@ -210,6 +210,8 @@ func login(t *testing.T, s *scenario, email, password string) (int, []byte, hub.
 func runAccountsScenarios(t *testing.T, fresh func() AccountStore) {
 	t.Run("SeedOwner", func(t *testing.T) { testSeedOwner(t, fresh) })
 	t.Run("RootToken", func(t *testing.T) { testRootToken(t, fresh) })
+	t.Run("RootTokenClearsOwnerFailures", func(t *testing.T) { testRootTokenClearsOwnerFailures(t, fresh) })
+	t.Run("RootTokenClearFailureError", func(t *testing.T) { testRootTokenClearFailureError(t, fresh) })
 	t.Run("SessionContract", func(t *testing.T) { testSessionContract(t, fresh) })
 	t.Run("LoginErrors", func(t *testing.T) { testLoginErrors(t, fresh) })
 	t.Run("RateLimitPerEmail", func(t *testing.T) { testRateLimitPerEmail(t, fresh) })
@@ -1063,5 +1065,81 @@ func testStrictBody(t *testing.T, fresh func() AccountStore) {
 		[]byte(`{"token":"`+strings.Repeat("A", 43)+`","name":"x","password":"`+testMemberPass+`","admin":true}`), jsonCT, "")
 	if resp.Status != 400 || string(resp.Body) != `{"error":"bad_request"}` {
 		t.Fatalf("accept unknown field: %d %s", resp.Status, resp.Body)
+	}
+}
+
+// Mutation captured: omitting the recovery clear leaves the owner locked out.
+func testRootTokenClearsOwnerFailures(t *testing.T, fresh func() AccountStore) {
+	s := newScenario(t, fresh(), newClock(), testRootTokenValue)
+	s.seedOwner()
+	for _, email := range []string{testMemberEmail, testOwnerEmail} {
+		for i := 0; i < perEmailMaxFailures; i++ {
+			if status, _, _ := login(t, s, email, "wrong-password"); status != 401 {
+				t.Fatalf("failed attempt %d = %d, want 401", i, status)
+			}
+		}
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 429 {
+		t.Fatalf("blocked owner = %d, want 429", status)
+	}
+	const newPass = "recovered-owner-pass-2"
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
+	if resp.Status != 200 {
+		t.Fatalf("recovery = %d, want 200", resp.Status)
+	}
+	setCookieOf(t, resp)
+	if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 200 {
+		t.Fatalf("recovered owner login = %d, want 200", status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 401 {
+		t.Fatalf("old password = %d, want 401", status)
+	}
+	if status, _, _ := login(t, s, testMemberEmail, testMemberPass); status != 429 {
+		t.Fatalf("other email budget = %d, want 429", status)
+	}
+}
+
+type clearFailureStore struct {
+	AccountStore
+	fail bool
+}
+
+func (s *clearFailureStore) ClearFailures(ctx context.Context, email string) error {
+	if s.fail {
+		return errors.New("synthetic clear failure")
+	}
+	return s.AccountStore.ClearFailures(ctx, email)
+}
+
+// Mutation captured: returning 503 after a committed reset loses the usable cookie.
+func testRootTokenClearFailureError(t *testing.T, fresh func() AccountStore) {
+	st := &clearFailureStore{AccountStore: fresh()}
+	s := newScenario(t, st, newClock(), testRootTokenValue)
+	s.seedOwner()
+	st.fail = true
+	const newPass = "recovered-owner-pass-2"
+	resp := s.doRec("POST", "/api/session/root-token", rootBody(testRootTokenValue, newPass), jsonCT, "")
+	if resp.Status != 200 {
+		t.Fatalf("recovery after clear failure = %d, want 200", resp.Status)
+	}
+	cookie := setCookieOf(t, resp)
+	if got := s.do("GET", "/api/session", nil, "", "nau_session="+cookie); got.Status != 200 {
+		t.Fatalf("recovery cookie = %d, want 200", got.Status)
+	}
+	const clearLog = "hub accounts: the login failures of the owner were not cleared"
+	if s.log.String() != clearLog+"\n"+rootTokenLogReset+"\n" {
+		t.Fatalf("unexpected recovery log: %q", s.log.String())
+	}
+	for _, secret := range []string{testRootTokenValue, testOwnerPass, newPass, testOwnerEmail} {
+		if strings.Contains(s.log.String(), secret) {
+			t.Fatal("recovery log contains a credential")
+		}
+	}
+	st.fail = false
+	if status, _, _ := login(t, s, testOwnerEmail, newPass); status != 200 {
+		t.Fatalf("new password = %d, want 200", status)
+	}
+	if status, _, _ := login(t, s, testOwnerEmail, testOwnerPass); status != 401 {
+		t.Fatalf("old password = %d, want 401", status)
 	}
 }

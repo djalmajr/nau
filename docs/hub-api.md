@@ -25,9 +25,12 @@ The route `POST /api/session/root-token` is not part of the public API: the hub 
 
 - 200 with the same body as `GET /api/session`, and the server sets the session cookie; every other session of the owner ends;
 - 401 `{"error":"invalid_token"}` when `token` is wrong;
+- 401 `{"error":"unauthenticated"}` when another password change wins the recovery race;
 - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes;
 - 409 `{"error":"no_owner"}` when no account exists yet;
 - 404 `{"error":"not_found"}` when the hub runs without the root token.
+
+Recovery clears only the owner's login failures; if other e-mails exhaust the global login budget, login still answers 429 until the window expires.
 
 The operator reaches it from the machine that runs the hub, or through a port-forward of the recovery port, with `nau hub recover --url http://127.0.0.1:<recovery port>`, which reads the root token and the new password from stdin, one per line, and refuses a url that is not a loopback host before any request.
 

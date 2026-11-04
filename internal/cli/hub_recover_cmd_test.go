@@ -390,3 +390,38 @@ func TestHubRecoverTerminalStdinIsRefused(t *testing.T) {
 	}
 	assertNoLeak(t, out.String(), errb.String())
 }
+
+// Mutation captured: mapping every 401 to invalid_token conceals a lost race.
+func TestHubRecoverUnauthorizedCodes(t *testing.T) {
+	for _, tc := range []struct{ name, body, message string }{
+		{"invalid token", `{"error":"invalid_token"}`, "hub recover: the root token is not valid"},
+		{"lost race", `{"error":"unauthenticated"}`, "hub recover: the password changed during the recovery; run it again"},
+		{"unknown", `{"error":"other"}`, "hub recover: the hub refused the recovery"},
+		{"empty", "", "hub recover: the hub refused the recovery"},
+		{"invalid json", "{", "hub recover: the hub refused the recovery"},
+		{"wrong type", `{"error":42}`, "hub recover: the hub refused the recovery"},
+		{"case", `{"error":"INVALID_TOKEN"}`, "hub recover: the hub refused the recovery"},
+		{"hostile", `{"error":"` + recoverTestToken + recoverTestPass + `"}`, "hub recover: the hub refused the recovery"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withRecoverRoundTrip(t, &fakeRecoverRT{status: 401, body: tc.body}, func() {
+				out, errb, exit := runRecover(t, recoverTestToken+"\n"+recoverTestPass+"\n", "--url", "http://127.0.0.1:7441")
+				var line struct{ Status, Motivo string }
+				if err := json.Unmarshal([]byte(out), &line); err != nil || exit != 4 || line.Status != "4" || line.Motivo != tc.message || errb != "nau: "+tc.message+"\n" {
+					t.Fatalf("exit=%d stdout=%q stderr=%q, want %q", exit, out, errb, tc.message)
+				}
+				assertNoLeak(t, out, errb)
+			})
+		})
+	}
+}
+
+func TestHubRecoverURLMessage(t *testing.T) {
+	const want = "hub recover: the url must be the loopback recovery port of the hub, such as http://127.0.0.1:7441: point the port-forward at the recovery port and define NAU_HUB_ROOT_TOKEN on the hub"
+	out, errb, exit := runRecover(t, recoverTestToken+"\n"+recoverTestPass+"\n", "--url", "https://example.test")
+	var line struct{ Status, Motivo string }
+	if err := json.Unmarshal([]byte(out), &line); err != nil || exit != 2 || line.Status != "2" || line.Motivo != want || errb != "nau: "+want+"\n" {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", exit, out, errb)
+	}
+	assertNoLeak(t, out, errb)
+}

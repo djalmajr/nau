@@ -969,7 +969,7 @@ func TestHubServeMissingOwnerVariablesExit2(t *testing.T) {
 }
 
 // TestHubServeShortRootTokenExits2 exits 2 with a defined root token
-// of less than 32 characters, before the store is touched: the error
+// of less than 32 bytes, before the store is touched: the error
 // names the variable, never the value, and no migration and no seed
 // ran.
 func TestHubServeShortRootTokenExits2(t *testing.T) {
@@ -979,7 +979,7 @@ func TestHubServeShortRootTokenExits2(t *testing.T) {
 	if exit != 2 {
 		t.Fatalf("exit = %d, want 2 (stdout %q, stderr %q)", exit, stdout, stderr)
 	}
-	if !strings.Contains(stderr, hubEnvRootToken+" must be at least 32 characters") {
+	if !strings.Contains(stderr, hubEnvRootToken+" must be at least 32 bytes and not blank") {
 		t.Fatalf("stderr = %q", stderr)
 	}
 	if strings.Contains(stdout+stderr, shortToken) {
@@ -1335,5 +1335,67 @@ func TestHubServeRecoveryListenInUseExits4(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the serve did not return in time")
+	}
+}
+
+// Mutation captured: removing TrimSpace or lowering the byte boundary opens the store.
+func TestHubServeRootTokenInvalidBeforeEffects(t *testing.T) {
+	for _, tc := range []struct{ name, token string }{
+		{"31 bytes", strings.Repeat("x", 31)},
+		{"32 spaces", strings.Repeat(" ", 32)},
+		{"40 whitespace", strings.Repeat(" \t\n ", 10)},
+		{"unicode whitespace", strings.Repeat("\u2003", 11)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldListen, oldStore := hubServeListen, newHubStore
+			t.Cleanup(func() { hubServeListen = oldListen; newHubStore = oldStore })
+			listens, stores := 0, 0
+			hubServeListen = func(string, string) (net.Listener, error) { listens++; return nil, errors.New("unexpected listen") }
+			newHubStore = func(string, string) (store.Store, error) { stores++; return nil, errors.New("unexpected store") }
+			var out, errb bytes.Buffer
+			vars := hubTestServeVars(map[string]string{hubEnvRootToken: tc.token})
+			exit := Run([]string{"hub", "serve"}, Env{Stdout: &out, Stderr: &errb, Getenv: func(k string) string { return vars[k] }})
+			const want = "hub serve: NAU_HUB_ROOT_TOKEN must be at least 32 bytes and not blank"
+			var line struct{ Status, Motivo string }
+			if err := json.Unmarshal(out.Bytes(), &line); err != nil || exit != 2 || line.Status != "2" || line.Motivo != want || errb.String() != "nau: "+want+"\n" {
+				t.Fatalf("exit=%d stdout=%q stderr=%q", exit, out.String(), errb.String())
+			}
+			if listens != 0 || stores != 0 {
+				t.Fatalf("effects: listens=%d stores=%d", listens, stores)
+			}
+			if strings.Contains(out.String()+errb.String(), tc.token) {
+				t.Fatal("root token leaked")
+			}
+		})
+	}
+}
+
+func TestHubServeRootTokenValidBytes(t *testing.T) {
+	for _, tc := range []struct{ name, token string }{
+		{"32 bytes", strings.Repeat("x", 32)},
+		{"32 unicode bytes", strings.Repeat("é", 16)},
+		{"40 bytes internal spaces", strings.Repeat("x", 19) + "  " + strings.Repeat("y", 19)},
+		{"edge spaces preserved", " " + strings.Repeat("x", 32) + " "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newHubFakeStore()
+			st.hasOwner = true
+			_, rec, stop := startHubServe(t, hubTestServeVars(map[string]string{hubEnvRootToken: tc.token}), st)
+			if rec == "" {
+				t.Fatal("missing recovery listener")
+			}
+			body, _ := json.Marshal(map[string]string{"token": tc.token, "new": "recovered-pass-1234"})
+			resp := doPost(t, "http://"+rec+"/api/session/root-token", string(body))
+			if resp.status != 200 || resp.headers.Get("Set-Cookie") == "" {
+				t.Fatalf("exact token recovery = %d", resp.status)
+			}
+			out, errb, exit := stop()
+			if exit != 0 {
+				t.Fatalf("exit=%d", exit)
+			}
+			if strings.Contains(out+errb, tc.token) {
+				t.Fatal("root token leaked")
+			}
+		})
 	}
 }

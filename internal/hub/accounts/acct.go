@@ -72,12 +72,11 @@ var (
 	ErrOwnerExists = errors.New("accounts: the owner already exists")
 )
 
-// rootTokenLogWrong and rootTokenLogReset are the two log lines of the
-// root-token route: one per wrong token and one per password reset. They
-// carry no token, no password and no e-mail.
+// The root-token log lines carry no token, password or e-mail.
 const (
-	rootTokenLogWrong = "hub accounts: the root token of the recovery is invalid"
-	rootTokenLogReset = "hub accounts: the owner password was reset with the root token"
+	rootTokenLogWrong       = "hub accounts: the root token of the recovery is invalid"
+	rootTokenLogReset       = "hub accounts: the owner password was reset with the root token"
+	rootTokenLogClearFailed = "hub accounts: the login failures of the owner were not cleared"
 )
 
 // AccountStore is the account storage. Every method is one unit of
@@ -429,7 +428,7 @@ func (a *Auth) logf(line string) {
 // presented token never leaks, comes before the password policy. There
 // is no attempt limit here: the public login feeds the limiter, and an
 // attacker could exhaust it and close the emergency exit; the token is
-// at least 32 characters and the route is not reachable from the
+// at least 32 bytes and the route is not reachable from the
 // public URL. The success redefines the password through the same
 // atomic change of the session: the auth version bumps, every session
 // of the owner is revoked and the new one is created.
@@ -477,6 +476,9 @@ func (a *Auth) rootTokenReset(ctx context.Context, req hub.Request) hub.Response
 			return errResponse(401, "unauthenticated")
 		}
 		return errResponse(503, "unavailable")
+	}
+	if err := a.store.ClearFailures(ctx, owner.EmailNorm); err != nil {
+		a.logf(rootTokenLogClearFailed)
 	}
 	a.logf(rootTokenLogReset)
 	return withCookie(200, SessionCookie(cookie), sessionBody(owner))

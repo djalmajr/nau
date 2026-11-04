@@ -177,7 +177,7 @@ func cmdHubRecover(args []string, env Env) int {
 		return 2
 	}
 	if !validRecoverURL(hubURL) {
-		fail(env, 2, "hub recover: the url must be the loopback recovery port of the hub (127.0.0.1 or [::1]): point the port-forward at the recovery port and define NAU_HUB_ROOT_TOKEN on the hub")
+		fail(env, 2, "hub recover: the url must be the loopback recovery port of the hub, such as http://127.0.0.1:7441: point the port-forward at the recovery port and define NAU_HUB_ROOT_TOKEN on the hub")
 		return 2
 	}
 	if stdinIsTerminal(env.Stdin) {
@@ -220,7 +220,14 @@ func cmdHubRecover(args []string, env Env) int {
 		fail(env, 4, "hub recover: the port-forward must point at the recovery port of the hub, and NAU_HUB_ROOT_TOKEN must be defined on the hub")
 		return 4
 	case http.StatusUnauthorized:
-		fail(env, 4, "hub recover: the root token is not valid")
+		switch recoverErrCode(body) {
+		case "invalid_token":
+			fail(env, 4, "hub recover: the root token is not valid")
+		case "unauthenticated":
+			fail(env, 4, "hub recover: the password changed during the recovery; run it again")
+		default:
+			fail(env, 4, "hub recover: the hub refused the recovery")
+		}
 		return 4
 	case http.StatusBadRequest:
 		if recoverErrCode(body) == "weak_password" {

@@ -51,7 +51,7 @@ commands:
 exit codes:
   0   success
   2   bad usage, unknown config key, hub serve: a missing or invalid owner
-      variable, a root token shorter than 32 characters, or a recovery
+      variable, a blank root token or one shorter than 32 bytes, or a recovery
       listener that is not a literal loopback host:port
   3   connect: the pairing expired
   4   hub serve: the database or the listener is unavailable, or the user

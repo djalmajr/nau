@@ -292,8 +292,8 @@ func cmdHubServe(args []string, env Env) int {
 	// names the variable only, never the value, and exits before the
 	// connection opens, with the other environment validations.
 	rootToken := env.Getenv(hubEnvRootToken)
-	if rootToken != "" && len(rootToken) < 32 {
-		fail(env, 2, "hub serve: "+hubEnvRootToken+" must be at least 32 characters")
+	if rootToken != "" && (len(rootToken) < 32 || strings.TrimSpace(rootToken) == "") {
+		fail(env, 2, "hub serve: "+hubEnvRootToken+" must be at least 32 bytes and not blank")
 		return 2
 	}
 	// The recovery port binds to the loopback of the hub only: the
