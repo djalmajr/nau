@@ -262,7 +262,7 @@ function Working24h({
                 <BarChart data={data} margin={{ right: 4, top: 8 }}>
                   <CartesianGrid vertical={false} strokeDasharray="2 4" className="stroke-border/60" />
                   <XAxis dataKey="label" tickLine={false} axisLine={{ className: "stroke-border" }} />
-                  <YAxis allowDecimals={false} width={24} tickLine={false} axisLine={false} />
+                  <YAxis allowDecimals={false} width="auto" tickLine={false} axisLine={false} />
                   <ChartTooltip
                     content={
                       <ChartTooltipContent
@@ -276,7 +276,7 @@ function Working24h({
                       />
                     }
                   />
-                  <Bar dataKey="working" fill="var(--primary)" />
+                  <Bar dataKey="working" fill="var(--primary)" isAnimationActive={false} />
                 </BarChart>
               </ChartContainer>
               <ul className="sr-only">

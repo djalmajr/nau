@@ -1,10 +1,14 @@
-import { beforeEach, describe, expect, it } from "vitest";
-import { screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { defaultHubState, renderHubApp } from "@/test/hub-harness";
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 /** Aguarda a Visão geral carregar. */
@@ -55,6 +59,46 @@ describe("overview", () => {
     const items = within(working).getAllByRole("listitem");
     expect(items).toHaveLength(24);
     expect(items.some((item) => item.textContent?.includes("3 trabalhando"))).toBe(true);
+  });
+
+  it("draws the chart from the data: one bar per hour above zero, in order, with the tooltip", async () => {
+    // jsdom não tem layout: o gráfico só desenha com uma medida real do contêiner.
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      bottom: 160,
+      height: 160,
+      left: 0,
+      right: 800,
+      toJSON: () => ({}),
+      top: 0,
+      width: 800,
+      x: 0,
+      y: 0,
+    });
+    renderHubApp("/");
+    await loadOverview();
+
+    const working = screen.getByRole("region", { name: "Trabalhando nas últimas 24 h" });
+    const bars = await waitFor(() => {
+      // Do fixture: 1 na hora 5, 2 na hora 11 e 3 na hora 22; as demais em zero.
+      const found = Array.from(working.querySelectorAll(".recharts-bar-rectangle path"));
+      expect(found).toHaveLength(3);
+      return found;
+    });
+    const heights = bars.map((bar) => Number(bar.getAttribute("height")));
+    const positions = bars.map((bar) => Number(bar.getAttribute("x")));
+    expect(heights[0]).toBeGreaterThan(0);
+    expect(heights[1] / heights[0]).toBeCloseTo(2);
+    expect(heights[2] / heights[0]).toBeCloseTo(3);
+    expect(positions[0]).toBeLessThan(positions[1]);
+    expect(positions[1]).toBeLessThan(positions[2]);
+
+    // A barra mais alta mostra o valor dela no tooltip (o texto igual da lista
+    // acessível não conta: a busca fica só no tooltip).
+    const chart = working.querySelector(".recharts-wrapper") as HTMLElement;
+    fireEvent.mouseMove(chart, { clientX: positions[2] + 1, clientY: 80 });
+    await waitFor(() => {
+      expect(working.querySelector(".recharts-tooltip-wrapper")).toHaveTextContent("3 trabalhando");
+    });
   });
 
   it("shows the top projects with agents and working counts", async () => {
