@@ -29,7 +29,16 @@ commands:
                                     run the hub server on the given address: the health and
                                     version API and the static files, with the store in the
                                     remote database named by NAU_HUB_DB_URL (token in
-                                    NAU_HUB_DB_TOKEN)
+                                    NAU_HUB_DB_TOKEN); on the empty database the initial
+                                    owner is seeded from NAU_HUB_OWNER_NAME,
+                                    NAU_HUB_OWNER_EMAIL and NAU_HUB_OWNER_PASSWORD (ignored
+                                    once a user exists), and NAU_HUB_ROOT_TOKEN (at least
+                                    32 characters when set) opens the password recovery
+                                    route, reachable only directly from the loopback
+  hub recover --url <url>
+                                    recover the account access of a running hub from the
+                                    loopback: read the root token and the new password on
+                                    stdin, one per line
   connect <hub-url> [--name <nome>]
                                     connect this machine to the hub: request a pairing, show
                                     the code, poll the confirmation and store the machine key
@@ -38,12 +47,14 @@ commands:
 
 exit codes:
   0   success
-  2   bad usage, unknown config key
+  2   bad usage, unknown config key, hub serve: a missing or invalid owner
+      variable or a root token shorter than 32 characters
   3   connect: the pairing expired
-  4   hub serve: the database or the listener is unavailable; connect: the
-      hub is unreachable or its answer is not valid; agent run: the hub
-      revoked the machine key (doctor reports the soho backend in its JSON
-      and exits 0 without it)
+  4   hub serve: the database or the listener is unavailable, or the user
+      count or the owner seed fails; connect: the hub is unreachable or its
+      answer is not valid; hub recover: the hub refused the reset or is
+      unreachable; agent run: the hub revoked the machine key (doctor
+      reports the soho backend in its JSON and exits 0 without it)
   130 connect: interrupted (Ctrl-C) before hub.json was written
 `
 

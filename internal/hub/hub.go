@@ -38,6 +38,14 @@ var healthTimeout = 2 * time.Second
 // notFoundBody is the body of the API 404 responses.
 const notFoundBody = `{"error":"not_found"}`
 
+// RemoteIPHeader is the header the hub serve adapter sets with the ip
+// of the connection (the RemoteAddr without the port). The adapter
+// overwrites the value the client sends before the request reaches a
+// handler, so the header cannot be spoofed to claim a foreign
+// connection. The machines and the accounts layers read it as the
+// connection ip.
+const RemoteIPHeader = "X-Nau-Remote-IP"
+
 // Request is one incoming request, fully read.
 type Request struct {
 	// Method is the HTTP method, as received.

@@ -68,9 +68,9 @@ func (r *raceStore) FindUserByID(c context.Context, id string) (User, bool, erro
 // deterministic reader.
 func concurrentScenario(t *testing.T, st AccountStore) *scenario {
 	t.Helper()
-	s := newScenario(t, st, newClock(), testBootstrapToken)
+	s := newScenario(t, st, newClock(), testRootTokenValue)
 	s.a.rand = rand.Reader
-	s.bootstrapOwner()
+	s.seedOwner()
 	return s
 }
 

@@ -20,10 +20,8 @@ import (
 	"github.com/djalmajr/nau/internal/inventory"
 )
 
-// The session key and the bootstrap token of the suite: fixed test
-// values, never secrets.
+// The session key of the suite: fixed test values, never secrets.
 const sqldSessionKey = "dGVzdC1zZXNzaW9uLWtleS02MjItMDAwMDAwMDAwMDAwMDAwMA=="
-const sqldBootstrapToken = "test-bootstrap-625"
 
 // sqldLiveTables are the tables the suite empties: the machine
 // tables and the tables of the layers the real flow writes.
@@ -59,6 +57,7 @@ type sqldScenario struct {
 	t       *testing.T
 	ctx     context.Context
 	srv     *hub.Server
+	auth    *accounts.Auth
 	svc     *Service
 	clock   *sqldClock
 	genMS   int64
@@ -85,10 +84,9 @@ func freshSQldScenario(t *testing.T, st store.Store) *sqldScenario {
 		t.Fatalf("the session key of the suite: %v", err)
 	}
 	auth, err := accounts.New(accounts.Config{
-		Store:          accounts.NewSQL(st),
-		SessionKey:     sessionKey,
-		BootstrapToken: sqldBootstrapToken,
-		Now:            clock.Now,
+		Store:      accounts.NewSQL(st),
+		SessionKey: sessionKey,
+		Now:        clock.Now,
 	})
 	if err != nil {
 		t.Fatalf("accounts.New: %v", err)
@@ -117,13 +115,14 @@ func freshSQldScenario(t *testing.T, st store.Store) *sqldScenario {
 		t:       t,
 		ctx:     ctx,
 		srv:     srv,
+		auth:    auth,
 		svc:     svc,
 		clock:   clock,
 		genMS:   sqldBaseTime.UnixMilli() + 1,
 		userIDs: map[string]string{},
 		cookies: map[string]string{},
 	}
-	ownerID, ownerCookie := s.bootstrap("owner", "owner@example.test")
+	ownerID, ownerCookie := s.seedOwner("owner", "owner@example.test")
 	s.ownerID = ownerID
 	s.userIDs["owner"] = ownerID
 	s.cookies["owner"] = ownerCookie
@@ -162,17 +161,20 @@ func (s *sqldScenario) do(method, path, cookie string, body any, authHeader stri
 	return resp
 }
 
-// bootstrap creates the owner through the real bootstrap.
-func (s *sqldScenario) bootstrap(name, email string) (string, string) {
+// seedOwner seeds the owner through the store and logs in through the
+// route, returning the user id and the session cookie.
+func (s *sqldScenario) seedOwner(name, email string) (string, string) {
 	s.t.Helper()
-	resp := s.do("POST", "/api/bootstrap", "", map[string]string{
-		"token":    sqldBootstrapToken,
-		"name":     name,
+	const pass = "owner-password-12345"
+	if err := s.auth.SeedOwner(s.ctx, name, email, pass); err != nil {
+		s.t.Fatalf("seed the owner: %v", err)
+	}
+	resp := s.do("POST", "/api/session", "", map[string]string{
 		"email":    email,
-		"password": "bootstrap-password-1",
+		"password": pass,
 	}, "")
-	if resp.Status != http.StatusCreated {
-		s.t.Fatalf("bootstrap: %d %s, want 201", resp.Status, resp.Body)
+	if resp.Status != http.StatusOK {
+		s.t.Fatalf("owner login: %d %s, want 200", resp.Status, resp.Body)
 	}
 	return s.userIDOf(resp), s.cookieOf(resp)
 }

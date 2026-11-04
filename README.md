@@ -44,7 +44,8 @@ Every command prints exactly one JSON line on stdout and its diagnostics on stde
 - `agent run [--interval <duration>] [--hc-bin <bin>]` — run the machine agent: it reads the soho inventory on the period (default `15s`, `5s` to `30s`) and delivers it to the hub from `hub.json`; the machine key stays in the `Authorization` header. A bad usage or a missing `hub.json` exits `2`; a revoked key exits `4`.
 - `config get|set|list` — manage the machine configuration. `config set [--if-automatic] <key> <value>`.
 - `doctor` — print the status line: the version, the config directory, the machine label and the soho backend block (read-only).
-- `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`); behind a proxy, the client address of the pairing API can be taken from a trusted header named by `NAU_HUB_CLIENT_IP_HEADER` (otherwise the hub uses the connection address, which the CLI overwrites to prevent spoofing).
+- `hub serve [--listen <host:port>] [--web <dir>]` — the central hub server: the health and version API and the static files, with the store in the remote database named by `NAU_HUB_DB_URL` (the optional token in `NAU_HUB_DB_TOKEN`); behind a proxy, the client address of the pairing API can be taken from a trusted header named by `NAU_HUB_CLIENT_IP_HEADER` (otherwise the hub uses the connection address, which the CLI overwrites to prevent spoofing); on the empty database it seeds the initial owner from `NAU_HUB_OWNER_NAME`, `NAU_HUB_OWNER_EMAIL` and `NAU_HUB_OWNER_PASSWORD` (the variables are ignored once a user exists), and `NAU_HUB_ROOT_TOKEN` (at least 32 characters when set) opens the password recovery route, which is reachable only directly from the loopback.
+- `hub recover --url <url>` — recover the account access of a running hub from the machine's own loopback: it reads the root token and the new password from stdin, one per line, and never prints either value; the hub answers the 404 of an unknown route when it runs without the root token, the token is wrong, or the request is not its loopback.
 - `GET /api/live` — the board version of the signed-in developer (32 hex characters) as `{"version":...}`, the polling path of a hub without streaming; it is computed from fresh reads of the database, with `Cache-Control: no-store`.
 - `GET /api/events` — the Server-Sent Events stream of the board: one `board` event with the new version whenever what the developer can see changes, a ping every 15 s, a reconnect with the `Last-Event-ID`, and the limits of 256 streams per process (503) and 8 per user (429).
 - `connect <hub-url> [--name <nome>]` — connect this machine to the hub: it requests a pairing, shows the short code on stderr, polls the confirmation and stores the machine key in `hub.json` of the config directory (the name defaults to `machine_label`); the key never reaches the output or a log.
@@ -82,10 +83,11 @@ The secrets always come from the environment, never from the image. The environm
 - `NAU_HUB_DB_URL` — the URL of the sqld database the hub reads and writes.
 - `NAU_HUB_DB_TOKEN` — the token for that database.
 - `NAU_HUB_SESSION_KEY` — the key that signs the session cookies.
-- `NAU_HUB_BOOTSTRAP_TOKEN` — the token that bootstraps the first account.
+- `NAU_HUB_OWNER_NAME`, `NAU_HUB_OWNER_EMAIL` and `NAU_HUB_OWNER_PASSWORD` — the seed of the initial owner, applied by `hub serve` once, on the empty database, and ignored from then on.
+- `NAU_HUB_ROOT_TOKEN` — the token of the password recovery route: the reset is the root token plus the new password, over the loopback only.
 - `NAU_HUB_CRON_TOKEN` — the token that authorizes the cron routes.
 
-Today `hub serve` reads `NAU_HUB_DB_URL` and `NAU_HUB_DB_TOKEN` from that list; the remaining variables are read by the hub's account and cron surfaces as they land.
+Today `hub serve` reads `NAU_HUB_DB_URL`, `NAU_HUB_DB_TOKEN`, `NAU_HUB_SESSION_KEY`, the owner variables and `NAU_HUB_ROOT_TOKEN` from that list; `NAU_HUB_CRON_TOKEN` is read by the hub's cron surface as it lands.
 
 The tagged integration suites of the hub packages run against a real sqld named by `NAU_TEST_SQLD_URL` and skip when it is empty:
 
@@ -94,6 +96,27 @@ NAU_TEST_SQLD_URL=<url> go test -tags sqld ./internal/hub/...
 ```
 
 They share the instance's default database and serialize themselves: the helper in `internal/hub/hubtest` takes a per-database lock, reinitializes the schema for each suite and holds the lock for the whole test, so the suites run without `-p 1`.
+
+## Password recovery
+
+The recovery is the route `POST /api/session/root-token`, enabled when the hub runs with `NAU_HUB_ROOT_TOKEN` set, and it is reachable only directly from the loopback of the hub: a request that crosses a proxy, including a forwarding header, gets the 404 of an unknown route.
+
+From the machine that runs the hub, or through a port-forward to it, the exit is the command `nau hub recover`:
+
+```text
+kubectl port-forward <pod> 7440:7440
+nau hub recover --url http://127.0.0.1:7440
+```
+
+The command reads two lines on stdin: the root token, then the new password. Read them typed, without echo, and hand them over without passing them through the command line:
+
+```text
+read -rs token
+read -rs newpass
+printf '%s\n%s\n' "$token" "$newpass" | nau hub recover --url http://127.0.0.1:7440
+```
+
+The success prints one JSON line with the e-mail of the owner. The token and the password never appear on the output, on any path, and a terminal stdin is refused so the typed text is never echoed.
 
 ## Status
 

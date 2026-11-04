@@ -16,6 +16,12 @@ Every endpoint below needs a session (`GET /api/session`), and it answers 401 `{
   - 204 with a new session cookie; every other session of the user ends;
   - 401 when `current` is wrong;
   - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes.
+- **`POST /api/session/root-token`:** body `{"token":"...","new":"..."}`. The password recovery, enabled when the hub runs with the root token set. It exists only over the loopback: a request that reaches the hub through a proxy, including a forwarding header, answers the 404 of an unknown route. Answers:
+  - 200 with the same body as `GET`, and the server sets the session cookie; every other session of the owner ends;
+  - 401 `{"error":"invalid_token"}` when `token` is wrong;
+  - 400 `{"error":"weak_password"}` when `new` is not 12 to 128 bytes;
+  - 409 `{"error":"no_owner"}` when no account exists yet;
+  - 404 `{"error":"not_found"}` when the hub runs without the root token, or the connection is not the loopback.
 
 Every `POST`, `PUT` and `DELETE` under `/api/` needs `Content-Type: application/json`, and answers 415 `{"error":"unsupported_media_type"}` without it.
 

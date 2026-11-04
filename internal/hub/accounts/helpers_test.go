@@ -33,19 +33,19 @@ func (r *deterministicReader) Read(p []byte) (int, error) {
 }
 
 // newAuth builds an Auth over the given store with the deterministic
-// clock and a fresh seed.
-func newAuth(t *testing.T, st AccountStore, bootstrapToken string) *Auth {
+// clock, the given root token and a fresh seed.
+func newAuth(t *testing.T, st AccountStore, rootToken string) *Auth {
 	t.Helper()
 	key := make([]byte, 32)
 	for i := range key {
 		key[i] = byte(i + 7)
 	}
 	a, err := New(Config{
-		Store:          st,
-		SessionKey:     key,
-		BootstrapToken: bootstrapToken,
-		Now:            fixedNow,
-		Rand:           &deterministicReader{bytes: make([]byte, 1024)},
+		Store:      st,
+		SessionKey: key,
+		RootToken:  rootToken,
+		Now:        fixedNow,
+		Rand:       &deterministicReader{bytes: make([]byte, 1024)},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -1,11 +1,12 @@
 // Package accounts implements the hub accounts: the initial owner
-// from a one-time environment token, the owner-issued invites, the
-// e-mail/password login and the signed session cookies. The storage is
-// the AccountStore interface (one SQL implementation and one in-memory
+// seeded from the environment on an empty database, the root-token
+// password recovery, the owner-issued invites, the e-mail/password
+// login and the signed session cookies. The storage is the
+// AccountStore interface (one SQL implementation and one in-memory
 // one for the tests); the time and the randomness come from the
 // configuration, so the tests are deterministic. No secret reaches a
-// log, an error or a response: the password hashes, the session key and
-// the bootstrap token are internal values only.
+// log, an error or a response: the password hashes, the session key
+// and the root token are internal values only.
 package accounts
 
 import (

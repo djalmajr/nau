@@ -64,10 +64,10 @@ const (
 // ip of the connection (the RemoteAddr without the port): the
 // machines layer reads it as the client of the creation limit when
 // no trusted proxy header is configured or the configured one is
-// absent or invalid. The adapter overwrites the value the client
-// sends, so the header cannot be spoofed to claim a foreign
-// connection.
-const RemoteIPHeader = "X-Nau-Remote-IP"
+// absent or invalid. It aliases the hub constant, which the accounts
+// layer reads too; the adapter overwrites the value the client sends,
+// so the header cannot be spoofed to claim a foreign connection.
+const RemoteIPHeader = hub.RemoteIPHeader
 
 // Machine is one machine of the hub. KeyHash is the SHA-256 of the
 // random key; the key itself was returned once, at the pairing

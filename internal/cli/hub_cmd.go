@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,9 +34,12 @@ const (
 	hubEnvDBToken      = "NAU_HUB_DB_TOKEN"
 	hubEnvCronToken    = "NAU_HUB_CRON_TOKEN"
 	hubEnvSessionKey   = "NAU_HUB_SESSION_KEY"
-	hubEnvBootstrapTok = "NAU_HUB_BOOTSTRAP_TOKEN"
+	hubEnvOwnerName    = "NAU_HUB_OWNER_NAME"
+	hubEnvOwnerEmail   = "NAU_HUB_OWNER_EMAIL"
+	hubEnvOwnerPass    = "NAU_HUB_OWNER_PASSWORD"
+	hubEnvRootToken    = "NAU_HUB_ROOT_TOKEN"
 	hubEnvClientIPHdr  = "NAU_HUB_CLIENT_IP_HEADER"
-	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>]"
+	hubUsage           = "usage: hub serve [--listen <host:port>] [--web <dir>] | hub recover --url <url>"
 )
 
 // newHubStore builds the hub store over the sqld URL; the tests replace
@@ -87,13 +92,76 @@ var hubServeContext = func() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
-// cmdHub runs the hub commands; serve is the hub server.
+// seedOwnerOfEmptyHub seeds the initial owner of the empty database,
+// without a session. It returns the exit code: 0 when the hub may
+// start, 2 when an owner variable is missing, empty or fails the
+// password policy (the stderr line names the variable, never the
+// value), and 4 when the database does not answer the count or the
+// seed. With a user already created the owner variables are ignored
+// and the warnings say so on stderr, the same way it says when there
+// is no root token and no way to recover the access of an existing
+// account. A seed that lost the race to another instance counts as
+// the success.
+func seedOwnerOfEmptyHub(env Env, auth *accounts.Auth, st store.Store, ctx context.Context) int {
+	acc := accounts.NewSQL(st)
+	count, err := acc.CountUsers(ctx)
+	if err != nil {
+		fail(env, 4, "hub serve: the user count: "+err.Error())
+		return 4
+	}
+	if count > 0 {
+		if env.Getenv(hubEnvOwnerName) != "" || env.Getenv(hubEnvOwnerEmail) != "" || env.Getenv(hubEnvOwnerPass) != "" {
+			_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: %s, %s and %s are ignored while a user already exists\n",
+				env.program(), hubEnvOwnerName, hubEnvOwnerEmail, hubEnvOwnerPass)
+		}
+		if env.Getenv(hubEnvRootToken) == "" {
+			_, _ = fmt.Fprintf(env.Stderr, "%s: hub serve: %s is not set: there is no way to reset the password of an existing account\n",
+				env.program(), hubEnvRootToken)
+		}
+		return 0
+	}
+	name := strings.TrimSpace(env.Getenv(hubEnvOwnerName))
+	if name == "" {
+		fail(env, 2, "hub serve: "+hubEnvOwnerName+" is required")
+		return 2
+	}
+	email := strings.TrimSpace(env.Getenv(hubEnvOwnerEmail))
+	if email == "" {
+		fail(env, 2, "hub serve: "+hubEnvOwnerEmail+" is required")
+		return 2
+	}
+	pass := env.Getenv(hubEnvOwnerPass)
+	if pass == "" {
+		fail(env, 2, "hub serve: "+hubEnvOwnerPass+" is required")
+		return 2
+	}
+	if !accounts.PolicyOK(pass) {
+		fail(env, 2, "hub serve: "+hubEnvOwnerPass+" must be 12 to 128 bytes")
+		return 2
+	}
+	if err := auth.SeedOwner(ctx, name, email, pass); err != nil && !errors.Is(err, accounts.ErrOwnerExists) {
+		fail(env, 4, "hub serve: the owner seed: "+err.Error())
+		return 4
+	}
+	return 0
+}
+
+// cmdHub runs the hub commands: serve is the hub server and recover
+// is the password recovery against a running hub.
 func cmdHub(args []string, env Env) int {
-	if len(args) == 0 || args[0] != "serve" {
+	if len(args) == 0 {
 		badUsage(env, hubUsage)
 		return 2
 	}
-	return cmdHubServe(args[1:], env)
+	switch args[0] {
+	case "serve":
+		return cmdHubServe(args[1:], env)
+	case "recover":
+		return cmdHubRecover(args[1:], env)
+	default:
+		badUsage(env, hubUsage)
+		return 2
+	}
 }
 
 // cmdHubServe runs the hub server: it applies the migrations first,
@@ -167,7 +235,15 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 2, "hub serve: "+hubEnvSessionKey+" must be base64 of at least 32 bytes")
 		return 2
 	}
-	bootstrapToken := env.Getenv(hubEnvBootstrapTok)
+	// The root token opens the password recovery route; when it is
+	// defined it must be long enough to be unguessable. The error
+	// names the variable only, never the value, and exits before the
+	// connection opens, with the other environment validations.
+	rootToken := env.Getenv(hubEnvRootToken)
+	if rootToken != "" && len(rootToken) < 32 {
+		fail(env, 2, "hub serve: "+hubEnvRootToken+" must be at least 32 characters")
+		return 2
+	}
 	st, err := newHubStore(dbURL, token)
 	if err != nil {
 		fail(env, 2, "hub serve: "+err.Error())
@@ -181,20 +257,37 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 4, "hub serve: migrations: "+err.Error())
 		return 4
 	}
-	migCancel()
 	// The accounts are over the same store; the clock and the
 	// randomness are the production ones. A bad session key never
-	// reaches here: New only fails on a key shorter than 32 bytes.
+	// reaches here: New only fails on a key shorter than 32 bytes. The
+	// recovery lines go to stderr through the log writer.
 	auth, err := accounts.New(accounts.Config{
 		Store:          accounts.NewSQL(st),
 		SessionKey:     sessionKey,
-		BootstrapToken: bootstrapToken,
+		RootToken:      rootToken,
+		ClientIPHeader: env.Getenv(hubEnvClientIPHdr),
+		Log:            env.Stderr,
 		Now:            env.Now,
 	})
 	if err != nil {
+		migCancel()
 		fail(env, 2, "hub serve: "+hubEnvSessionKey+" must be base64 of at least 32 bytes")
 		return 2
 	}
+	// The initial owner: on the empty database the hub seeds it from
+	// the NAU_HUB_OWNER_* variables, without a session; with a user
+	// already there the variables are ignored and the stderr says so,
+	// the same way it says when there is no root token and no way to
+	// recover the access of an existing account. The count and the
+	// seed are the database work here: a failure exits 4, a missing
+	// or invalid variable exits 2 naming the variable, never the
+	// value, and losing the seed race to another instance is the
+	// success.
+	if code := seedOwnerOfEmptyHub(env, auth, st, migCtx); code != 0 {
+		migCancel()
+		return code
+	}
+	migCancel()
 	// The machine connect is over the same store: the sessions it
 	// reads are the accounts' sessions, and the inventories apply
 	// through the hub store. The client of the creation limit is the
@@ -271,6 +364,10 @@ func cmdHubServe(args []string, env Env) int {
 	// before it sets its own, so the header cannot be spoofed to claim
 	// a foreign connection.
 	inner := httpserve.WithEvents(httpserve.New(srvHub), liveEvents)
+	ctx, cancel := hubServeContext()
+	defer cancel()
+	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
+
 	srv := httpserve.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del(machines.RemoteIPHeader)
 		if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
@@ -278,10 +375,6 @@ func cmdHubServe(args []string, env Env) int {
 		}
 		inner.ServeHTTP(w, r)
 	}))
-	_, _ = fmt.Fprintf(env.Stdout, `{"status":"serving","listen":%q}`+"\n", ln.Addr().String())
-
-	ctx, cancel := hubServeContext()
-	defer cancel()
 	errCh := make(chan error, 1)
 	serving = true
 	go func() {

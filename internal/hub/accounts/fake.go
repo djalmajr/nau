@@ -8,7 +8,7 @@ import (
 )
 
 // Memory is the in-memory AccountStore of the tests: it mirrors the
-// SQL semantics (the unique e-mail, the hub_meta bootstrap guard,
+// SQL semantics (the unique e-mail, the hub_meta owner seed guard,
 // the attempt reservation under the two limits, the conditional
 // session create, the auth-version condition of the password change
 // and the atomic invite accept) with a mutex, so the scenarios of
@@ -25,7 +25,7 @@ type Memory struct {
 	invites      map[string]Invite     // by id
 	invitesByTok map[string]Invite     // by token_hash
 	failures     map[string][]int64    // by email_norm
-	bootstrapped bool
+	seeded       bool
 }
 
 // NewMemory builds the empty in-memory account store.
@@ -46,20 +46,34 @@ func (m *Memory) CountUsers(context.Context) (int, error) {
 	return len(m.users), nil
 }
 
-func (m *Memory) BootstrapOwner(_ context.Context, u User, sr SessionRow) error {
+// SeedOwner creates the initial owner, without a session, only while
+// no user exists: the guard and the write run under the same lock that
+// reads the state, like the atomic batch of the SQL.
+func (m *Memory) SeedOwner(_ context.Context, u User) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.bootstrapped {
-		return fmt.Errorf("accounts: %w", ErrAlreadyBootstrapped)
+	if m.seeded {
+		return fmt.Errorf("accounts: %w", ErrOwnerExists)
 	}
 	if _, taken := m.users[u.EmailNorm]; taken {
 		return fmt.Errorf("accounts: %w", ErrEmailTaken)
 	}
-	m.bootstrapped = true
+	m.seeded = true
 	m.users[u.EmailNorm] = u
 	m.usersByID[u.ID] = u
-	m.sessions[sr.TokenSHA] = sr
 	return nil
+}
+
+// FindOwner returns the owner, the only account with the owner role.
+func (m *Memory) FindOwner(_ context.Context) (User, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, u := range m.users {
+		if u.Role == RoleOwner {
+			return u, true, nil
+		}
+	}
+	return User{}, false, nil
 }
 
 // ReserveAttempt reserves one attempt while both budgets have room,
