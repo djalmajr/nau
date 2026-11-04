@@ -33,6 +33,20 @@ describe("settings: account", () => {
   });
 });
 
+describe("settings: page width", () => {
+  it("fills the page width and limits only the password fields", async () => {
+    renderHubApp("/settings");
+    await screen.findByRole("heading", { name: "Trocar senha" });
+
+    // O contêiner da página não tem restrição de largura (cartões em largura cheia)
+    expect(document.querySelector(".max-w-2xl")).toBeNull();
+    // Só os campos do formulário de senha ficam limitados
+    for (const field of ["Senha atual", "Nova senha", "Confirmar nova senha"]) {
+      expect((screen.getByLabelText(field) as HTMLInputElement).closest(".max-w-md")).not.toBeNull();
+    }
+  });
+});
+
 describe("settings: change password", () => {
   it("changes the password and confirms with a message", async () => {
     const user = userEvent.setup();

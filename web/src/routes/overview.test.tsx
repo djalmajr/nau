@@ -14,7 +14,7 @@ async function loadOverview() {
 }
 
 describe("overview", () => {
-  it("shows the numbers, the waiting list, the machines, the 24 bars and the projects", async () => {
+  it("shows the numbers, the waiting list, the machines, the working chart and the projects", async () => {
     renderHubApp("/");
     await loadOverview();
 
@@ -28,6 +28,8 @@ describe("overview", () => {
     expect(stats[3]).toHaveTextContent("3");
     expect(stats[4]).toHaveTextContent("2 de 3");
     expect(stats[5]).toHaveTextContent("2");
+    // "Precisa de você" acima de zero destaca o número em text-primary
+    expect(stats[0].className).toContain("text-primary");
 
     // Esperando por você: duas entradas, a mais antiga primeiro
     const waitingCard = screen
@@ -45,14 +47,14 @@ describe("overview", () => {
     const pcCard = within(machines).getByText("pc").closest('[data-slot="card"]');
     expect(pcCard).toHaveTextContent("offline");
 
-    // 24 barras com valor acessível em cada uma (o máximo é 3)
-    const bars = screen.getAllByRole("img");
-    expect(bars).toHaveLength(24);
-    expect(bars.some((bar) => bar.getAttribute("aria-label")?.includes("3 trabalhando"))).toBe(
-      true,
-    );
-    // Rótulo da hora no início, no meio e no fim
-    expect(screen.getAllByText(/^\d{2}:\d{2}$/)).toHaveLength(3);
+    // Gráfico das últimas 24 h: o ChartContainer entra no lugar (o SVG das
+    // barras depende de layout e não aparece no jsdom) e a lista acessível
+    // tem 24 itens, com o valor máximo (3)
+    const working = screen.getByRole("region", { name: "Trabalhando nas últimas 24 h" });
+    expect(working.querySelector('[data-slot="chart"]')).not.toBeNull();
+    const items = within(working).getAllByRole("listitem");
+    expect(items).toHaveLength(24);
+    expect(items.some((item) => item.textContent?.includes("3 trabalhando"))).toBe(true);
   });
 
   it("shows the top projects with agents and working counts", async () => {
@@ -80,6 +82,14 @@ describe("overview", () => {
     expect(await screen.findByText("Ninguém esperando por você")).toBeInTheDocument();
     expect(screen.getByText("Nenhuma máquina conectada.")).toBeInTheDocument();
     expect(screen.getByText("Nenhum projeto ativo.")).toBeInTheDocument();
+    // "Precisa de você" em zero: o número fica sem o destaque text-primary
+    const stats = screen.getAllByTestId("stat-value");
+    expect(stats[0].className).not.toContain("text-primary");
+    // Nenhuma hora trabalhando: mensagem vazia no lugar do gráfico
+    expect(screen.getByText("Nenhum agente trabalhando nas últimas 24 h.")).toBeInTheDocument();
+    const working = screen.getByRole("region", { name: "Trabalhando nas últimas 24 h" });
+    expect(working.querySelector('[data-slot="chart"]')).toBeNull();
+    expect(within(working).queryAllByRole("listitem")).toHaveLength(0);
   });
 
   it("shows the error state with retry when the request fails", async () => {
