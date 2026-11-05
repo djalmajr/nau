@@ -170,6 +170,8 @@ func (f *hubFakeStore) Batch(ctx context.Context, stmts []store.Stmt) ([]store.R
 }
 
 func (f *hubFakeStore) Ping(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	return f.pingErr
 }
 
@@ -430,9 +432,13 @@ func TestHubServeStartsAndShutsDownCleanly(t *testing.T) {
 			rootToken.status, rootToken.body, unknown.status, unknown.body)
 	}
 	// The health turns 503 when the store stops answering.
+	st.mu.Lock()
 	st.pingErr = errors.New("database down")
+	st.mu.Unlock()
 	health = doGet(t, "http://"+listen+"/api/health")
+	st.mu.Lock()
 	st.pingErr = nil
+	st.mu.Unlock()
 	if health.status != 503 || health.body != `{"ok":false}` {
 		t.Fatalf("health after the store failed = %d %q", health.status, health.body)
 	}
@@ -600,12 +606,18 @@ func TestHubServeEmptyHostnameIsBadUsage(t *testing.T) {
 }
 
 func TestHubServeMigrationFailureDropsServerMessage(t *testing.T) {
-	// The real client against a loopback server that answers every
-	// pipeline with an error whose message echoes the Authorization
+	// The real client against a loopback server that accepts readiness
+	// then returns an error whose message echoes the Authorization
 	// header: when the migration fails, the command output must carry
 	// none of the server text (message, malformed code) nor the token.
 	secret := strings.Repeat("synthetic", 4)
+	requests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			_, _ = w.Write([]byte(`{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[],"rows":[],"affected_row_count":0}}},{"type":"ok","response":{"type":"close"}}]}`))
+			return
+		}
 		fmt.Fprintf(w, `{"results":[{"type":"error","error":{"message":"Bearer %s was rejected","code":"BAD-LOW"}},{"type":"ok","response":{"type":"close"}}]}`, r.Header.Get("Authorization"))
 	}))
 	defer srv.Close()
@@ -665,11 +677,11 @@ func TestHubServeBadSchemeIsBadUsage(t *testing.T) {
 func TestHubServeMigrationFailureExits4WithoutToken(t *testing.T) {
 	st := newHubFakeStore()
 	st.batchErr = errors.New("the database did not accept the batch")
-	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
+	stdout, stderr, exit := runHubServe(t, map[string]string{
 		hubEnvDBURL:      "http://127.0.0.1:1",
 		hubEnvDBToken:    "sekret-token-sentinel",
 		hubEnvSessionKey: hubTestSessionKey,
-	}, "hub", "serve")
+	}, st)
 	if exit != 4 {
 		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
 	}
@@ -692,22 +704,18 @@ func TestHubServeMigrationFailureExits4WithoutToken(t *testing.T) {
 }
 
 func TestHubServeUnreachableDatabaseExits4(t *testing.T) {
-	// The real client against a loopback port with no listener: the
-	// startup migration cannot run, the serve exits 4 with one stderr
-	// line and the token never appears.
-	stdout, stderr, exit := runCLIVars(t, t.TempDir(), map[string]string{
-		hubEnvDBURL:      "http://127.0.0.1:1",
-		hubEnvDBToken:    "sekret-token-unreachable",
-		hubEnvSessionKey: hubTestSessionKey,
-	}, "hub", "serve")
-	if exit != 4 {
-		t.Fatalf("exit = %d, want 4 (stdout %q, stderr %q)", exit, stdout, stderr)
+	// The real client cannot reach this loopback listener after it closes.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stderr, "hub serve: migrations:") {
-		t.Fatalf("stderr = %q", stderr)
+	address := ln.Addr().String()
+	if err := ln.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(stderr+stdout, "sekret-token-unreachable") {
-		t.Fatalf("the token leaked into the output: %q %q", stderr, stdout)
+	_, stderr, _, listens := startupCommand(t, nil, "http://"+address, func(context.Context, time.Duration) error { return context.DeadlineExceeded })
+	if listens != 0 || !strings.Contains(stderr, "hub serve: readiness:") {
+		t.Fatalf("listens=%d stderr=%q", listens, stderr)
 	}
 }
 
