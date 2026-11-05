@@ -82,3 +82,31 @@ jobs:
         run: |
           go test -race -timeout=30m ./...
           if ($LASTEXITCODE -ne 0) { throw "go test -race failed" }
+
+  integration:
+    name: Real database integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      database:
+        image: ghcr.io/tursodatabase/libsql-server:v0.24.31
+        ports:
+          - 8080/tcp
+    env:
+      GOTOOLCHAIN: auto
+      GOMAXPROCS: 2
+      NAU_TEST_SQLD_URL: http://localhost:${{ job.services.database.ports[8080] }}
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Wait for the database
+        run: |
+          curl --fail --silent --show-error \
+            --retry 30 --retry-connrefused --retry-delay 1 \
+            --retry-max-time 60 --max-time 2 \
+            "$NAU_TEST_SQLD_URL/health"
+      - name: Run the tagged integration suites
+        run: go test -count=1 -timeout=30m -tags sqld ./internal/hub/...
