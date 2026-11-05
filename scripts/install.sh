@@ -122,6 +122,16 @@ agent_print_plist() {
     esc_nau="$(xml_escape "$ABS_BIN_DIR/nau")"
     esc_log="$(xml_escape "$AGENT_LOG")"
     esc_path="$(xml_escape "$AGENT_PATH_ENTRIES")"
+    envvars="<key>PATH</key>
+<string>$esc_path</string>"
+    # XDG_CONFIG_HOME is carried into the service when it is set, so the
+    # service reads the same config directory as the installer; without
+    # it the plist keeps the classic shape.
+    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+        envvars="$envvars
+<key>XDG_CONFIG_HOME</key>
+<string>$(xml_escape "$XDG_CONFIG_HOME")</string>"
+    fi
     cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0">
@@ -146,12 +156,34 @@ agent_print_plist() {
 <string>$esc_log</string>
 <key>EnvironmentVariables</key>
 <dict>
-<key>PATH</key>
-<string>$esc_path</string>
+$envvars
 </dict>
 </dict>
 </plist>
 EOF
+}
+
+# The nau directory under a config root, without a doubled slash, so two
+# spellings of one root compare equal.
+nau_dir_under() {
+    root="$1"
+    while [ "${root%/}" != "$root" ]; do
+        root="${root%/}"
+    done
+    printf '%s/nau\n' "$root"
+}
+
+# The config directory the installed service reads: the XDG_CONFIG_HOME
+# in its plist, or else ~/.config, whatever this run has in its
+# environment. plutil is the one of the system, whatever the PATH of
+# this run holds; it fails only on a plist without that key or that
+# launchd could not load either.
+agent_service_config_dir() {
+    if service_xdg="$(/usr/bin/plutil -extract EnvironmentVariables.XDG_CONFIG_HOME raw -o - "$AGENT_PLIST" 2>/dev/null)" && [ -n "$service_xdg" ]; then
+        nau_dir_under "$service_xdg"
+    else
+        printf '%s/.config/nau\n' "$HOME"
+    fi
 }
 
 # Wait for the agent to write a fresh health file under a wall deadline
@@ -278,20 +310,12 @@ done
 OS="$(uname -s)"
 
 # The config directory the agent command reads hub.json from (the same
-# directory the nau binary resolves): Application Support on macOS,
-# XDG or ~/.config elsewhere.
-case "$OS" in
-Darwin)
-    NAU_CONFIG_DIR="$HOME/Library/Application Support/nau"
-    ;;
-*)
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
-        NAU_CONFIG_DIR="$XDG_CONFIG_HOME/nau"
-    else
-        NAU_CONFIG_DIR="$HOME/.config/nau"
-    fi
-    ;;
-esac
+# directory the nau binary resolves): XDG or ~/.config.
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    NAU_CONFIG_DIR="$(nau_dir_under "$XDG_CONFIG_HOME")"
+else
+    NAU_CONFIG_DIR="$HOME/.config/nau"
+fi
 HUB_FILE="$NAU_CONFIG_DIR/hub.json"
 AGENT_STATE="$NAU_CONFIG_DIR/agent-state.json"
 
@@ -301,6 +325,19 @@ AGENT_STATE="$NAU_CONFIG_DIR/agent-state.json"
 if { [ "$AGENT" -eq 1 ] || [ "$AGENT_DRY_RUN" -eq 1 ] || [ "$REMOVE_AGENT" -eq 1 ]; } && [ "$OS" != "Darwin" ]; then
     echo "nau install: --agent is supported on macOS and Windows only" >&2
     exit 2
+fi
+
+# XDG_CONFIG_HOME is carried into the service environment, so a
+# relative value would point the service at a different directory;
+# refuse it before any step.
+if { [ "$AGENT" -eq 1 ] || [ "$AGENT_DRY_RUN" -eq 1 ]; } && [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    case "${XDG_CONFIG_HOME:-}" in
+    /*) ;;
+    *)
+        echo "nau install: XDG_CONFIG_HOME must be an absolute path" >&2
+        exit 2
+        ;;
+    esac
 fi
 
 # --agent-dry-run prints the plist and exits 0 before the go install,
@@ -369,6 +406,14 @@ if [ "$OS" = "Darwin" ] && [ "$AGENT" -eq 1 ]; then
         agent_install_service
     fi
 elif [ "$OS" = "Darwin" ] && [ -f "$AGENT_PLIST" ]; then
+    # The plist stays as it is, so the service keeps reading its own
+    # directory: the health file to wait for is the one in there, even
+    # when XDG_CONFIG_HOME changed after the service was installed.
+    SERVICE_CONFIG_DIR="$(agent_service_config_dir)"
+    AGENT_STATE="$SERVICE_CONFIG_DIR/agent-state.json"
+    if [ "$SERVICE_CONFIG_DIR" != "$NAU_CONFIG_DIR" ]; then
+        echo "nau install: warning: the agent service reads $SERVICE_CONFIG_DIR, not $NAU_CONFIG_DIR; run the installer with --agent to move it" >&2
+    fi
     agent_restart_service 0
 fi
 

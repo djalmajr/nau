@@ -9,7 +9,9 @@ package scripts_test
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,10 +81,10 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 	cases := []struct {
 		name, config, backend                                  string
 		explicit, missing, failGo, failSet, repeat, unreadable bool
-		// linuxEmptyHome runs with HOME empty (Linux only); noXDG also drops XDG_CONFIG_HOME.
-		linuxEmptyHome, noXDG bool
-		relativeCurrent       bool
-		unsafeKind            string
+		// emptyHome runs with HOME empty (Unix only); noXDG also drops XDG_CONFIG_HOME.
+		emptyHome, noXDG bool
+		relativeCurrent  bool
+		unsafeKind       string
 	}{
 		{name: "no file", missing: true, backend: "soho"},
 		{name: "missing key", config: "# configuration\nmachine_label=node\n", backend: "soho"},
@@ -108,9 +110,9 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 		// and the pin appends the clean record.
 		{name: "ignored BOM key", config: "\ufeffherdr_soho_bin=soho\n", backend: "soho"},
 		{name: "unloadable line", config: "herdr_soho_bin\n", backend: "soho", unreadable: true},
-		// os.UserConfigDir accepts an absolute XDG_CONFIG_HOME without HOME on Linux.
-		{name: "XDG without HOME", missing: true, backend: "soho", linuxEmptyHome: true},
-		{name: "no config dir", missing: true, backend: "soho", linuxEmptyHome: true, noXDG: true},
+		// os.UserConfigDir accepts an absolute XDG_CONFIG_HOME without HOME on Unix.
+		{name: "XDG without HOME", missing: true, backend: "soho", emptyHome: true},
+		{name: "no config dir", missing: true, backend: "soho", emptyHome: true, noXDG: true},
 		{name: "newline path refused", config: "# keep\nmachine_label=original\nherdr_soho_bin=\n", backend: "soho", unsafeKind: "newline"},
 		{name: "writable backend refused", config: "# keep\nmachine_label=original\nherdr_soho_bin=\n", backend: "soho", unsafeKind: "writable"},
 		{name: "relative PATH preserves absolute discovery", missing: true, backend: "soho", relativeCurrent: true},
@@ -120,8 +122,8 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 			if windows && (tc.unsafeKind != "" || tc.relativeCurrent) {
 				t.Skip("POSIX path and mode fixtures; Windows ACL cases are in config tests")
 			}
-			if tc.linuxEmptyHome && (windows || runtime.GOOS != "linux") {
-				t.Skip("an empty HOME only has a defined config directory on Linux")
+			if tc.emptyHome && windows {
+				t.Skip("an empty HOME only has a defined config directory on Unix")
 			}
 			root := filepath.Join(t.TempDir(), "fixture space")
 			home := filepath.Join(root, "home space")
@@ -160,11 +162,10 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 					t.Fatal(err)
 				}
 			}
-			cfgRoot := app
-			if runtime.GOOS == "darwin" {
-				cfgRoot = filepath.Join(home, "Library", "Application Support")
-			}
-			cfgDir := filepath.Join(cfgRoot, "nau")
+			// The env sets XDG_CONFIG_HOME=app (honored on darwin and
+			// linux) and APPDATA=app (windows), so the config root is
+			// app on every OS.
+			cfgDir := filepath.Join(app, "nau")
 			cfgFile := filepath.Join(cfgDir, "config")
 			initial := tc.config
 			if initial == "absolute" {
@@ -194,7 +195,7 @@ func runInstallerPinCases(t *testing.T, shell string, windows bool) {
 				paths = append(paths, "/usr/bin", "/bin", "/usr/sbin", "/sbin")
 			}
 			env := []string{"HOME=" + home, "USERPROFILE=" + home, "APPDATA=" + app, "LOCALAPPDATA=" + local, "XDG_CONFIG_HOME=" + app, "TMPDIR=" + tmp, "TEMP=" + tmp, "TMP=" + tmp, "PATH=" + strings.Join(paths, string(os.PathListSeparator)), "INSTALL_FIXTURE_NAU=" + nau}
-			if tc.linuxEmptyHome {
+			if tc.emptyHome {
 				for i, kv := range env {
 					if strings.HasPrefix(kv, "HOME=") {
 						env[i] = "HOME="
@@ -582,7 +583,7 @@ func TestInstallShAgentDryRun(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(backend, "soho"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	hubFile := filepath.Join(home, "Library", "Application Support", "nau", "hub.json")
+	hubFile := filepath.Join(home, ".config", "nau", "hub.json")
 	plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
 	run := func() (string, int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -653,6 +654,119 @@ func TestInstallShAgentDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".local", "bin")); !os.IsNotExist(err) {
 		t.Fatalf("dry run created the bin directory: %v", err)
+	}
+}
+
+// TestInstallShAgentDryRunXDGConfigHome: on macOS the resolver follows
+// XDG_CONFIG_HOME, so --agent-dry-run carries the variable into the
+// plist (escaped), keeps the classic plist shape when it is unset, and
+// refuses a relative value before any step.
+func TestInstallShAgentDryRunXDGConfigHome(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	plutil, plutilErr := exec.LookPath("plutil")
+	lint := func(t *testing.T, name, plist string) {
+		t.Helper()
+		if plutilErr != nil {
+			t.Logf("plutil not available; skipping the plist lint for %s", name)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, plutil, "-lint", "-")
+		cmd.WaitDelay = time.Second
+		cmd.Stdin = strings.NewReader(plist)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("plutil -lint rejects the %s plist: %v\n%s", name, err, out)
+		}
+	}
+	run := func(env []string) (string, string, int) {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, sh, "install.sh", "--agent-dry-run")
+		cmd.WaitDelay = time.Second
+		cmd.Env = env
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		code := 0
+		if err != nil {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatal(err)
+			}
+			code = exit.ExitCode()
+		}
+		return stdout.String(), stderr.String(), code
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	// The & in the path is hostile input for the plist: it must come
+	// out as the entity and still lint.
+	xdg := filepath.Join(root, "config & xdg")
+	tmp := filepath.Join(root, "temp")
+	for _, dir := range []string{home, xdg, tmp} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hubJSON := []byte(`{"url":"http://127.0.0.1:17440","machine_id":"machine-a","key":"synthetic"}` + "\n")
+	base := []string{
+		"HOME=" + home,
+		"TMPDIR=" + tmp,
+		"PATH=" + strings.Join([]string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+	}
+	// Absolute XDG_CONFIG_HOME with hub.json inside it: the plist
+	// carries the variable, escaped.
+	if err := os.MkdirAll(filepath.Join(xdg, "nau"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "nau", "hub.json"), hubJSON, 0600); err != nil {
+		t.Fatal(err)
+	}
+	withXDG := append(append([]string{}, base...), "XDG_CONFIG_HOME="+xdg)
+	stdout, stderr, code := run(withXDG)
+	if code != 0 {
+		t.Fatalf("dry run with absolute XDG_CONFIG_HOME exit=%d: %s%s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "<key>XDG_CONFIG_HOME</key>") {
+		t.Fatalf("dry run plist lacks the XDG_CONFIG_HOME key:\n%s", stdout)
+	}
+	if want := "<string>" + strings.ReplaceAll(xdg, "&", "&amp;") + "</string>"; !strings.Contains(stdout, want) {
+		t.Fatalf("dry run plist lacks the escaped XDG_CONFIG_HOME value %s:\n%s", want, stdout)
+	}
+	lint(t, "absolute XDG_CONFIG_HOME", stdout)
+	// No XDG_CONFIG_HOME and hub.json in home/.config/nau: the classic
+	// plist shape, without the key.
+	if err := os.MkdirAll(filepath.Join(home, ".config", "nau"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config", "nau", "hub.json"), hubJSON, 0600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code = run(base)
+	if code != 0 {
+		t.Fatalf("dry run without XDG_CONFIG_HOME exit=%d: %s%s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "XDG_CONFIG_HOME") {
+		t.Fatalf("dry run plist carries XDG_CONFIG_HOME though it is unset:\n%s", stdout)
+	}
+	lint(t, "no XDG_CONFIG_HOME", stdout)
+	// Relative XDG_CONFIG_HOME: refused before any step, the exact line
+	// on stderr and nothing on stdout.
+	stdout, stderr, code = run(append(append([]string{}, base...), "XDG_CONFIG_HOME=nau-config"))
+	if code != 2 {
+		t.Fatalf("dry run with relative XDG_CONFIG_HOME exit=%d want=2: %s%s", code, stdout, stderr)
+	}
+	if stderr != "nau install: XDG_CONFIG_HOME must be an absolute path\n" {
+		t.Fatalf("relative XDG refusal stderr=%q", stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("relative XDG refusal wrote to stdout: %s", stdout)
 	}
 }
 
@@ -792,7 +906,7 @@ func TestInstallShAgentRestartOnRerun(t *testing.T) {
 		t.Fatal(err)
 	}
 	trace := filepath.Join(tmp, "launchctl.trace")
-	stateFile := filepath.Join(home, "Library", "Application Support", "nau", "agent-state.json")
+	stateFile := filepath.Join(home, ".config", "nau", "agent-state.json")
 	launchctl := `#!/bin/sh
 echo "launchctl $*" >> "$FAKE_LAUNCHCTL_TRACE"
 case "$1" in
@@ -887,7 +1001,7 @@ esac
 	if err := os.RemoveAll(plistDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.RemoveAll(filepath.Join(home, "Library", "Application Support")); err != nil {
+	if err := os.RemoveAll(filepath.Join(home, ".config")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(trace); err != nil {
@@ -908,6 +1022,189 @@ esac
 	}
 	if !strings.Contains(out, "nau install: installed") {
 		t.Fatalf("the install did not complete:\n%s", out)
+	}
+}
+
+// TestInstallShAgentRerunReadsServiceDir: a re-run without --agent keeps
+// the plist, so it waits for the health file in the directory that plist
+// gives the service, not in the one of its own environment, and warns when
+// the two differ. The plist comes from a real dry run. The directory the
+// service writes to comes from that plist too, through a parser of its own:
+// the fixture never gets told the path the installer expects, and a plutil
+// on the PATH that always fails proves the installer does not rely on it.
+func TestInstallShAgentRerunReadsServiceDir(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau")
+	helper := filepath.Join(buildDir, "helper")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const launchctl = `#!/bin/sh
+case "$1" in
+kickstart | bootstrap)
+    sleep 1.1
+    mkdir -p "$FAKE_LAUNCHCTL_SERVICE_DIR"
+    date > "$FAKE_LAUNCHCTL_SERVICE_DIR/agent-state.json"
+    ;;
+esac
+exit 0
+`
+	cases := []struct {
+		name               string
+		serviceXDG, runXDG string // relative to the fixture root; empty leaves the variable out
+		wantWarning        bool
+	}{
+		{name: "service without XDG, run with it", runXDG: "run & xdg", wantWarning: true},
+		{name: "service with XDG, run without it", serviceXDG: "service & xdg", wantWarning: true},
+		{name: "service and run with different XDG", serviceXDG: "service & xdg", runXDG: "run & xdg", wantWarning: true},
+		{name: "service and run with the same XDG", serviceXDG: "same & xdg", runXDG: "same & xdg"},
+		{name: "the run spells the same XDG with a trailing slash", serviceXDG: "same & xdg", runXDG: "same & xdg/"},
+		{name: "the service spells the same XDG with a trailing slash", serviceXDG: "same & xdg//", runXDG: "same & xdg"},
+		{name: "neither with XDG"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "fixture space")
+			home := filepath.Join(root, "home space")
+			fakeBin := filepath.Join(root, "fake space")
+			goDir := filepath.Join(root, "go space")
+			backendDir := filepath.Join(root, "backend space")
+			tmp := filepath.Join(root, "temp space")
+			bin := filepath.Join(root, "bin space")
+			for _, dir := range []string{home, fakeBin, goDir, backendDir, tmp, bin} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path, data := range map[string][]byte{
+				filepath.Join(goDir, "go"):          helperBytes,
+				filepath.Join(backendDir, "soho"):   helperBytes,
+				filepath.Join(fakeBin, "launchctl"): []byte(launchctl),
+				filepath.Join(fakeBin, "plutil"):    []byte("#!/bin/sh\nexit 1\n"),
+			} {
+				if err := os.WriteFile(path, data, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plist := filepath.Join(home, "Library", "LaunchAgents", "djalmajr.nau.agent.plist")
+			var serviceDirFromPlist string
+			// configDir is the nau directory for an XDG value of the case.
+			configDir := func(xdg string) string {
+				if xdg == "" {
+					return filepath.Join(home, ".config", "nau")
+				}
+				return filepath.Join(root, xdg, "nau")
+			}
+			envFor := func(xdg string) []string {
+				env := []string{
+					"HOME=" + home,
+					"TMPDIR=" + tmp,
+					"TEMP=" + tmp,
+					"TMP=" + tmp,
+					"PATH=" + strings.Join([]string{fakeBin, goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+					"INSTALL_FIXTURE_NAU=" + nau,
+					"FAKE_LAUNCHCTL_SERVICE_DIR=" + serviceDirFromPlist,
+				}
+				if xdg != "" {
+					// Not filepath.Join, which would clean a trailing slash.
+					env = append(env, "XDG_CONFIG_HOME="+root+"/"+xdg)
+				}
+				return env
+			}
+			run := func(xdg string, args ...string) (string, string) {
+				t.Helper()
+				ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, sh, append([]string{"install.sh", "--bin-dir", bin}, args...)...)
+				cmd.WaitDelay = time.Second
+				cmd.Env = envFor(xdg)
+				var stdout, stderr bytes.Buffer
+				cmd.Stdout, cmd.Stderr = &stdout, &stderr
+				if err := cmd.Run(); err != nil {
+					t.Fatalf("install.sh %v: %v\n%s%s", args, err, stdout.String(), stderr.String())
+				}
+				return stdout.String(), stderr.String()
+			}
+			// The service as a real install leaves it.
+			serviceDir := configDir(tc.serviceXDG)
+			if err := os.MkdirAll(serviceDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(serviceDir, "hub.json"), []byte("{}\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			plistContent, _ := run(tc.serviceXDG, "--agent-dry-run")
+			if err := os.MkdirAll(filepath.Dir(plist), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(plist, []byte(plistContent), 0600); err != nil {
+				t.Fatal(err)
+			}
+			serviceDirFromPlist = filepath.Join(home, ".config", "nau")
+			if xdg := plistXDGConfigHome(t, []byte(plistContent)); xdg != "" {
+				serviceDirFromPlist = filepath.Join(xdg, "nau")
+			}
+			runDir := configDir(tc.runXDG)
+			_, stderr := run(tc.runXDG)
+			if !strings.Contains(stderr, "nau install: agent running") {
+				t.Fatalf("the health wait did not see the service:\n%s", stderr)
+			}
+			if _, err := os.Stat(filepath.Join(serviceDir, "agent-state.json")); err != nil {
+				t.Fatalf("the service did not write its health file: %v", err)
+			}
+			warning := "nau install: warning: the agent service reads " + serviceDir + ", not " + runDir + "; run the installer with --agent to move it\n"
+			if got := strings.Contains(stderr, warning); got != tc.wantWarning {
+				t.Fatalf("warning present = %v, want %v; looked for %q in:\n%s", got, tc.wantWarning, warning, stderr)
+			}
+			if !tc.wantWarning && strings.Contains(stderr, "the agent service reads") {
+				t.Fatalf("a warning with the service in its own directory:\n%s", stderr)
+			}
+			after, err := os.ReadFile(plist)
+			if err != nil || !bytes.Equal(after, []byte(plistContent)) {
+				t.Fatalf("the re-run rewrote the plist: %v\n%s", err, after)
+			}
+			if _, err := os.Stat(filepath.Join(bin, "nau")); err != nil {
+				t.Fatalf("the install did not complete: %v", err)
+			}
+		})
+	}
+}
+
+// plistXDGConfigHome returns the value of the XDG_CONFIG_HOME key of a plist,
+// or "" without that key.
+func plistXDGConfigHome(t *testing.T, data []byte) string {
+	t.Helper()
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	var text string
+	afterKey := false
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			return ""
+		}
+		if err != nil {
+			t.Fatalf("the plist does not parse: %v\n%s", err, data)
+		}
+		switch el := tok.(type) {
+		case xml.CharData:
+			text = string(el)
+		case xml.EndElement:
+			switch el.Name.Local {
+			case "key":
+				afterKey = text == "XDG_CONFIG_HOME"
+			case "string":
+				if afterKey {
+					return text
+				}
+			}
+		}
 	}
 }
 

@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -43,6 +46,27 @@ func (env Env) program() string {
 	return ProgramNau
 }
 
+// userConfigRoot returns the directory that holds the nau directory. macOS
+// follows the XDG rule, as Linux does, not the Library directory of
+// os.UserConfigDir; every other system keeps os.UserConfigDir.
+func userConfigRoot(goos string, getenv func(string) string) (string, error) {
+	if goos != "darwin" {
+		return os.UserConfigDir()
+	}
+	xdg := getenv("XDG_CONFIG_HOME")
+	if xdg != "" {
+		if filepath.IsAbs(xdg) {
+			return xdg, nil
+		}
+		return "", fmt.Errorf("XDG_CONFIG_HOME %q is not an absolute path", xdg)
+	}
+	home := getenv("HOME")
+	if home == "" {
+		return "", errors.New("HOME is empty")
+	}
+	return filepath.Join(home, ".config"), nil
+}
+
 // EnvFromOS builds the production Env. When the user config directory
 // cannot be determined, ConfigDir stays empty: Run then refuses every
 // command that needs the config dir with exit 2 instead of silently writing
@@ -57,7 +81,7 @@ func EnvFromOS() Env {
 		Now:     time.Now,
 		Sleep:   sleepCtx,
 	}
-	if cfg, err := os.UserConfigDir(); err == nil && cfg != "" {
+	if cfg, err := userConfigRoot(runtime.GOOS, os.Getenv); err == nil && cfg != "" {
 		env.ConfigDir = filepath.Join(cfg, "nau")
 	}
 	return env
