@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,8 +37,28 @@ func hcRules() []fakesoho.Rule {
 func TestWakerWakeAndBurst(t *testing.T) {
 	hcDir := t.TempDir()
 	hcExe := fakesoho.Install(t, hcDir, hcRules()...)
-	h := newHarness(t, inventoryRules(), ok204, hcExe, nil)
+	firstResponse := make(chan struct{})
+	var releaseResponse sync.Once
+	unblock := func() { releaseResponse.Do(func() { close(firstResponse) }) }
+	defer unblock()
+	h := newHarness(t, inventoryRules(), func(n int) (int, map[string]string) {
+		if n == 1 {
+			select {
+			case <-firstResponse:
+			case <-time.After(15 * time.Second):
+				t.Error("first hub response was not released within 15 s")
+			}
+		}
+		return ok204(n)
+	}, hcExe, nil)
+	// Release before harness cleanup waits for Run or closes the server,
+	// including when a failed assertion ends the test early.
+	t.Cleanup(unblock)
 	h.waitForPosts(t, 1)
+	// Keep the consumer in its first cycle until the complete burst has
+	// coalesced and the reconnect sleep is registered at t0.
+	h.waitForSleep(t, 60*time.Second)
+	unblock()
 	// The burst woke the loop; it takes one extra read after the 2 s
 	// gap, not one per line.
 	h.release(2 * time.Second)
