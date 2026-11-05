@@ -16,12 +16,12 @@ This document is the pre-merge validation checklist and evidence contract for Na
 Check every precondition first and record the exact command, version and output of each. If any prerequisite is missing the validation is `FAIL` or `BLOCKED` and the evidence records why. Make no global search path change.
 
 - Native build of the candidate at the reviewed SHA, built on the development node itself with `go build -o <dir>/nau ./cmd/nau` into a scratch directory. Record `git rev-parse HEAD` and the tree hash, then run `<dir>/nau version` and `<dir>/nau help`. The version output must carry the reviewed SHA. Do not install the binary globally and do not change `PATH` for the whole machine.
-- An isolated test state that does not hide the backend or Git authentication. `nau` keeps its configuration in the `nau` directory under the user configuration directory: on macOS and Linux `$XDG_CONFIG_HOME/nau` or else `$HOME/.config/nau`, on Windows `%AppData%\nau`. Before the first write (the first `nau config set`), record the resolved `nau` path and the non-secret selector values (the operating system, and which of `HOME`, `XDG_CONFIG_HOME` or `AppData` decides the path), and record the listing of the whole config root: `nau` reads only the `nau` directory and never touches any other directory under it, so the listing must be unchanged afterwards. Never relocate `HOME` or the configuration roots, copy credentials or configuration, or silently restore real data afterwards. `herdr_soho_bin` only selects the backend executable. Only after that check, set the machine label with `<dir>/nau config set machine_label <label>`, and read back `<dir>/nau config list`.
+- An isolated test state that does not hide the backend or Git authentication. `nau` keeps its configuration in the `nau` directory under the user configuration directory: on macOS and Linux `$XDG_CONFIG_HOME/nau` or else `$HOME/.config/nau`, on Windows `%AppData%\nau`. Before the first write (the first `nau config set`), record the resolved `nau` path and the non-secret selector values (the operating system, and which of `HOME`, `XDG_CONFIG_HOME` or `AppData` decides the path), and take a sorted listing of the names in the whole config root, into the scratch directory. Record its entry count and SHA-256 hash, never the names: they show what is installed on the machine, and the proof does not need them. `nau` reads only the `nau` directory and never touches any other directory under it, so the listing must be unchanged afterwards, apart from a `nau` entry that did not exist before. Never relocate `HOME` or the configuration roots, copy credentials or configuration, or silently restore real data afterwards. `herdr_soho_bin` only selects the backend executable. Only after that check, set the machine label with `<dir>/nau config set machine_label <label>`, and read back `<dir>/nau config list`.
 
 ## 3. Items
 
 1. Build and version: the `nau version` and `nau help` outputs from the precondition, with their exit codes.
-2. Isolated state: the resolved `nau` path recorded before the first write, and the before and after listing of the config root proving that no directory other than `nau` was touched.
+2. Isolated state: the resolved `nau` path recorded before the first write, the entry count and hash of the config root listing before and after, and the output of `diff` between the two listings, which is empty when nothing changed and otherwise shows only the changed names. This proves that no entry of the config root other than `nau` appeared or disappeared, not that the content of the other directories is the same. Any changed name other than `nau` is `FAIL`.
 3. Config: `nau config set machine_label <label>`, `nau config get machine_label` and `nau config list`, with their outputs and exit codes; the read-back equals the set value, and an old `config` file that carries a key removed from the configuration still reads (a removed key is ignored on read and refused on set).
 4. Doctor: `nau doctor` (read-only, exits 0), with its output and exit code: one JSON line carrying the version, the config directory, the machine label and the soho backend block (the resolved binary and the version the backend reports).
 5. Hub: the candidate binary against a disposable `sqld`, in a temporary directory and on a free port, with synthetic values generated in the run. Record each command with its exit code or HTTP status, never a value of a secret.
@@ -42,7 +42,7 @@ Post the filled-in template, with the real pasted outputs, on the linked trackin
 Reviewed commit SHA:
 Tree hash:
 Native OS and architecture:
-State isolation (resolved nau path, OS, which of HOME / XDG_CONFIG_HOME / AppData decides it, before and after listing of the config root):
+State isolation (resolved nau path, OS, which of HOME / XDG_CONFIG_HOME / AppData decides it, entry count and hash of the config root listing before and after, diff between the two listings):
 
 nau version (command, stdout, exit):
 nau help (first lines and the full output attached):
@@ -67,6 +67,7 @@ Overall result:
 - Stop only the processes the validation started itself, identified by the process ids it recorded when it started them. Never stop, signal or kill anything else.
 - Keep the test `nau` directory and every record in it; removing it is a decision of the owner, taken later by hand. No directory other than the test `nau` directory and the disposable database directory of item 5 is touched by this validation.
 - The disposable database holds only synthetic data: remove its directory after stopping the processes.
+- Remove the config root listings from the scratch directory once the evidence is posted.
 
 ## 6. Test layers
 
