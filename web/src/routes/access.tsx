@@ -59,7 +59,7 @@ export function AccessPage() {
   return (
     <RequireSession>
       <AppShell>
-        <div className="space-y-8">
+        <div className="flex flex-col gap-4">
           <SharingSection machines={data.machines} />
           <MachinesKeysSection machines={data.machines} />
           <CommandsSection />
