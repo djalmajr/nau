@@ -254,9 +254,10 @@ type fakeSleep struct {
 }
 
 type fsleep struct {
-	at time.Time
-	d  time.Duration
-	ch chan struct{}
+	ctx context.Context
+	at  time.Time
+	d   time.Duration
+	ch  chan struct{}
 }
 
 func newFakeSleep(start time.Time) *fakeSleep {
@@ -273,7 +274,7 @@ func (f *fakeSleep) Now() time.Time {
 // Sleep registers d and blocks until the test releases it or ctx ends.
 func (f *fakeSleep) Sleep(ctx context.Context, d time.Duration) error {
 	f.mu.Lock()
-	s := &fsleep{at: f.now, d: d, ch: make(chan struct{})}
+	s := &fsleep{ctx: ctx, at: f.now, d: d, ch: make(chan struct{})}
 	f.pending = append(f.pending, s)
 	f.mu.Unlock()
 	select {
@@ -291,12 +292,13 @@ func (f *fakeSleep) Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// hasPending reports whether a sleep of duration d is registered.
+// hasPending reports whether a live sleep of duration d is registered.
+// Cancellation is visible before the sleeping goroutine removes its entry.
 func (f *fakeSleep) hasPending(d time.Duration) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, s := range f.pending {
-		if s.d == d {
+		if s.d == d && s.ctx.Err() == nil {
 			return true
 		}
 	}
@@ -313,7 +315,7 @@ func (f *fakeSleep) release(d time.Duration, timeout time.Duration) error {
 		var latest time.Time
 		found := 0
 		for _, s := range f.pending {
-			if s.d == d {
+			if s.d == d && s.ctx.Err() == nil {
 				found++
 				if dl := s.at.Add(s.d); dl.After(latest) {
 					latest = dl
@@ -323,7 +325,7 @@ func (f *fakeSleep) release(d time.Duration, timeout time.Duration) error {
 		if found > 0 {
 			kept := f.pending[:0]
 			for _, s := range f.pending {
-				if s.d == d {
+				if s.d == d && s.ctx.Err() == nil {
 					close(s.ch)
 				} else {
 					kept = append(kept, s)
