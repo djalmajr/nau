@@ -12,8 +12,9 @@ import {
   renderHubApp,
   type HubApiState,
 } from "@/test/hub-harness";
+import { AGENTS_QUERY_KEY } from "./queries";
 import { SESSION_QUERY_KEY } from "@/lib/session";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { defaultScheduler, notifyManager, QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import { LiveChannel } from "./live";
 import { liveStatusSnapshot, setLiveStatus } from "./live-status";
@@ -88,7 +89,209 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("session cache subscription", () => {
+  it.each(["remove", "null", "switch", "error"])("rejects old board events before scheduled delivery after %s", async (operation) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    const queue: Array<() => void> = [];
+    notifyManager.setScheduler((callback) => { queue.push(callback); });
+    const view = render(<QueryClientProvider client={queryClient}><LiveChannel /></QueryClientProvider>);
+    const flush = () => { while (queue.length) queue.shift()!(); };
+    const boardKey = AGENTS_QUERY_KEY(TEST_MEMBER.id);
+    try {
+      act(flush);
+      const stream = FakeEventSource.last!;
+      queryClient.setQueryData(boardKey, []);
+      act(() => { stream.dispatch("board", boardData("control")); });
+      expect(queryClient.getQueryState(boardKey)?.isInvalidated).toBe(true);
+      queryClient.setQueryData(boardKey, []);
+      await act(async () => {
+        if (operation === "remove") queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY, exact: true });
+        if (operation === "null") queryClient.setQueryData(SESSION_QUERY_KEY, null);
+        if (operation === "switch") queryClient.setQueryData(SESSION_QUERY_KEY, { ...TEST_MEMBER, id: "other-user" });
+        if (operation === "error") {
+          await expect(queryClient.fetchQuery({
+            queryKey: SESSION_QUERY_KEY,
+            queryFn: async () => { throw new Error("Session unavailable"); },
+          })).rejects.toThrow("Session unavailable");
+        }
+        // Delivery is held, but cache authority must already reject the event.
+        stream.dispatch("board", boardData("delayed"));
+        expect(queryClient.getQueryState(boardKey)?.isInvalidated).toBe(false);
+      });
+      expect(queue.length).toBeGreaterThan(0);
+      act(() => {
+        queryClient.setQueryData(SESSION_QUERY_KEY, null);
+        flush();
+      });
+      expect(stream.isClosed).toBe(true);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      view.unmount();
+      notifyManager.setScheduler(defaultScheduler);
+      queryClient.clear();
+      setLiveStatus("offline");
+    }
+  });
+
+  it("replaces the client subscription and cancels queued delivery after unmount", () => {
+    const first = new QueryClient();
+    const second = new QueryClient();
+    first.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    second.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    const queue: Array<() => void> = [];
+    notifyManager.setScheduler((callback) => { queue.push(callback); });
+    const firstFind = vi.spyOn(first.getQueryCache(), "find");
+    const secondFind = vi.spyOn(second.getQueryCache(), "find");
+    const view = render(<QueryClientProvider client={first}><LiveChannel /></QueryClientProvider>);
+    const flush = () => { while (queue.length) queue.shift()!(); };
+    try {
+      act(flush);
+      const oldStream = FakeEventSource.last!;
+      act(() => { first.setQueryData(SESSION_QUERY_KEY, null); });
+      expect(queue.length).toBeGreaterThan(0);
+      view.rerender(<QueryClientProvider client={second}><LiveChannel /></QueryClientProvider>);
+      expect(oldStream.isClosed).toBe(true);
+      expect(FakeEventSource.instances).toHaveLength(2);
+      expect(first.getQueryCache().hasListeners()).toBe(false);
+      expect(second.getQueryCache().hasListeners()).toBe(true);
+      firstFind.mockClear();
+      act(flush);
+      expect(firstFind).not.toHaveBeenCalled();
+      const currentStream = FakeEventSource.last!;
+      expect(currentStream.isClosed).toBe(false);
+
+      act(() => { second.setQueryData(SESSION_QUERY_KEY, null); });
+      expect(queue.length).toBeGreaterThan(0);
+      view.unmount();
+      expect(currentStream.isClosed).toBe(true);
+      expect(second.getQueryCache().hasListeners()).toBe(false);
+      secondFind.mockClear();
+      act(flush);
+      expect(secondFind).not.toHaveBeenCalled();
+      expect(FakeEventSource.instances).toHaveLength(2);
+      expect(liveStatusSnapshot()).toBe("offline");
+    } finally {
+      view.unmount();
+      notifyManager.setScheduler(defaultScheduler);
+      firstFind.mockRestore();
+      secondFind.mockRestore();
+      first.clear();
+      second.clear();
+      setLiveStatus("offline");
+    }
+  });
+
+  it.each(["clear", "remove", "null", "error"])("closes the stream when the session becomes unavailable via %s", async (operation) => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    const view = render(<QueryClientProvider client={queryClient}><LiveChannel /></QueryClientProvider>);
+    try {
+      const stream = FakeEventSource.last!;
+      expect(stream.isClosed).toBe(false);
+      await act(async () => {
+        if (operation === "clear") queryClient.clear();
+        if (operation === "remove") queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY, exact: true });
+        if (operation === "null") queryClient.setQueryData(SESSION_QUERY_KEY, null);
+        if (operation === "error") {
+          await expect(queryClient.fetchQuery({
+            queryKey: SESSION_QUERY_KEY,
+            queryFn: async () => { throw new Error("Session unavailable"); },
+          })).rejects.toThrow("Session unavailable");
+        }
+      });
+      await waitFor(() => expect(stream.isClosed).toBe(true));
+      expect(liveStatusSnapshot()).toBe("offline");
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      view.unmount();
+      queryClient.clear();
+      setLiveStatus("offline");
+    }
+  });
+
+  it("ignores session-prefixed queries and opens only for the exact session key", async () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData([...SESSION_QUERY_KEY, "other"], TEST_MEMBER);
+    const view = render(<QueryClientProvider client={queryClient}><LiveChannel /></QueryClientProvider>);
+    try {
+      expect(FakeEventSource.instances).toHaveLength(0);
+      act(() => { queryClient.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER); });
+      await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+      act(() => { queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY, exact: true }); });
+      await waitFor(() => expect(FakeEventSource.last!.isClosed).toBe(true));
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      view.unmount();
+      queryClient.clear();
+      setLiveStatus("offline");
+    }
+  });
+
+  it("does not update LiveChannel while a new session observer renders", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(SESSION_QUERY_KEY, TEST_MEMBER);
+    // React deduplicates this warning by the rendering component's name.
+    function SessionObserverMountedAfterLiveChannel() {
+      const { data } = useQuery({
+        queryKey: SESSION_QUERY_KEY,
+        queryFn: async () => TEST_MEMBER,
+        staleTime: Infinity,
+      });
+      return <span>{data?.id}</span>;
+    }
+    const errors = vi.spyOn(console, "error");
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <LiveChannel />
+      </QueryClientProvider>,
+    );
+    try {
+      expect(FakeEventSource.instances).toHaveLength(1);
+      view.rerender(
+        <QueryClientProvider client={queryClient}>
+          <LiveChannel />
+          <SessionObserverMountedAfterLiveChannel />
+        </QueryClientProvider>,
+      );
+      expect(screen.getByText(TEST_MEMBER.id)).toBeInTheDocument();
+      expect(errors.mock.calls.filter(([message]) =>
+        String(message).includes("Cannot update a component"),
+      )).toEqual([]);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      view.unmount();
+      queryClient.clear();
+      errors.mockRestore();
+      setLiveStatus("offline");
+    }
+  });
+});
+
 describe("canal ao vivo do quadro", () => {
+  it("closes the live stream when session refetch returns 401", async () => {
+    const errors = vi.spyOn(console, "error");
+    try {
+      const state = defaultHubState();
+      const { queryClient } = renderHubApp("/agents", state);
+      await screen.findByText("Retry declined cards in the checkout worker");
+      const stream = FakeEventSource.last!;
+      expect(stream.isClosed).toBe(false);
+      state.sessionFail = 401;
+      await act(async () => { await queryClient.refetchQueries({ queryKey: SESSION_QUERY_KEY, exact: true }); });
+      await screen.findByTestId("login-screen");
+      await waitFor(() => expect(stream.isClosed).toBe(true));
+      expect(queryClient.getQueryData(SESSION_QUERY_KEY)).toBeUndefined();
+      expect(liveStatusSnapshot()).toBe("offline");
+      expect(FakeEventSource.instances).toHaveLength(1);
+      expect(errors.mock.calls.filter(([message]) =>
+        String(message).includes("Cannot update a component"),
+      )).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("abre o stream para a conta logada e o status fica 'live'", async () => {
     const state = defaultHubState();
     renderHubApp("/agents", state);

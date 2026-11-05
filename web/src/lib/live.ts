@@ -8,7 +8,7 @@
 // (resposta rejeitada do servidor ou três falhas seguidas), a recaída
 // consulta GET /api/live a cada 15 s e invalida quando a versão muda.
 import * as React from "react";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { notifyManager, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { api, type SessionUser } from "./api";
 import { AGENT_REFRESH_MS, invalidateBoardQueries } from "./queries";
 import { SESSION_QUERY_KEY } from "./session";
@@ -21,37 +21,33 @@ const LIVE_VERSION_QUERY_KEY = (userId: string) => ["live", "version", userId] a
 // Três falhas seguidas do EventSource fecham o stream e ligam a recaída.
 const MAX_CONSECUTIVE_STREAM_FAILURES = 3;
 
-/** A id da sessão como o canal precisa vê-la: lê o estado da query de
- *  sessão no cache e reage a cada evento do cache daquela query. Sem ela,
- *  o canal abriria stream para a conta errada — ou nenhuma — ou deixaria o
- *  stream da conta anterior aberto.
- *
- *  Não usa o observer do `useSession()` como fonte: quando a query é
- *  removida do cache (o `queryClient.clear()` do logout e do 401 central),
- *  o observer congela com o dado antigo e o canal nunca veria a sessão
- *  sumir. A assinatura do cache entrega o evento `removed` e o canal fecha
- *  o stream. Sessão some do cache, muda para outra conta ou a query erra
- *  (401 incluído) → `undefined`: sem sessão, sem stream nesta aba. */
+/** Observe the exact cache entry, including removal, with a stable primitive snapshot.
+ * Query observers can notify the cache during render. Schedule React's listener
+ * through Query's notification manager without delaying authoritative cache reads. */
 function useChannelSession(queryClient: QueryClient): string | undefined {
-  const [, force] = React.useReducer((n: number) => n + 1, 0);
-  React.useEffect(() => {
-    const cache = queryClient.getQueryCache();
-    const unsubscribe = cache.subscribe((event) => {
-      if (!Array.isArray(event.query.queryKey) || event.query.queryKey[0] !== SESSION_QUERY_KEY[0]) return;
-      force();
-    });
-    return unsubscribe;
-  }, [queryClient]);
   const cache = queryClient.getQueryCache();
-  const query = cache.find({ queryKey: SESSION_QUERY_KEY });
-  // A query do cache é genérica: o dado é a sessão (ou ausente) e o erro,
-  // quando existe, é o ApiError do fetch.
-  const data = query?.state.data as SessionUser | null | undefined;
-  const error = query?.state.error;
-  if (data === null || data === undefined || error !== null) {
-    return undefined;
-  }
-  return data.id;
+  const subscribe = React.useCallback((onStoreChange: () => void) => {
+    let active = true;
+    const notify = notifyManager.batchCalls(() => {
+      if (active) onStoreChange();
+    });
+    const unsubscribe = cache.subscribe((event) => {
+      if (event.query.queryKey.length === SESSION_QUERY_KEY.length &&
+          event.query.queryKey[0] === SESSION_QUERY_KEY[0]) {
+        notify();
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [cache]);
+  const getSnapshot = React.useCallback(() => {
+    const query = cache.find<SessionUser | null>({ queryKey: SESSION_QUERY_KEY, exact: true });
+    if (!query || query.state.error !== null) return undefined;
+    return query.state.data?.id;
+  }, [cache]);
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
 /** O canal: montado uma vez pela raiz do app (e pelo harness de teste),
@@ -125,8 +121,9 @@ export function LiveChannel() {
       // handler central de 401 — de modo que um evento atrasado da conta
       // anterior (depois de logout ou de troca de conta) é ignorado, sem
       // vazar dado nem invalidar o quadro errado.
-      const session = queryClient.getQueryData<SessionUser>(SESSION_QUERY_KEY);
-      if (!session || session.id !== userId) return;
+      const sessionState = queryClient.getQueryState<SessionUser | null>(SESSION_QUERY_KEY);
+      const session = sessionState?.data;
+      if (!session || sessionState?.error !== null || session.id !== userId) return;
       if (version === appliedVersion.current) return;
       appliedVersion.current = version;
       // Invalida as queries da sessão atual (que a guarda acima garantiu
