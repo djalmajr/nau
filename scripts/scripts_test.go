@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -983,8 +984,8 @@ esac
 	if !strings.Contains(string(traceData), "kickstart -k gui/") || !strings.Contains(string(traceData), "djalmajr.nau.agent") {
 		t.Fatalf("the restart is missing from the launchctl trace:\n%s", traceData)
 	}
-	if !strings.Contains(out, "nau install: agent running") {
-		t.Fatalf("the fresh health wait did not report the agent running:\n%s", out)
+	if !strings.Contains(out, "nau install: the agent service started; run nau doctor to check delivery") {
+		t.Fatalf("the fresh health wait did not report the service started:\n%s", out)
 	}
 	if _, err := os.Stat(stateFile); err != nil {
 		t.Fatalf("the fresh health file did not appear after the restart: %v", err)
@@ -1153,7 +1154,7 @@ exit 0
 			}
 			runDir := configDir(tc.runXDG)
 			_, stderr := run(tc.runXDG)
-			if !strings.Contains(stderr, "nau install: agent running") {
+			if !strings.Contains(stderr, "nau install: the agent service started; run nau doctor to check delivery") {
 				t.Fatalf("the health wait did not see the service:\n%s", stderr)
 			}
 			if _, err := os.Stat(filepath.Join(serviceDir, "agent-state.json")); err != nil {
@@ -1177,9 +1178,12 @@ exit 0
 	}
 }
 
-// plistXDGConfigHome returns the value of the XDG_CONFIG_HOME key of a plist,
-// or "" without that key.
-func plistXDGConfigHome(t *testing.T, data []byte) string {
+// plistStringAfterKey returns the text of the <string> value that
+// follows the <key> element named key in the plist, or "" and false
+// when the plist parses but carries no such key. It fatals when the
+// plist does not parse, and never reports a value of another key:
+// afterKey is re-tested on every key element.
+func plistStringAfterKey(t *testing.T, data []byte, key string) (string, bool) {
 	t.Helper()
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	var text string
@@ -1187,7 +1191,7 @@ func plistXDGConfigHome(t *testing.T, data []byte) string {
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
-			return ""
+			return "", false
 		}
 		if err != nil {
 			t.Fatalf("the plist does not parse: %v\n%s", err, data)
@@ -1198,13 +1202,319 @@ func plistXDGConfigHome(t *testing.T, data []byte) string {
 		case xml.EndElement:
 			switch el.Name.Local {
 			case "key":
-				afterKey = text == "XDG_CONFIG_HOME"
+				afterKey = text == key
 			case "string":
 				if afterKey {
-					return text
+					return text, true
 				}
 			}
 		}
+	}
+}
+
+// plistXDGConfigHome returns the value of the XDG_CONFIG_HOME key of a plist,
+// or "" without that key.
+func plistXDGConfigHome(t *testing.T, data []byte) string {
+	value, _ := plistStringAfterKey(t, data, "XDG_CONFIG_HOME")
+	return value
+}
+
+// plutilLint lints the generated plist with the system plutil, or logs
+// and skips the lint when plutil is not on the PATH.
+func plutilLint(t *testing.T, plist string) {
+	t.Helper()
+	plutil, err := exec.LookPath("plutil")
+	if err != nil {
+		t.Logf("plutil not available; skipping the plist lint")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, plutil, "-lint", "-")
+	cmd.WaitDelay = time.Second
+	cmd.Stdin = strings.NewReader(plist)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("plutil -lint rejects the plist: %v\n%s", err, out)
+	}
+}
+
+// TestInstallShAgentServicePath: the plist that --agent-dry-run prints
+// gives the service a PATH of the discovered directories only -- the
+// bin dir, the soho dir and the herdr dir, in that order, followed by
+// the system entries -- a shared directory stays once and the rest of
+// the interactive PATH is left out, with a warning when a backend is
+// missing. The fixture paths carry spaces and an XML special character,
+// and the service PATH is read back from the generated plist, never
+// matched in the script text. The relative case names soho and herdr
+// with bare PATH entries and runs the installer from the fixture root
+// under a shell whose command -v answers with a relative pathname, so
+// the persisted directories must be absolute: the service starts from
+// another cwd and must still resolve both executables with the service
+// PATH alone.
+func TestInstallShAgentServicePath(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	// The script path, absolute before the relative case runs the
+	// command from the fixture directory.
+	installPath, err := filepath.Abs("install.sh")
+	if err != nil {
+		t.Fatalf("absolute script path: %v", err)
+	}
+	system := []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	cases := []struct {
+		name         string
+		sohoDir      string // relative to the fixture root; "" leaves soho off the PATH
+		herdrDir     string
+		want         []string // relative to the fixture root, in the service PATH order
+		herdrWarning bool
+		// relative names sohoDir and herdrDir on the PATH as bare
+		// entries, runs the installer from the fixture root under a
+		// shell whose command -v answers with a relative pathname.
+		relative bool
+		cdpath   bool
+	}{
+		{
+			name:     "distinct nau, soho and herdr directories",
+			sohoDir:  "soho space",
+			herdrDir: "herdr & space",
+			want:     []string{"bin space", "soho space", "herdr & space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+		{
+			name:     "soho and herdr share a directory",
+			sohoDir:  "shared space",
+			herdrDir: "shared space",
+			want:     []string{"bin space", "shared space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+		{
+			name:     "soho in the bin directory",
+			sohoDir:  "bin space",
+			herdrDir: "herdr space",
+			want:     []string{"bin space", "herdr space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+		{
+			name:         "herdr missing",
+			sohoDir:      "soho space",
+			herdrDir:     "",
+			want:         []string{"bin space", "soho space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+			herdrWarning: true,
+		},
+		{
+			name:     "soho missing",
+			sohoDir:  "",
+			herdrDir: "herdr space",
+			want:     []string{"bin space", "herdr space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+		{
+			name:     "relative soho and herdr PATH entries stay absolute in the plist",
+			sohoDir:  "rel soho space",
+			herdrDir: "rel herdr & space",
+			relative: true,
+			want:     []string{"bin space", "rel soho space", "rel herdr & space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+		{
+			name:     "relative entries ignore exported CDPATH",
+			sohoDir:  "rel soho space",
+			herdrDir: "rel herdr & space",
+			relative: true,
+			cdpath:   true,
+			want:     []string{"bin space", "rel soho space", "rel herdr & space", "/usr/bin", "/bin", "/usr/sbin", "/sbin"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// dash answers command -v with a relative pathname when
+			// the PATH entry is relative: the class the service PATH
+			// must survive.
+			shell := sh
+			if tc.relative {
+				dash, err := exec.LookPath("dash")
+				if err != nil {
+					t.Skip("dash is not available; the relative PATH case needs a shell whose command -v answers with a relative pathname")
+				}
+				shell = dash
+			}
+			root := t.TempDir()
+			home := filepath.Join(root, "home space")
+			tmp := filepath.Join(root, "temp space")
+			bin := filepath.Join(root, "bin space")
+			extra := filepath.Join(root, "extra space")
+			dirs := map[string]bool{home: true, tmp: true, bin: true, extra: true}
+			if tc.sohoDir != "" {
+				dirs[filepath.Join(root, tc.sohoDir)] = true
+			}
+			if tc.herdrDir != "" {
+				dirs[filepath.Join(root, tc.herdrDir)] = true
+			}
+			for dir := range dirs {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// hub.json, so the dry run prints the plist.
+			if err := os.MkdirAll(filepath.Join(home, ".config", "nau"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, ".config", "nau", "hub.json"), []byte(`{"url":"http://localhost:17440","machine_id":"machine-a","key":"synthetic"}`+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			// The fixture binaries the installer discovers on the PATH.
+			if tc.sohoDir != "" {
+				if err := os.WriteFile(filepath.Join(root, tc.sohoDir, "soho"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.herdrDir != "" {
+				if err := os.WriteFile(filepath.Join(root, tc.herdrDir, "herdr"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The interactive PATH the installer sees: the discovery
+			// dirs, a dir the service PATH must not copy, and the
+			// system dirs. The relative case names the discovery
+			// dirs as bare entries, resolved against the installer's
+			// cwd, the way a user PATH entry can be relative.
+			var paths []string
+			if tc.sohoDir != "" {
+				if tc.relative {
+					paths = append(paths, tc.sohoDir)
+				} else {
+					paths = append(paths, filepath.Join(root, tc.sohoDir))
+				}
+			}
+			if tc.herdrDir != "" {
+				if tc.relative {
+					paths = append(paths, tc.herdrDir)
+				} else {
+					paths = append(paths, filepath.Join(root, tc.herdrDir))
+				}
+			}
+			paths = append(paths, extra)
+			paths = append(paths, system...)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, shell, installPath, "--bin-dir", bin, "--agent-dry-run")
+			cmd.WaitDelay = time.Second
+			if tc.relative {
+				cmd.Dir = root
+			}
+			cmd.Env = []string{
+				"HOME=" + home,
+				"TMPDIR=" + tmp,
+				"PATH=" + strings.Join(paths, ":"),
+			}
+			if tc.cdpath {
+				// A navigation preference must not redirect executable discovery.
+				for _, name := range []string{tc.sohoDir, tc.herdrDir} {
+					if err := os.MkdirAll(filepath.Join(extra, name), 0700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cmd.Env = append(cmd.Env, "CDPATH="+extra+":"+root)
+			}
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			if err := cmd.Run(); err != nil {
+				out := stdout.String() + stderr.String()
+				if ctx.Err() != nil {
+					t.Fatalf("dry run did not finish within the bound: %s", out)
+				}
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatalf("dry run failed: %v\n%s", err, out)
+				}
+				t.Fatalf("dry run exit=%d want=0:\n%s", exit.ExitCode(), out)
+			}
+			// The service PATH read back from the generated plist,
+			// never matched in the script text.
+			servicePath, ok := plistStringAfterKey(t, []byte(stdout.String()), "PATH")
+			if !ok {
+				t.Fatalf("the dry run plist carries no PATH entry:\n%s", stdout.String())
+			}
+			want := make([]string, len(tc.want))
+			for i, entry := range tc.want {
+				if strings.HasPrefix(entry, "/") {
+					want[i] = entry
+				} else {
+					want[i] = filepath.Join(root, entry)
+				}
+			}
+			// A symlinked fixture root canonicalizes to a different
+			// spelling of the same directory; compare canonical forms.
+			// An unresolvable answer (for example a relative one) is
+			// kept as is, so it can never equal a canonical absolute
+			// want entry.
+			canonical := func(p string) string {
+				c, err := filepath.EvalSymlinks(p)
+				if err != nil {
+					return p
+				}
+				return c
+			}
+			plutilLint(t, stdout.String())
+			if tc.relative {
+				// The service starts from another cwd: with the
+				// service PATH alone, both fixture executables must
+				// still resolve there.
+				elsewhere := filepath.Join(root, "elsewhere space")
+				if err := os.MkdirAll(elsewhere, 0700); err != nil {
+					t.Fatal(err)
+				}
+				resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer resolveCancel()
+				resolve := exec.CommandContext(resolveCtx, shell, "-c", "command -v soho && command -v herdr")
+				resolve.WaitDelay = time.Second
+				resolve.Dir = elsewhere
+				resolve.Env = []string{
+					"HOME=" + home,
+					"TMPDIR=" + tmp,
+					"PATH=" + servicePath,
+				}
+				out, err := resolve.CombinedOutput()
+				if err != nil {
+					t.Fatalf("the fixture executables do not resolve from another cwd with the service PATH: %v\n%s", err, out)
+				}
+				wantResolved := []string{
+					filepath.Join(root, tc.sohoDir, "soho"),
+					filepath.Join(root, tc.herdrDir, "herdr"),
+				}
+				gotResolved := strings.Split(strings.TrimSpace(string(out)), "\n")
+				if len(gotResolved) != len(wantResolved) {
+					t.Fatalf("the service PATH resolved %d paths from another cwd, want %d:\n%s", len(gotResolved), len(wantResolved), out)
+				}
+				for i := range gotResolved {
+					if canonical(gotResolved[i]) != canonical(wantResolved[i]) {
+						t.Fatalf("the service PATH resolved %q from another cwd, want %q", gotResolved[i], wantResolved[i])
+					}
+				}
+			}
+			got := strings.Split(servicePath, ":")
+			if len(got) != len(want) {
+				t.Fatalf("service PATH has %d entries, want %d:\n%s", len(got), len(want), stdout.String())
+			}
+			for i := range got {
+				got[i] = canonical(got[i])
+				want[i] = canonical(want[i])
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("service PATH = %q, want %q:\n%s", got, want, stdout.String())
+			}
+			for _, entry := range got {
+				if entry == canonical(extra) {
+					t.Fatalf("the service PATH copied the interactive entry %q", extra)
+				}
+			}
+			herdrWarning := "nau install: warning: herdr not found on the PATH; the agent may report soho_unavailable"
+			if gotWarning := strings.Contains(stderr.String(), herdrWarning); gotWarning != tc.herdrWarning {
+				t.Fatalf("herdr warning present = %v, want %v:\n%s", gotWarning, tc.herdrWarning, stderr.String())
+			}
+			sohoWarning := "nau install: warning: soho not found on the PATH"
+			if gotWarning := strings.Contains(stderr.String(), sohoWarning); gotWarning != (tc.sohoDir == "") {
+				t.Fatalf("soho warning present = %v, want soho missing:\n%s", gotWarning, stderr.String())
+			}
+			plutilLint(t, stdout.String())
+		})
 	}
 }
 
@@ -1378,8 +1688,8 @@ func TestInstallPs1AgentRestartOnRerun(t *testing.T) {
 	if len(lines) != 3 || lines[0] != "get nau agent" || lines[1] != "stop nau agent" || lines[2] != "start nau agent" {
 		t.Fatalf("the no-flag re-run must query, stop and start the task and nothing else:\n%s", strings.Join(lines, "\n"))
 	}
-	if !strings.Contains(out, "nau install: agent running") {
-		t.Fatalf("the fresh health wait did not report the agent running:\n%s", out)
+	if !strings.Contains(out, "nau install: the agent service started; run nau doctor to check delivery") {
+		t.Fatalf("the fresh health wait did not report the service started:\n%s", out)
 	}
 	if _, err := os.Stat(stateFile); err != nil {
 		t.Fatalf("the fresh health file did not appear after the restart: %v", err)
