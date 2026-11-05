@@ -96,17 +96,32 @@ agent_add_path_entry() {
     esac
 }
 
-# Build the service PATH: the bin directory, the soho directory
-# (resolved on the PATH at install time) and the system directories, in
-# that order and without duplication. A missing soho only warns: the
-# agent runs and reports soho_unavailable.
+# A directory as an absolute path: command -v answers with a relative
+# pathname when the PATH entry is relative, and the service starts
+# from another cwd. Keep navigation preferences and output out of PATH.
+agent_abs_dir() {
+    (CDPATH=; export CDPATH; cd "$1" >/dev/null 2>&1 && pwd)
+}
+
+# Build the service PATH: the bin directory, the soho directory and the
+# herdr directory (both resolved on the PATH at install time, as
+# absolute paths) and the system directories, in that order and without
+# duplication. A missing soho or herdr only warns: the agent runs and
+# reports what is missing.
 agent_build_service_path() {
     AGENT_PATH_ENTRIES=""
     agent_add_path_entry "$ABS_BIN_DIR"
-    if AGENT_SOHO_BIN="$(command -v soho)"; then
-        agent_add_path_entry "$(dirname -- "$AGENT_SOHO_BIN")"
+    if AGENT_SOHO_BIN="$(command -v soho)" &&
+        AGENT_SOHO_DIR="$(agent_abs_dir "$(dirname -- "$AGENT_SOHO_BIN")")"; then
+        agent_add_path_entry "$AGENT_SOHO_DIR"
     else
         echo "nau install: warning: soho not found on the PATH; the agent will report soho_unavailable" >&2
+    fi
+    if AGENT_HERDR_BIN="$(command -v herdr)" &&
+        AGENT_HERDR_DIR="$(agent_abs_dir "$(dirname -- "$AGENT_HERDR_BIN")")"; then
+        agent_add_path_entry "$AGENT_HERDR_DIR"
+    else
+        echo "nau install: warning: herdr not found on the PATH; the agent may report soho_unavailable" >&2
     fi
     agent_add_path_entry /usr/bin
     agent_add_path_entry /bin
@@ -194,7 +209,7 @@ agent_health_check() {
     deadline=$(( $(date +%s) + 20 ))
     while :; do
         if [ -f "$AGENT_STATE" ] && [ "$AGENT_STATE" -nt "$AGENT_SINCE" ]; then
-            echo "nau install: agent running" >&2
+            echo "nau install: the agent service started; run nau doctor to check delivery" >&2
             return 0
         fi
         [ "$(date +%s)" -lt "$deadline" ] || break

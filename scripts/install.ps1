@@ -252,7 +252,7 @@ function Restart-AgentService {
     $stateFile = Get-AgentStateFile
     while ((Get-Date) -lt $deadline) {
         if ((Test-Path -LiteralPath $stateFile) -and ((Get-Item -LiteralPath $stateFile).LastWriteTime -ge $since)) {
-            Write-Host 'nau install: agent running'
+            Write-Host 'nau install: the agent service started; run nau doctor to check delivery'
             return
         }
         Start-Sleep -Milliseconds 500

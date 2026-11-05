@@ -78,7 +78,7 @@ What proves a change before this validation, each layer with the command that ru
 | Format, vet and build | `gofmt -l` on the tracked Go files, `go vet ./...`, `go build -o <dir>/nau ./cmd/nau` | CI, three systems |
 | Unit and handlers, with the memory store | `go test -timeout=30m ./...` | CI, three systems |
 | Race detector | `go test -race -timeout=30m ./...` | CI, three systems |
-| Integration with the real database | `NAU_TEST_SQLD_URL=<url> go test -count=1 -timeout=30m -tags sqld ./internal/hub/...` | Item 5 by hand; not in CI yet |
+| Integration with the real database | `NAU_TEST_SQLD_URL=<url> go test -count=1 -timeout=30m -tags sqld ./internal/hub/...` | CI, Linux with a disposable database; also item 5 by hand |
 | Web: types, lint, unit tests and build | `bun run typecheck`, `bun run lint`, `bun run test`, `bun run build`, in `web/` | CI |
 | Image smoke against the real database | the `Build and smoke` job of `image.yml`: health, index page, owner login, recovery absent from the public port | CI |
 | Mutation | one mutation per acceptance criterion, in a throwaway copy, named in the review | By hand, per change; no tool yet |
