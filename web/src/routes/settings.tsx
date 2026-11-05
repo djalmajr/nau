@@ -219,7 +219,7 @@ function HubCard() {
               </Button>
             </span>
           ) : (
-            <code className="font-mono">{data?.version}</code>
+            <code className="min-w-0 break-all text-right font-mono">{data?.version}</code>
           )}
         </div>
       </CardContent>
