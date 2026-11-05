@@ -3,7 +3,6 @@ import { Check, Copy, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
-  DialogClose,
   DialogContent,
   DialogHeader,
   DialogTitle,
@@ -11,18 +10,31 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ToastProvider, ToastViewport, useToast } from "@/components/ui/toast";
 import { ApiError } from "@/lib/api";
 import { useI18n } from "@/lib/i18n";
 import { useConfirmPairing } from "@/lib/queries";
 
-/** Modal "Conectar máquina": o título é fixo, para o modal ter nome acessível
- *  em todos os passos, e o conteúdo vive em `ConnectMachineBody`. Cada abertura
- *  monta um corpo novo (a `key`): o popup continua montado durante a animação de
- *  saída, e Escape, Tab e Enter reabrem o modal dentro dela. Assim, um envio ou
- *  uma cópia em andamento nunca alcança a abertura seguinte. O POST não é
- *  cancelado; se ele confirmar a máquina, a lista por trás atualiza do mesmo
- *  jeito (a invalidação vive na mutação). */
+/** "Connect machine" dialog: the title is fixed so the dialog keeps an
+ *  accessible name in every step, and the content lives in
+ *  `ConnectMachineBody`. Each opening mounts a fresh body (the `key`): the
+ *  popup stays mounted during its exit animation, where Escape, Tab and
+ *  Enter reopen it inside — so an in-flight submit or copy never reaches
+ *  the next opening. The POST is not cancelled; if it confirms the machine
+ *  the list behind refreshes the same way (invalidation lives in the
+ *  mutation). The toast provider stays mounted on the page, outside the
+ *  dialog: on success the dialog closes and the confirmation shows as a
+ *  toast outside it, surviving the popup exit. */
 export function ConnectMachineDialog() {
+  return (
+    <ToastProvider>
+      <ConnectMachineDialogInner />
+      <ToastViewport />
+    </ToastProvider>
+  );
+}
+
+function ConnectMachineDialogInner() {
   const { t } = useI18n();
   const [open, setOpen] = React.useState(false);
   const [opening, setOpening] = React.useState(0);
@@ -43,27 +55,38 @@ export function ConnectMachineDialog() {
         <DialogHeader>
           <DialogTitle>{t("connect.title")}</DialogTitle>
         </DialogHeader>
-        <ConnectMachineBody key={opening} />
+        <ConnectMachineBody close={() => setOpen(false)} key={opening} open={open} />
       </DialogContent>
     </Dialog>
   );
 }
 
-/** Passo 1: o comando `nau connect <origin>` (montado de
- *  `window.location.origin`) com copiar. Passo 2: o código XXXX-XXXX (com ou
- *  sem hífen), que chama POST /api/pairings/confirm. No sucesso a lista por
- *  trás atualiza sozinha e o botão de sucesso fecha o modal. */
-function ConnectMachineBody() {
+/** Step 1: the `nau connect <origin>` command (built from
+ *  `window.location.origin`) with copy. Step 2: the XXXX-XXXX code (hyphen
+ *  optional) that calls POST /api/pairings/confirm. On success the dialog
+ *  closes, focus returns to the trigger and a toast notifies outside it;
+ *  errors stay in the open dialog. `open` is the dialog's current state: a
+ *  late response only notifies if the opening is still open. */
+function ConnectMachineBody({ close, open }: { close: () => void; open: boolean }) {
   const { t } = useI18n();
   const command = `nau connect ${window.location.origin}`;
+  const { add } = useToast();
 
   const [code, setCode] = React.useState("");
   const [copied, setCopied] = React.useState(false);
   const [error, setError] = React.useState("");
-  const [success, setSuccess] = React.useState(false);
   const confirm = useConfirmPairing();
 
-  // O indicador dura 2 s, e o timer morre junto com o corpo.
+  // Latest `open`: the POST `then` is a promise continuation that does not
+  // re-render, so it reads from a ref. A confirmation arriving after the
+  // user closed the dialog notifies nothing and does not touch the next
+  // opening; the mutation's invalidation still refetches the list.
+  const openRef = React.useRef(open);
+  React.useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  // The indicator lasts 2 s and the timer dies with the body.
   React.useEffect(() => {
     if (!copied) return undefined;
     const timer = setTimeout(() => setCopied(false), 2000);
@@ -75,8 +98,8 @@ function ConnectMachineBody() {
       await navigator.clipboard.writeText(command);
       setCopied(true);
     } catch {
-      // clipboard indisponível (permissão, contexto inseguro): o comando
-      // continua visível para copiar manualmente.
+      // Clipboard unavailable (permission, insecure context): the command
+      // stays visible to copy manually.
     }
   }
 
@@ -84,13 +107,16 @@ function ConnectMachineBody() {
     event.preventDefault();
     if (!code.trim() || confirm.isPending) return;
     setError("");
-    // O servidor normaliza (hífen opcional, qualquer caixa); envia como
-    // digitado, apenas sem os espaços nas bordas.
+    // The server normalizes (hyphen optional, any case); send as typed,
+    // trimmed of the surrounding spaces.
     await confirm.mutateAsync(code.trim(), {}).then(
       () => {
-        setSuccess(true);
+        if (!openRef.current) return; // opening already closed: late response
+        add({ title: t("connect.success") });
+        close();
       },
       (err) => {
+        if (!openRef.current) return; // late error does not reach the next opening
         if (err instanceof ApiError) {
           if (err.status === 400) setError(t("connect.invalidCode"));
           else if (err.status === 429) setError(t("connect.rateLimited"));
@@ -99,15 +125,6 @@ function ConnectMachineBody() {
           setError(t("errors.generic"));
         }
       },
-    );
-  }
-
-  if (success) {
-    return (
-      <div className="space-y-3" role="status">
-        <p className="text-sm font-medium">{t("connect.success")}</p>
-        <DialogClose render={<Button size="sm" variant="outline" />}>{t("connect.successLink")}</DialogClose>
-      </div>
     );
   }
 
