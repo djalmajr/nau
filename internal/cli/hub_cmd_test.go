@@ -369,6 +369,7 @@ func doPost(t *testing.T, url, body string) httpResponse {
 	if err != nil {
 		t.Fatalf("read %s: %v", url, err)
 	}
+	assertListenerPolicy(t, resp.Header)
 	return httpResponse{status: resp.StatusCode, body: string(b), headers: resp.Header}
 }
 
@@ -383,6 +384,7 @@ func doGet(t *testing.T, url string) httpResponse {
 	if err != nil {
 		t.Fatalf("read %s: %v", url, err)
 	}
+	assertListenerPolicy(t, resp.Header)
 	return httpResponse{status: resp.StatusCode, body: string(b), headers: resp.Header}
 }
 
@@ -1134,10 +1136,13 @@ func TestHubServeRootTokenRoute(t *testing.T) {
 	}
 	fwd.Header.Set("Content-Type", "application/json")
 	fwd.Header.Set("X-Forwarded-For", "10.0.0.1")
+	fwd.Header.Set("Forwarded", "proto=https")
+	fwd.Header.Set("X-Forwarded-Proto", "https")
 	fwdResp, err := hubProbeClient.Do(fwd)
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertListenerPolicy(t, fwdResp.Header)
 	fwdBody, _ := io.ReadAll(fwdResp.Body)
 	fwdResp.Body.Close()
 	assertSameResponse(t, "the public port with a forwarding header",
@@ -1392,5 +1397,23 @@ func TestHubServeRootTokenValidBytes(t *testing.T) {
 				t.Fatal("root token leaked")
 			}
 		})
+	}
+}
+
+func assertListenerPolicy(t *testing.T, h http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+	} {
+		if values := h.Values(name); len(values) != 1 || values[0] != want {
+			t.Errorf("%s = %q, want one %q", name, values, want)
+		}
+	}
+	for _, name := range []string{"Strict-Transport-Security", "Location"} {
+		if _, present := h[name]; present {
+			t.Errorf("unexpected %s", name)
+		}
 	}
 }

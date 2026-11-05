@@ -116,7 +116,7 @@ func newEventsTest(t *testing.T, poll, ping, lifetime time.Duration, maxStreams,
 	if err != nil {
 		t.Fatalf("NewEvents: %v", err)
 	}
-	srv := httptest.NewServer(ev)
+	srv := httptest.NewServer(NewServer(WithEvents(http.NotFoundHandler(), ev)).Handler)
 	t.Cleanup(func() {
 		ev.Stop()
 		srv.Close()
@@ -248,6 +248,7 @@ func openStream(t *testing.T, url string, hdr map[string]string) *http.Response 
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertResponsePolicy(t, resp.Header)
 	return resp
 }
 
@@ -628,7 +629,7 @@ func TestEventsThroughTheRouter(t *testing.T) {
 	core := hub.New(hub.Deps{Store: st, Now: func() time.Time { return time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC) }, Version: "v1"}, nil)
 	mux := WithEvents(New(core), e.ev)
 	e.fx.setSessionOK(false)
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(NewServer(mux).Handler)
 	defer srv.Close()
 	// The route answers the stream's 401, not the router's 404.
 	resp := openStream(t, srv.URL+eventsPath, nil)
@@ -645,6 +646,7 @@ func TestEventsThroughTheRouter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertResponsePolicy(t, r2.Header)
 	b2, _ := io.ReadAll(r2.Body)
 	r2.Body.Close()
 	if r2.StatusCode != http.StatusNotFound || string(b2) != `{"error":"not_found"}` {
@@ -697,7 +699,7 @@ func newBlockedEventsTest(t *testing.T, lifetime, readTimeout time.Duration) *ev
 	if err != nil {
 		t.Fatalf("NewEvents: %v", err)
 	}
-	srv := httptest.NewServer(ev)
+	srv := httptest.NewServer(NewServer(WithEvents(http.NotFoundHandler(), ev)).Handler)
 	t.Cleanup(func() {
 		ev.Stop()
 		srv.Close()
@@ -788,7 +790,7 @@ func TestEventsBlockedOpeningSessionIs503(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEvents: %v", err)
 	}
-	srv := httptest.NewServer(ev)
+	srv := httptest.NewServer(NewServer(WithEvents(http.NotFoundHandler(), ev)).Handler)
 	t.Cleanup(func() {
 		ev.Stop()
 		srv.Close()
