@@ -46,7 +46,7 @@ describe("connect machine dialog", () => {
     expect(within(dialog).getByRole("button", { name: "Copiado" })).toBeInTheDocument();
   });
 
-  it("accepts the code with or without hyphen, shows success and the list behind refetches", async () => {
+  it("confirms the code (hyphen and case optional), closes the dialog, shows one success toast outside it, refetches the list and returns focus to the trigger", async () => {
     const user = userEvent.setup();
     const state = defaultHubState(); // código válido "abcd-efgh"
     renderHubApp("/machines", state);
@@ -63,18 +63,47 @@ describe("connect machine dialog", () => {
     await user.type(input, "ABCDEFGH"); // sem hífen, caixa alta
     await user.click(screen.getByRole("button", { name: "Conectar" }));
 
-    await screen.findByRole("status");
-    expect(screen.getByRole("status")).toHaveTextContent("Máquina conectada.");
-    // O modal continua com nome acessível depois de trocar de passo.
-    expect(screen.getByRole("dialog", { name: "Conectar máquina" })).toBeInTheDocument();
+    // Success closes the dialog on its own: the success step and its close
+    // button are gone from it, and the confirmation is born OUTSIDE the
+    // dialog, in the notifications region; it survives the dialog exit.
+    const toast = await screen.findByText("Máquina conectada.");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Conectar máquina" })).not.toBeInTheDocument());
+    const region = screen.getByRole("region", { name: "Notificações" });
+    expect(region).toContainElement(toast);
+    // Notifies once.
+    expect(screen.getAllByText("Máquina conectada.")).toHaveLength(1);
     expect(state.calls.some((call) => call.method === "POST" && call.url === "/api/pairings/confirm")).toBe(true);
 
-    // O sucesso invalida as máquinas: a lista por trás refaz a consulta sem
-    // o usuário fazer nada (a invalidação da mutação); o botão de sucesso
-    // fecha o modal.
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Ver máquinas" }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Success invalidates the machines: the list behind refetches on its
+    // own (the mutation's invalidation).
     await waitFor(() => expect(machineCalls()).toBeGreaterThan(before));
+    // Focus returns to the button that opened the dialog.
+    expect(trigger).toHaveFocus();
+  });
+
+  it("dismisses the success toast by keyboard with its labeled button, and focus does not stay inside the toast region", async () => {
+    const user = userEvent.setup();
+    renderHubApp("/machines", defaultHubState());
+
+    await user.click(await screen.findByRole("button", { name: "Conectar máquina" }));
+    await user.type(await screen.findByLabelText("Código XXXX-XXXX"), "abcd-efgh");
+    await user.click(screen.getByRole("button", { name: "Conectar" }));
+    await screen.findByText("Máquina conectada.");
+
+    // Keyboard path: focusing the notifications region expands the toast
+    // and puts its labeled dismiss in the accessibility tree (Base UI
+    // contract for the collapsed state). The toast did not steal focus
+    // when it appeared.
+    const region = screen.getByRole("region", { name: "Notificações" });
+    region.focus();
+    const dismiss = await screen.findByRole("button", { name: "Descartar" });
+    // Next keyboard step: focus moves from the region to the dismiss and
+    // Enter activates it.
+    dismiss.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(screen.queryByText("Máquina conectada.")).not.toBeInTheDocument());
+
+    expect(region.contains(document.activeElement)).toBe(false);
   });
 
   it("maps 400 to the invalid-code message", async () => {
@@ -99,7 +128,34 @@ describe("connect machine dialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Muitas tentativas. Tente de novo em alguns minutos.");
   });
 
-  it("resets the state (code, error, success and copied) when closed and reopened", async () => {
+  it("keeps a generic (500) error in the open dialog, without a toast", async () => {
+    const user = userEvent.setup();
+    renderHubApp("/machines", defaultHubState({ pairingFail: 500 }));
+
+    await user.click(await screen.findByRole("button", { name: "Conectar máquina" }));
+    const input = await screen.findByLabelText("Código XXXX-XXXX");
+    await user.type(input, "abcd-efgh");
+    await user.click(screen.getByRole("button", { name: "Conectar" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Algo deu errado. Tente novamente.");
+    // The generic error keeps the dialog open and shows no toast.
+    expect(screen.getByRole("dialog", { name: "Conectar máquina" })).toBeInTheDocument();
+    expect(screen.queryByText("Máquina conectada.")).not.toBeInTheDocument();
+  });
+
+  it("submits once: the submit button disables while the request is in flight and a second click starts no second request", async () => {
+    const user = userEvent.setup();
+    const { release, state } = await submitAndHold(user);
+
+    const submit = screen.getByRole("button", { name: "Conectar" });
+    expect(submit).toBeDisabled();
+    await user.click(submit); // disabled: no second POST
+
+    release();
+    await screen.findByText("Máquina conectada.");
+    expect(state.calls.filter((call) => call.method === "POST" && call.url === "/api/pairings/confirm")).toHaveLength(1);
+  });
+
+  it("resets the state (code, error and copied) when closed and reopened", async () => {
     const user = userEvent.setup();
     renderHubApp("/machines", defaultHubState({ pairingFail: 400 }));
 
@@ -145,7 +201,7 @@ describe("connect machine dialog", () => {
     return { release, state };
   }
 
-  it("does not let a submit that succeeds after closing reach the reopened dialog, and still refetches the list", async () => {
+  it("does not let a submit that succeeds after closing reach the reopened dialog, or show a stale success toast, and still refetches the list", async () => {
     const user = userEvent.setup();
     const { release, state } = await submitAndHold(user);
     const dialog = await closeAndReopen(user);
@@ -157,6 +213,8 @@ describe("connect machine dialog", () => {
     await waitFor(() => expect(machineCalls()).toBeGreaterThan(before));
 
     expect(within(dialog).queryByRole("status")).not.toBeInTheDocument();
+    // A late success shows no toast for the opening that already closed.
+    expect(screen.queryByText("Máquina conectada.")).not.toBeInTheDocument();
     expect(within(dialog).getByLabelText("Código XXXX-XXXX")).toHaveValue("");
   });
 
@@ -256,6 +314,10 @@ describe("connect machine dialog", () => {
       await new Promise((resolve) => setTimeout(resolve, 50));
     });
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    // The success of the already-closed opening shows no toast: its body is
+    // still mounted during the exit; what decides is whether the dialog is
+    // open when the response arrives.
+    expect(screen.queryByText("Máquina conectada.")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Código XXXX-XXXX")).toHaveValue("");
   });
 

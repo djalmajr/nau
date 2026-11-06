@@ -219,6 +219,27 @@ agent_health_check() {
     exit 1
 }
 
+# Bootstrap the service, retrying the native exit 5 (an observed
+# Input/output error right after the bootout of the same job) at the
+# same domain and plist path, at most 40 attempts 0.5 s apart. The
+# bound is the attempt count, so the loop never reads the wall clock.
+# Any other nonzero exit fails immediately with its own code; an
+# exhausted budget keeps the last failure, which is then exit 5.
+agent_bootstrap() {
+    domain="$1"
+    plist="$2"
+    attempt=1
+    while :; do
+        launchctl bootstrap "$domain" "$plist" && return 0
+        code=$?
+        [ "$code" -eq 5 ] || exit "$code"
+        [ "$attempt" -lt 40 ] || exit 5
+        echo "nau install: launchctl bootstrap exited 5 (attempt $attempt of 40); retrying" >&2
+        attempt=$((attempt + 1))
+        sleep 0.5
+    done
+}
+
 # (Re)start the agent LaunchAgent and wait for its fresh health file.
 # $1 is 1 when the plist was rewritten with different content: a
 # loaded job is then bootout and bootstrapped, otherwise it is
@@ -235,11 +256,11 @@ agent_restart_service() {
     AGENT_SINCE="$(mktemp)"
     if [ "$loaded" -eq 1 ] && [ "$changed" -eq 1 ]; then
         launchctl bootout "gui/$uid/$AGENT_LABEL"
-        launchctl bootstrap "gui/$uid" "$AGENT_PLIST"
+        agent_bootstrap "gui/$uid" "$AGENT_PLIST"
     elif [ "$loaded" -eq 1 ]; then
         launchctl kickstart -k "gui/$uid/$AGENT_LABEL"
     else
-        launchctl bootstrap "gui/$uid" "$AGENT_PLIST"
+        agent_bootstrap "gui/$uid" "$AGENT_PLIST"
     fi
     agent_health_check
 }

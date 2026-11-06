@@ -9,6 +9,9 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Bound DOM suite concurrency on shared development and CI hosts.
+    minWorkers: 1,
+    maxWorkers: 2,
     globals: true,
     setupFiles: ["./src/test/setup.ts"],
     include: ["src/**/*.test.{ts,tsx}"],

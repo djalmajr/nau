@@ -80,7 +80,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // given handler.
 func NewServer(h http.Handler) *http.Server {
 	return &http.Server{
-		Handler:           h,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			h.ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: ReadHeaderTimeout,
 		ReadTimeout:       ReadTimeout,
 		WriteTimeout:      WriteTimeout,

@@ -30,6 +30,7 @@ const (
 	hubDefaultListen         = "127.0.0.1:7440"
 	hubDefaultRecoveryListen = "127.0.0.1:7441"
 	hubStartupTimeout        = 10 * time.Second
+	hubReadinessInterval     = 100 * time.Millisecond
 	hubShutdownTimeout       = 10 * time.Second
 	hubEnvDBURL              = "NAU_HUB_DB_URL"
 	hubEnvDBToken            = "NAU_HUB_DB_TOKEN"
@@ -308,9 +309,15 @@ func cmdHubServe(args []string, env Env) int {
 		fail(env, 2, "hub serve: "+err.Error())
 		return 2
 	}
-	// The migrations run at startup, bounded; a failure exits 4 with a
-	// stderr line. The errors of the store never carry the token.
+	// Readiness, migrations and owner seed share one startup budget. Only
+	// the read-only probe is retried; a write may have committed even when
+	// its response was lost.
 	migCtx, migCancel := context.WithTimeout(context.Background(), hubStartupTimeout)
+	if err := waitHubReady(migCtx, st, env.Sleep); err != nil {
+		migCancel()
+		fail(env, 4, "hub serve: readiness: "+err.Error())
+		return 4
+	}
 	if err := (&migrate.Runner{Store: st, Now: env.Now}).Apply(migCtx); err != nil {
 		migCancel()
 		fail(env, 4, "hub serve: migrations: "+err.Error())
@@ -510,4 +517,23 @@ func cmdHubServe(args []string, env Env) int {
 		_ = closeRoot()
 	}
 	return code
+}
+
+// waitHubReady probes without replaying any migration or owner write.
+func waitHubReady(ctx context.Context, st store.Store, sleep func(context.Context, time.Duration) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := st.Ping(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err == nil {
+			return nil
+		}
+		if err := sleep(ctx, hubReadinessInterval); err != nil {
+			return err
+		}
+	}
 }

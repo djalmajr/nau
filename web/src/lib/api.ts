@@ -215,8 +215,8 @@ export interface Agent {
   name: string;
   role: string;
   kind: string;
-  model: string;
-  effort: string;
+  model: string | null;
+  effort: string | null;
   state: AgentState;
   reason: AgentReason | null;
   task: string | null;

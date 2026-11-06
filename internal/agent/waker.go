@@ -126,6 +126,13 @@ func (h *HCEvents) run(ctx context.Context) {
 		// bound ends a healthy stream, the retry below restarts it.
 		w := &lineSignal{ch: h.ch}
 		_, _ = h.Runner.Run(ctx, []string{"events"}, nil, w, io.Discard, 0)
+		// Run may return before output delivery finishes. Join this attempt's
+		// wake hints before reconnecting, without holding cancellation on delivery.
+		select {
+		case <-h.Runner.DrainDone():
+		case <-ctx.Done():
+			return
+		}
 		if ctx.Err() != nil {
 			return
 		}

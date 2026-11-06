@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1023,6 +1024,323 @@ esac
 	}
 	if !strings.Contains(out, "nau install: installed") {
 		t.Fatalf("the install did not complete:\n%s", out)
+	}
+}
+
+// TestInstallShAgentBootstrapRetry: a native launchctl bootstrap can
+// exit 5 (an observed Input/output error right after the bootout of
+// the same job); the installer must retry only that exit, at the same
+// domain and plist path, at most 40 attempts 0.5 s apart, bound by
+// the attempt count alone. A recovered bootstrap still goes through
+// the fresh-health check and the service-started wording; a
+// permanent 5 exhausts the bound and exits 5 without reporting the
+// install or the service as started; any other nonzero exit fails
+// immediately with its own code. launchctl, sleep and date are
+// fixtures on the PATH: every native call lands in a trace with the
+// exit code the fixture chose, the retry delay is instant, and the
+// wall clock can be driven backward.
+//
+// Mutation captured: removing the retry after the first bootstrap 5
+// turns the two recovery cases red (the installer exits 5 on the
+// first attempt); dropping the attempt bound turns the exhaustion
+// cases red (more than 40 bootstrap attempts).
+func TestInstallShAgentBootstrapRetry(t *testing.T) {
+	sh := shAvailable(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent LaunchAgent is macOS only; other platforms refuse the flag")
+	}
+	buildDir := t.TempDir()
+	nau := filepath.Join(buildDir, "nau")
+	helper := filepath.Join(buildDir, "helper")
+	installerBuild(t, nau, "../cmd/nau")
+	installerBuild(t, helper, "./testdata/installhelper")
+	helperBytes, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The launchctl fixture records every call with the exit code it
+	// chose, counts the bootstrap attempts, and writes the fresh
+	// health file only when a bootstrap succeeds.
+	const launchctlFixture = `#!/bin/sh
+code=0
+case "$1" in
+print)
+    code="${FAKE_LAUNCHCTL_PRINT_EXIT:-1}"
+    ;;
+bootout)
+    code=0
+    ;;
+bootstrap)
+    n=1
+    if [ -f "$FAKE_LAUNCHCTL_COUNT" ]; then
+        n=$(( $(cat "$FAKE_LAUNCHCTL_COUNT") + 1 ))
+    fi
+    printf '%s\n' "$n" > "$FAKE_LAUNCHCTL_COUNT"
+    if [ "$n" -le "${FAKE_LAUNCHCTL_BOOTSTRAP_FAIL_TIMES:-0}" ]; then
+        code="${FAKE_LAUNCHCTL_BOOTSTRAP_EXIT:-5}"
+    else
+        sleep 1.1
+        if [ -n "${FAKE_LAUNCHCTL_STATE:-}" ]; then
+            mkdir -p "$(dirname -- "$FAKE_LAUNCHCTL_STATE")"
+            date > "$FAKE_LAUNCHCTL_STATE"
+        fi
+        code=0
+    fi
+    ;;
+*)
+    code=0
+    ;;
+esac
+echo "launchctl $* exit=$code" >> "$FAKE_LAUNCHCTL_TRACE"
+exit "$code"
+`
+	// The sleep fixture makes the 0.5 s retry delays instant while
+	// counting them.
+	const sleepFixture = `#!/bin/sh
+echo "sleep $*" >> "$FAKE_SLEEP_TRACE"
+exit 0
+`
+	// The date fixture answers every call with a wall clock that
+	// moves backward one second per call.
+	const dateFixture = `#!/bin/sh
+n=1
+if [ -f "$FAKE_DATE_COUNT" ]; then
+    n=$(( $(cat "$FAKE_DATE_COUNT") + 1 ))
+fi
+printf '%s\n' "$n" > "$FAKE_DATE_COUNT"
+echo "$((1000000 - n))"
+`
+	cases := []struct {
+		name           string
+		loaded         bool // launchctl print exits 0: the job is loaded
+		prePlist       bool // a pre-existing different plist: a changed rewrite
+		failTimes      int  // bootstrap attempts the fixture exits nonzero for first
+		failExit       int  // the code of those attempts
+		fakeSleep      bool // instant counted sleep on the PATH
+		backwardDate   bool // backward wall clock on the PATH
+		wantExit       int
+		wantBootstraps int
+		wantSleeps     int
+	}{
+		{
+			name:           "first bootstrap success stays a single call",
+			failTimes:      0,
+			failExit:       5,
+			wantExit:       0,
+			wantBootstraps: 1,
+		},
+		{name: "changed loaded job recovers from one bootstrap 5", loaded: true, prePlist: true, failTimes: 1, failExit: 5, wantExit: 0, wantBootstraps: 2},
+		{name: "unloaded service recovers from one bootstrap 5", failTimes: 1, failExit: 5, wantExit: 0, wantBootstraps: 2},
+		{name: "permanent 5 exhausts the 40 attempt bound", failTimes: 100, failExit: 5, fakeSleep: true, wantExit: 5, wantBootstraps: 40, wantSleeps: 39},
+		{name: "non-5 bootstrap exit fails immediately with its code", failTimes: 100, failExit: 7, fakeSleep: true, wantExit: 7, wantBootstraps: 1},
+		{name: "backward wall clock does not move the attempt bound", failTimes: 100, failExit: 5, fakeSleep: true, backwardDate: true, wantExit: 5, wantBootstraps: 40, wantSleeps: 39},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "fixture space")
+			home := filepath.Join(root, "home space")
+			fakeBin := filepath.Join(root, "fake space")
+			goDir := filepath.Join(root, "go space")
+			backendDir := filepath.Join(root, "backend space")
+			tmp := filepath.Join(root, "temp space")
+			bin := filepath.Join(root, "bin space")
+			for _, dir := range []string{home, fakeBin, goDir, backendDir, tmp, bin} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for path, data := range map[string][]byte{
+				filepath.Join(goDir, "go"):          helperBytes,
+				filepath.Join(backendDir, "soho"):   helperBytes,
+				filepath.Join(fakeBin, "launchctl"): []byte(launchctlFixture),
+			} {
+				if err := os.WriteFile(path, data, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.fakeSleep {
+				if err := os.WriteFile(filepath.Join(fakeBin, "sleep"), []byte(sleepFixture), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.backwardDate {
+				if err := os.WriteFile(filepath.Join(fakeBin, "date"), []byte(dateFixture), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// hub.json, so --agent installs the service.
+			cfgDir := filepath.Join(home, ".config", "nau")
+			if err := os.MkdirAll(cfgDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfgDir, "hub.json"), []byte("{}\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			plistDir := filepath.Join(home, "Library", "LaunchAgents")
+			plist := filepath.Join(plistDir, "djalmajr.nau.agent.plist")
+			if tc.prePlist {
+				if err := os.MkdirAll(plistDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(plist, []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>Label</key><string>djalmajr.nau.agent</string></dict></plist>
+`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			trace := filepath.Join(tmp, "launchctl.trace")
+			sleepTrace := filepath.Join(tmp, "sleep.trace")
+			stateFile := filepath.Join(cfgDir, "agent-state.json")
+			env := []string{
+				"HOME=" + home,
+				"XDG_CONFIG_HOME=" + filepath.Join(home, ".config"),
+				"APPDATA=" + filepath.Join(home, "appdata"),
+				"LOCALAPPDATA=" + filepath.Join(home, "local"),
+				"TMPDIR=" + tmp,
+				"TEMP=" + tmp,
+				"TMP=" + tmp,
+				"PATH=" + strings.Join([]string{fakeBin, goDir, backendDir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"}, ":"),
+				"INSTALL_FIXTURE_NAU=" + nau,
+				"FAKE_LAUNCHCTL_TRACE=" + trace,
+				"FAKE_LAUNCHCTL_COUNT=" + filepath.Join(tmp, "bootstrap.count"),
+				"FAKE_LAUNCHCTL_BOOTSTRAP_FAIL_TIMES=" + strconv.Itoa(tc.failTimes),
+				"FAKE_LAUNCHCTL_BOOTSTRAP_EXIT=" + strconv.Itoa(tc.failExit),
+				"FAKE_LAUNCHCTL_STATE=" + stateFile,
+			}
+			if tc.loaded {
+				env = append(env, "FAKE_LAUNCHCTL_PRINT_EXIT=0")
+			}
+			if tc.fakeSleep {
+				env = append(env, "FAKE_SLEEP_TRACE="+sleepTrace)
+			}
+			if tc.backwardDate {
+				env = append(env, "FAKE_DATE_COUNT="+filepath.Join(tmp, "date.count"))
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), installerRunBound)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, sh, "install.sh", "--bin-dir", bin, "--agent")
+			cmd.WaitDelay = time.Second
+			cmd.Env = env
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			runErr := cmd.Run()
+			out := stdout.String() + stderr.String()
+			code := 0
+			if runErr != nil {
+				if ctx.Err() != nil {
+					t.Fatalf("installer did not finish within %s: %s", installerRunBound, out)
+				}
+				var exit *exec.ExitError
+				if !errors.As(runErr, &exit) {
+					t.Fatalf("installer failed: %v\n%s", runErr, out)
+				}
+				code = exit.ExitCode()
+			}
+			if code != tc.wantExit {
+				t.Fatalf("installer exit=%d want=%d:\n%s", code, tc.wantExit, out)
+			}
+			traceData, err := os.ReadFile(trace)
+			if err != nil {
+				t.Fatalf("the launchctl trace is missing: %v\n%s", err, out)
+			}
+			var lines []string
+			for _, line := range strings.Split(string(traceData), "\n") {
+				if line != "" {
+					lines = append(lines, line)
+				}
+			}
+			// The exact expected sequence: one print (exiting 0 when the
+			// job is loaded, 1 otherwise), the bootout when a loaded job
+			// is rewritten, then the bootstrap attempts, all at the same
+			// domain and plist path.
+			printExit := 1
+			if tc.loaded {
+				printExit = 0
+			}
+			printRe := regexp.MustCompile(`^launchctl print gui/(\d+)/djalmajr\.nau\.agent exit=` + strconv.Itoa(printExit) + `$`)
+			want := []string{}
+			uid := ""
+			for _, line := range lines {
+				if m := printRe.FindStringSubmatch(line); m != nil {
+					uid = m[1]
+					break
+				}
+			}
+			if uid == "" {
+				t.Fatalf("the launchctl trace has no print query:\n%s", traceData)
+			}
+			want = append(want, "launchctl print gui/"+uid+"/djalmajr.nau.agent exit="+strconv.Itoa(printExit))
+			if tc.loaded {
+				want = append(want, "launchctl bootout gui/"+uid+"/djalmajr.nau.agent exit=0")
+			}
+			bootstrapCmd := "launchctl bootstrap gui/" + uid + " " + plist
+			for i := 1; i <= tc.wantBootstraps; i++ {
+				if i <= tc.failTimes {
+					want = append(want, bootstrapCmd+" exit="+strconv.Itoa(tc.failExit))
+				} else {
+					want = append(want, bootstrapCmd+" exit=0")
+				}
+			}
+			if len(lines) != len(want) {
+				t.Fatalf("the launchctl trace has %d calls, want %d:\n%s", len(lines), len(want), traceData)
+			}
+			for i := range want {
+				if lines[i] != want[i] {
+					t.Fatalf("launchctl call %d = %q, want %q:\n%s", i+1, lines[i], want[i], traceData)
+				}
+			}
+			sleeps := 0
+			if sleepData, err := os.ReadFile(sleepTrace); err == nil {
+				for _, line := range strings.Split(string(sleepData), "\n") {
+					if line != "" {
+						sleeps++
+					}
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if sleeps != tc.wantSleeps {
+				t.Fatalf("the retry delay ran %d times, want %d", sleeps, tc.wantSleeps)
+			}
+			started := "nau install: the agent service started; run nau doctor to check delivery"
+			if tc.wantExit == 0 {
+				if !strings.Contains(stderr.String(), started) {
+					t.Fatalf("the fresh health wait did not report the service started:\n%s", out)
+				}
+				if tc.wantExit == 0 && tc.failTimes > 0 {
+					retryNote := "nau install: launchctl bootstrap exited 5 (attempt 1 of 40); retrying"
+					if !strings.Contains(stderr.String(), retryNote) {
+						t.Fatalf("the retried bootstrap 5 left no diagnostic on stderr:\n%s", stderr.String())
+					}
+				}
+				if _, err := os.Stat(stateFile); err != nil {
+					t.Fatalf("the fresh health file did not appear after the recovered bootstrap: %v", err)
+				}
+			} else {
+				if strings.Contains(out, started) {
+					t.Fatalf("a failed bootstrap reported the service started:\n%s", out)
+				}
+				if strings.Contains(out, "nau install: installed") {
+					t.Fatalf("a failed bootstrap reported the install completed:\n%s", out)
+				}
+				if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+					t.Fatalf("a failed bootstrap wrote the health file: %v", err)
+				}
+			}
+			// The executable and the plist publication are preserved
+			// over a bootstrap failure: no rollback, the generated plist
+			// stays in place.
+			if _, err := os.Stat(filepath.Join(bin, "nau")); err != nil {
+				t.Fatalf("the install did not reach the binary swap: %v", err)
+			}
+			plistData, err := os.ReadFile(plist)
+			if err != nil {
+				t.Fatalf("the plist is missing after the run: %v", err)
+			}
+			if !strings.Contains(string(plistData), "<key>KeepAlive</key>") {
+				t.Fatalf("the plist was not the generated one:\n%s", plistData)
+			}
+		})
 	}
 }
 

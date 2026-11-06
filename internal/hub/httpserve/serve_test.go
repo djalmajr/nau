@@ -3,9 +3,11 @@ package httpserve
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -442,5 +444,129 @@ func TestStaticFallbackThroughAdapter(t *testing.T) {
 	}
 	if string(b) != "<html>hub</html>" {
 		t.Fatalf("body = %q", b)
+	}
+}
+
+func assertResponsePolicy(t *testing.T, h http.Header) {
+	t.Helper()
+	for name, want := range map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+	} {
+		if got := h.Values(name); len(got) != 1 || got[0] != want {
+			t.Errorf("%s = %q, want one %q", name, got, want)
+		}
+	}
+	for _, name := range []string{"Strict-Transport-Security", "Location"} {
+		if _, present := h[name]; present {
+			t.Errorf("unexpected %s", name)
+		}
+	}
+}
+
+func TestNewServerResponsePolicy(t *testing.T) {
+	files := staticDirFS(t)
+	files["app.css"] = &fstest.MapFile{Data: []byte("body {}")}
+	files["font.woff2"] = &fstest.MapFile{Data: []byte("font")}
+	files["data.unknown"] = &fstest.MapFile{Data: []byte("data")}
+	for _, tc := range []struct {
+		name, method, path   string
+		status               int
+		over, down, noStatic bool
+	}{
+		{"root", "GET", "/", 200, false, false, false},
+		{"deep", "GET", "/deep/route", 200, false, false, false},
+		{"script", "GET", "/app.js", 200, false, false, false},
+		{"style", "GET", "/app.css", 200, false, false, false},
+		{"font", "GET", "/font.woff2", 200, false, false, false},
+		{"binary", "GET", "/data.unknown", 200, false, false, false},
+		{"invalid", "GET", "/a/../b", 404, false, false, false},
+		{"absent", "GET", "/", 404, false, false, true},
+		{"health", "GET", "/api/health", 200, false, false, false},
+		{"version", "GET", "/api/version", 200, false, false, false},
+		{"unknown", "GET", "/api/unknown", 404, false, false, false},
+		{"method", "POST", "/api/health", 405, false, false, false},
+		{"unavailable", "GET", "/api/health", 503, false, true, false},
+		{"early", "GET", "relative", 404, false, false, false},
+		{"api body", "POST", "/api/health", 413, true, false, false},
+		{"static body", "POST", "/", 413, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &countingStore{}
+			if tc.down {
+				st.err = errors.New("unavailable")
+			}
+			fs := files
+			if tc.noStatic {
+				fs = nil
+			}
+			core := hub.New(hub.Deps{Store: st, Now: time.Now, Version: "v1"}, fs)
+			adapter := New(core)
+			for _, values := range [][]string{nil, {""}, {" "}, {"https"}, {"HTTPS"}, {"é"}, {"https", "http"}, {strings.Repeat("x", 8192)}} {
+				request := func() *http.Request {
+					body := ""
+					if tc.over {
+						body = strings.Repeat("x", maxBody+1)
+					}
+					r := httptest.NewRequest(tc.method, "/", strings.NewReader(body))
+					r.URL.Path = tc.path
+					if values != nil {
+						r.Header["Forwarded"] = append([]string(nil), values...)
+						r.Header["X-Forwarded-Proto"] = append([]string(nil), values...)
+					}
+					return r
+				}
+				baseline := httptest.NewRecorder()
+				adapter.ServeHTTP(baseline, request())
+				got := httptest.NewRecorder()
+				r := request()
+				originalScheme := r.URL.Scheme
+				NewServer(adapter).Handler.ServeHTTP(got, r)
+				assertResponsePolicy(t, got.Header())
+				if got.Code != tc.status || got.Code != baseline.Code || got.Body.String() != baseline.Body.String() {
+					t.Fatalf("response = %d %q, baseline = %d %q", got.Code, got.Body.String(), baseline.Code, baseline.Body.String())
+				}
+				for _, name := range []string{"Content-Type", "Cache-Control", "Allow"} {
+					if !reflect.DeepEqual(got.Header().Values(name), baseline.Header().Values(name)) {
+						t.Errorf("%s changed", name)
+					}
+				}
+				if r.URL.Scheme != originalScheme {
+					t.Errorf("scheme changed: %q", r.URL.Scheme)
+				}
+				if tc.over && st.pings != 0 {
+					t.Fatal("rejected body reached core")
+				}
+			}
+		})
+	}
+}
+
+type deadlineWriter struct {
+	*httptest.ResponseRecorder
+	deadline time.Time
+}
+
+func (w *deadlineWriter) SetWriteDeadline(d time.Time) error { w.deadline = d; return nil }
+
+func TestNewServerPreservesWriter(t *testing.T) {
+	w := &deadlineWriter{ResponseRecorder: httptest.NewRecorder()}
+	for _, name := range []string{"Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options"} {
+		w.Header()[name] = []string{"", "stale"}
+	}
+	deadline := time.Now().Add(time.Second)
+	NewServer(http.HandlerFunc(func(got http.ResponseWriter, r *http.Request) {
+		if got != w {
+			t.Fatal("writer identity changed")
+		}
+		assertResponsePolicy(t, got.Header())
+		if err := http.NewResponseController(got).SetWriteDeadline(deadline); err != nil {
+			t.Fatal(err)
+		}
+		got.(http.Flusher).Flush()
+	})).Handler.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+	if !w.deadline.Equal(deadline) || !w.Flushed {
+		t.Fatal("deadline or flush lost")
 	}
 }
