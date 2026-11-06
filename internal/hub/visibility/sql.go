@@ -23,7 +23,7 @@ const (
 	sqlMachineShares = `SELECT machine_id, grantee_id FROM shares WHERE machine_id IN (`
 	// sqlLastSeen reads the received_ms of the last inventory of the
 	// machines.
-	sqlLastSeen = `SELECT machine_id, MAX(received_ms) FROM inventory_snapshots WHERE machine_id IN (`
+	sqlLastSeen = `SELECT machine_id, received_ms FROM inventory_snapshots WHERE machine_id IN (`
 	// sqlShare grants the machine to the developer, idempotently.
 	sqlShare = `INSERT OR IGNORE INTO shares (machine_id, grantee_id, created_ms) VALUES (?, ?, ?)`
 	// sqlHasShare checks the grant.
