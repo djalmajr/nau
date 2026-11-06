@@ -2,6 +2,7 @@ name: Go checks
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -113,3 +114,140 @@ jobs:
         env:
           NAU_TEST_SQLD_URL: http://localhost:${{ job.services.database.ports[8080] }}
         run: go test -count=1 -timeout=30m -tags sqld ./internal/hub/...
+
+  web-contract:
+    name: Observed web read contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: auto
+      GOMAXPROCS: 2
+      CGO_ENABLED: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve the native Go toolchain
+        shell: pwsh
+        run: |
+          if (Get-Command go -ErrorAction SilentlyContinue) { return }
+          $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
+          $toolcache = $env:RUNNER_TOOL_CACHE
+          if (-not $toolcache) { $toolcache = $env:AGENT_TOOLSDIRECTORY }
+          if (-not $toolcache) { throw "Go is not on PATH and the runner toolcache is unset" }
+          $bin = Get-ChildItem (Join-Path $toolcache 'go') -Directory |
+            Where-Object { $_.Name -match '^1\.(2[5-9]|[3-9]\d)\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            ForEach-Object { Join-Path $_.FullName "$arch/bin" } |
+            Where-Object { Test-Path (Join-Path $_ 'go') } |
+            Select-Object -First 1
+          if (-not $bin) { throw "A native Go 1.25 or newer toolcache entry was not found" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - name: Check actual responses against consumer types
+        shell: bash
+        run: |
+          set -euo pipefail
+          database=""
+          cleanup() {
+            if [ -n "$database" ]; then docker rm -f "$database" >/dev/null; fi
+          }
+          trap cleanup EXIT
+          database=$(docker run -d -p 127.0.0.1::8080 ghcr.io/tursodatabase/libsql-server:v0.24.31)
+          address=$(docker port "$database" 8080/tcp)
+          export NAU_TEST_SQLD_URL="http://${address}"
+          export NAU_TEST_SQLD_TOKEN=""
+          ready=""
+          for attempt in $(seq 1 30); do
+            if curl --max-time 2 --fail --silent "${NAU_TEST_SQLD_URL}/health" >/dev/null; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = 1
+          go test -count=1 -timeout=2m -tags 'sqld webcontract' ./internal/hub/machines -run '^TestWebReadContract$'
+
+  fuzz:
+    name: Ingest HTTP framing fuzz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: auto
+      GOMAXPROCS: 2
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Resolve the native Go toolchain
+        shell: pwsh
+        run: |
+          if (Get-Command go -ErrorAction SilentlyContinue) { return }
+          $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
+          $toolcache = $env:RUNNER_TOOL_CACHE
+          if (-not $toolcache) { $toolcache = $env:AGENT_TOOLSDIRECTORY }
+          if (-not $toolcache) { throw "Go is not on PATH and the runner toolcache is unset" }
+          $exe = if ($IsWindows) { 'go.exe' } else { 'go' }
+          $bin = Get-ChildItem (Join-Path $toolcache 'go') -Directory |
+            Where-Object { $_.Name -match '^1\.(2[5-9]|[3-9]\d)\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            ForEach-Object { Join-Path $_.FullName "$arch/bin" } |
+            Where-Object { Test-Path (Join-Path $_ $exe) } |
+            Select-Object -First 1
+          if (-not $bin) { throw "Go is not on PATH and a native Go 1.25 or newer toolcache entry was not found (GOTOOLCHAIN=auto then selects the go.mod toolchain)" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+      - name: Fuzz authenticated ingest framing
+        timeout-minutes: 5
+        run: go test -count=1 -timeout=3m ./internal/hub/machines -run '^$' -fuzz '^FuzzIngestHTTPFraming$' -fuzztime=30s -parallel=2
+
+  attribution:
+    name: Attribution policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GOTOOLCHAIN: auto
+    steps:
+      - name: Check out the candidate history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+        timeout-minutes: 3
+      - name: Resolve the native Go toolchain
+        shell: pwsh
+        run: |
+          if (Get-Command go -ErrorAction SilentlyContinue) { return }
+          $arch = if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
+          $toolcache = $env:RUNNER_TOOL_CACHE
+          if (-not $toolcache) { $toolcache = $env:AGENT_TOOLSDIRECTORY }
+          if (-not $toolcache) { throw "Go is not on PATH and the runner toolcache is unset" }
+          $exe = if ($IsWindows) { 'go.exe' } else { 'go' }
+          $bin = Get-ChildItem (Join-Path $toolcache 'go') -Directory |
+            Where-Object { $_.Name -match '^1\.(2[5-9]|[3-9]\d)\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            ForEach-Object { Join-Path $_.FullName "$arch/bin" } |
+            Where-Object { Test-Path (Join-Path $_ $exe) } |
+            Select-Object -First 1
+          if (-not $bin) { throw "Go is not on PATH and a native Go 1.25 or newer toolcache entry was not found (GOTOOLCHAIN=auto then selects the go.mod toolchain)" }
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+      - name: Build the attribution checker
+        timeout-minutes: 2
+        run: go build -o "$RUNNER_TEMP/attribution" ./internal/ci/attribution
+      - name: Check attribution
+        timeout-minutes: 3
+        env:
+          NAU_ATTRIBUTION_POLICY: ${{ vars.NAU_ATTRIBUTION_POLICY }}
+        run: '"$RUNNER_TEMP/attribution"'
